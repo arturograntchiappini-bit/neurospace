@@ -14,6 +14,7 @@ pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
 
 const TRASH_RELATIVE: &str = ".secondbrain/trash";
 const MARKDOWN_EXTENSION: &str = "md";
+const MAX_FILE_NAME_BYTES: usize = 255;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -435,14 +436,27 @@ fn temp_sibling(target: &Path) -> PathBuf {
 /// A trash location that is not taken yet: `<timestamp>-<flattened path>`, then `-1`, `-2`, ...
 fn free_trash_path(trash: &Path, path: &NotePath) -> Result<PathBuf> {
     let stamp = utc_compact(SystemTime::now());
-    let base = format!("{stamp}-{}", path.as_str().replace('/', "__"));
-    let mut candidate = trash.join(&base);
-    let mut suffix = 0_u32;
-    while lstat(&candidate)?.is_some() {
-        suffix += 1;
-        candidate = trash.join(format!("{base}-{suffix}"));
+    let flattened = path.as_str().replace('/', "__");
+    let mut suffix = String::new();
+    let mut counter = 0_u32;
+    loop {
+        let candidate = trash.join(trash_name(&stamp, &flattened, &suffix));
+        if lstat(&candidate)?.is_none() {
+            return Ok(candidate);
+        }
+        counter += 1;
+        suffix = format!("-{counter}");
     }
-    Ok(candidate)
+}
+
+/// `<stamp>-<flattened><suffix>` within `MAX_FILE_NAME_BYTES`: the flattened path loses its front first.
+fn trash_name(stamp: &str, flattened: &str, suffix: &str) -> String {
+    let budget = MAX_FILE_NAME_BYTES - stamp.len() - 1 - suffix.len();
+    let mut start = flattened.len().saturating_sub(budget);
+    while !flattened.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("{stamp}-{}{suffix}", &flattened[start..])
 }
 
 #[cfg(test)]
@@ -684,6 +698,34 @@ mod tests {
                 reason: IgnoreReason::TooLarge
             }]
         );
+    }
+
+    #[test]
+    fn should_delete_note_when_its_trash_name_would_be_too_long() {
+        let ascii = vec!["a".repeat(200); 4];
+        let mut accented = vec!["é".repeat(120); 3];
+        // One ASCII byte at the end makes the 255-byte cut fall inside a 2-byte character.
+        accented.push(format!("{}a", "é".repeat(119)));
+        for folders in [ascii, accented] {
+            let path = p(&format!("{}/n.md", folders.join("/")));
+            let (_dir, vault) = vault();
+            vault.write(&path, "body").unwrap();
+            vault.delete(&path).unwrap();
+            assert!(matches!(vault.read(&path), Err(CoreError::NotFound(_))));
+            let trashed: Vec<_> = fs::read_dir(vault.trash_dir())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            assert_eq!(trashed.len(), 1);
+            let name = trashed[0].file_name().unwrap().to_str().unwrap();
+            assert!(name.len() <= 255, "{} bytes", name.len());
+            assert!(name.as_bytes()[..16].ends_with(b"Z") && name.as_bytes()[16] == b'-');
+            assert!(name.ends_with("__n.md"));
+            assert_eq!(fs::read_to_string(&trashed[0]).unwrap(), "body");
+            vault.write(&path, "again").unwrap();
+            vault.delete(&path).unwrap();
+            assert_eq!(entry_count(&vault.trash_dir()), 2);
+        }
     }
 
     #[cfg(unix)]
