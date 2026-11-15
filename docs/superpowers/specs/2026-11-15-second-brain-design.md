@@ -153,6 +153,7 @@ Scanning walks the vault and returns the notes plus a list of ignored files with
 - A `.md` file whose relative path fails validation is ignored with reason `InvalidPath`.
 - When several files share one note key (possible on Linux only), the path that sorts first bytewise is the note; the others are ignored with reason `CaseCollision`.
 - A `.md` file that is not valid UTF-8 is ignored with reason `NotUtf8`.
+- A `.md` file that cannot be read (in use by another program, no permission) is ignored with reason `Unreadable`; the scan goes on.
 - A `.md` file larger than 4 MiB is ignored with reason `TooLarge`. Writing a note larger than that through the CLI, MCP or the GUI is refused.
 - Files without the `.md` extension are not notes and are not reported.
 
@@ -163,7 +164,7 @@ Ignored files are never indexed and never synced, and the sync engine never modi
 - Content is UTF-8 text. Bytes are preserved exactly: no line-ending normalisation, no trailing-newline fixing.
 - **Replacing a note is atomic:** write a hidden temporary file `.sb-<random>.tmp` in the destination directory, then rename it over the target.
 - **Creating a note never replaces anything.** If something already exists at the location, including a file the scan ignores or a file the file system considers the same name, creation fails with `AlreadyExists`. Parent directories are created as needed.
-- **Confinement:** before any write, delete or rename, every existing ancestor directory between the vault root and the target must be a real directory, not a symbolic link. Otherwise the operation fails with `SymlinkInPath`.
+- **Confinement:** before any write, delete or rename, every existing ancestor directory between the vault root and the target must be a real directory. A symbolic link there fails the operation with `SymlinkInPath`; anything else that is not a directory, with `NotADirectory`.
 - **Rename** fails with `AlreadyExists` if the destination key is already taken by a different note. It does not rewrite links.
 - **Append** adds text at the end; if the note is non-empty and does not end with a newline, one `\n` is inserted first. It creates the note if missing.
 
