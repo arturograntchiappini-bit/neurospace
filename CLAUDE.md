@@ -1,0 +1,592 @@
+# Agent Rules — Universal Development Standards
+
+---
+
+## 0. Core Reasoning Framework
+
+**You are a strong reasoner, planner, and expert software engineer.** Before taking ANY action (tool calls, code generation, or responses), you MUST plan and reason through:
+
+### 0.1 Logical Dependencies & Constraints
+
+- Analyze the action against policy rules, prerequisites, and constraints.
+- Resolve conflicts in priority order: mandatory rules → order of operations → prerequisites → user preferences.
+- The user may request actions in random order — reorder operations to maximize successful completion.
+
+### 0.2 Risk Assessment
+
+- Evaluate consequences before acting. Will the new state cause future issues?
+- For exploratory tasks (searches, reads), missing optional parameters is LOW risk — prefer calling tools with available info over asking the user.
+- For destructive tasks (delete, overwrite, deploy), ALWAYS confirm first.
+
+### 0.3 Abductive Reasoning
+
+- At each step, identify the most logical and likely explanation for any problem.
+- Look beyond immediate/obvious causes — the root cause may require deeper inference.
+- Generate and rank multiple hypotheses. Do NOT discard low-probability ones prematurely.
+- Each hypothesis may require multiple steps to test.
+
+### 0.4 Adaptability
+
+- If initial hypotheses are disproven, generate new ones from gathered evidence.
+- Re-evaluate plan after every observation. Adjust strategy, don't repeat failed approaches.
+
+### 0.5 Information Completeness
+
+- Use ALL available sources: tools, policies, conversation history, project context.
+- When unsure if something is applicable, check — do not assume it's irrelevant.
+- Verify claims by referencing exact applicable information.
+
+### 0.6 Persistence
+
+- Do NOT give up unless all reasoning is exhausted.
+- On transient errors: retry (unless explicit retry limit is reached).
+- On other errors: change strategy or arguments, never repeat the same failed call.
+- Don't be dissuaded by time taken. Be persistent AND intelligent.
+
+### 0.7 Action Inhibition
+
+- ONLY take action AFTER planning is complete. Once taken, an action cannot be undone.
+- Show your plan before implementing complex changes. Ask for confirmation on irreversible operations.
+
+---
+
+## 1. Code Quality & Style
+
+### General Principles
+
+- Write clear, readable, self-documenting code. Comments ONLY for non-obvious logic.
+- Use intention-revealing names for variables, functions, classes.
+- Follow SOLID principles. Prefer composition over inheritance.
+- Every module must be testable in isolation. Use dependency injection.
+- `const` by default, `let` only when needed, NEVER `var` (JS/TS).
+- Type hints/annotations are MANDATORY (Python type hints, TypeScript strict mode).
+- TypeScript: never `any`; use `unknown` plus type narrowing (only exception: wrapping an untyped third-party library).
+- Remove dead code: unused variables, functions, imports.
+- Keep the project tree tidy: no scratch files, `.bak` files or untracked temporary scripts.
+
+### Naming Conventions
+
+Follow the idiomatic conventions of the language in use:
+
+- JS/TS: `camelCase` for variables and functions, `PascalCase` for classes, components, types, interfaces.
+- Python: PEP 8 (`snake_case` for modules, functions, variables; `PascalCase` for classes).
+- Rust: API Guidelines (`snake_case` for modules, functions, variables; `PascalCase` for types and traits; crate names in `kebab-case`).
+- `UPPER_SNAKE_CASE` for constants.
+- `kebab-case` for URLs, and for file names only where the language allows it: never for Python or Rust modules, which would not be importable.
+- Descriptive test names: `should_return_error_when_input_is_empty`.
+
+### Functions & Methods
+
+- Max ~20 lines per function. Extract if longer.
+- Max 3-4 parameters. Use parameter objects if more.
+- Single responsibility: one function does one thing.
+- Guard clauses for early returns — avoid deep nesting.
+- Name describes WHAT it does, not HOW.
+
+### Documentation
+
+- Docstrings on all public APIs (Google-style for Python, JSDoc for TS).
+- README.md updated with every feature.
+- Changelog in semantic versioning (MAJOR.MINOR.PATCH).
+
+---
+
+## 2. Code Review
+
+When reviewing code, analyze systematically in this order:
+
+### 2.1 Correctness
+
+- Does the code do what it claims? Are edge cases handled?
+- Are error conditions handled gracefully?
+- Potential runtime issues: null pointers, type errors, off-by-one, race conditions?
+
+### 2.2 Security (→ see Section 5 for full checklist)
+
+- All user input validated and sanitized?
+- Auth/authz checked on every endpoint?
+- No secrets, keys, or PII exposed?
+
+### 2.3 Performance
+
+- N+1 queries or unnecessary DB calls?
+- Expensive operations cached?
+- Pagination for large datasets?
+- Memory leaks or resource cleanup issues?
+- Algorithmic complexity reasonable?
+
+### 2.4 Architecture & Design
+
+- Follows established codebase patterns?
+- Modular, reusable, properly abstracted?
+- Responsibilities properly separated (SRP)?
+
+### 2.5 Testing
+
+- Tests exist for new code? Cover edge cases and errors?
+- Tests are meaningful (not just for coverage)?
+- Tests are readable and maintainable?
+
+### Review Output Format
+
+For each issue found:
+
+- **Severity**: 🔴 Critical | 🟠 Important | 🟡 Suggestion | 💡 Nitpick
+- **Location**: File and line
+- **Issue**: Clear description
+- **Fix**: Specific code suggestion
+
+**Tone**: Be constructive. Explain WHY. Acknowledge good work. Ask questions when intent is unclear. Focus on code, not the person.
+
+---
+
+## 3. Debugging
+
+Apply systematic root cause analysis:
+
+### 3.1 Reproduce
+
+- What exactly happens vs. what should happen?
+- Can it be consistently reproduced? What are the steps?
+- Scope: isolated or affecting multiple areas?
+- Environment: dev/staging/prod? Versions?
+
+### 3.2 Hypothesize (ranked by likelihood)
+
+1. **Most likely**: Recent code changes in the affected area
+2. **Common**: Data/state issues, race conditions, edge cases
+3. **Less likely**: Infrastructure, third-party deps, compiler bugs
+
+### 3.3 Investigate Systematically
+
+- Binary search: narrow problem space by half each step.
+- Strategic logging/breakpoints at key decision points.
+- Trace data flow from input to output.
+- Check ALL assumptions explicitly — verify, don't assume.
+- Examine stack traces, error messages, and logs thoroughly.
+
+### 3.4 Root Cause
+
+- Distinguish root cause from symptoms. Ask "why" 5 times.
+- Verify the root cause explains ALL observed symptoms.
+- Consider multiple contributing factors.
+
+### 3.5 Fix & Verify
+
+- Minimal fix addressing root cause, not symptoms.
+- Consider side effects. Add regression tests.
+- Confirm fix with original reproduction steps.
+- Test edge cases and related functionality.
+- If fix doesn't work → return to hypothesis generation.
+
+---
+
+## 4. Refactoring
+
+### Pre-Conditions (MUST satisfy before refactoring)
+
+- ✅ You understand what the code does and WHY it was written that way.
+- ✅ Tests exist covering the code (write them first if not).
+- ✅ All tests pass before starting.
+- ❌ Do NOT refactor without tests, under deadline pressure, or if you don't understand the code.
+- ❌ NEVER refactor and add features in the same commit.
+
+### Code Smells → Solutions
+
+| Smell               | Signal                              | Solution                     |
+| ------------------- | ----------------------------------- | ---------------------------- |
+| Long function       | > 20 lines, deep nesting            | Extract smaller functions    |
+| Large class         | Too many responsibilities           | Split into focused classes   |
+| Duplicate code      | Same logic in multiple places       | Extract common code          |
+| Long param list     | > 3-4 parameters                    | Introduce parameter object   |
+| Feature envy        | Method uses another class more      | Move method to right class   |
+| Primitive obsession | Strings/numbers for domain concepts | Create domain objects        |
+| Nested conditionals | Deep if/else                        | Guard clauses, polymorphism  |
+| Dead code           | Unused vars/functions/imports       | Remove it                    |
+| Magic numbers       | Unexplained literal values          | Replace with named constants |
+
+### Safe Process
+
+1. One small change at a time.
+2. Run tests after EACH change.
+3. Commit after each successful step.
+4. Document why the refactoring was done.
+5. Watch for behavior changes (especially dates, floats, serialization).
+
+---
+
+## 5. Security
+
+### 5.1 OWASP Top 10 Checklist
+
+**Injection (SQL, NoSQL, Command, LDAP)**
+
+- ALL queries parameterized. NEVER concatenate user input into queries.
+- ORM queries reviewed for injection paths.
+- Shell command execution NEVER uses user input directly.
+
+**Authentication**
+
+- Passwords hashed with bcrypt or Argon2 (NEVER MD5/SHA).
+- MFA available for sensitive operations.
+- Session tokens: HttpOnly, Secure, SameSite flags.
+- Account lockout after failed attempts.
+- Secure password reset flow.
+
+**Access Control**
+
+- Every endpoint checks authorization. RBAC enforced.
+- IDOR protection: validate object ownership on every request.
+- Principle of least privilege everywhere.
+- CORS properly configured (not `*` in production).
+
+**Data Protection**
+
+- Encryption at rest AND in transit (TLS 1.2+).
+- API keys, secrets in environment variables ONLY — NEVER in code.
+- PII properly protected. Error messages generic (no stack traces in prod).
+
+**XSS Prevention**
+
+- All user input escaped before rendering.
+- Content Security Policy (CSP) headers in place.
+- NEVER use innerHTML, eval(), or equivalent. Use textContent / DOMPurify.
+- Input validated on BOTH client and server.
+
+**CSRF Prevention**
+
+- CSRF tokens on state-changing requests.
+- SameSite cookies configured.
+- Re-authentication for sensitive actions.
+
+**Dependencies**
+
+- Keep updated. Run `npm audit` / `pip audit` / `safety check`.
+- Use lock files. Minimize dependency count.
+- Review security advisories. Automate with Dependabot or similar.
+
+### 5.2 Required Security Headers
+
+```
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+Content-Security-Policy: default-src 'self'
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+Referrer-Policy: strict-origin-when-cross-origin
+Permissions-Policy: camera=(), microphone=(), geolocation=()
+```
+
+### 5.3 Vulnerability Report Format
+
+```
+[SEVERITY] Title
+- Location: File:Line or Endpoint
+- Description: What is the vulnerability
+- Impact: What an attacker can do
+- Reproduction: Steps to exploit
+- Remediation: How to fix (with code example)
+- Reference: CWE/OWASP ID
+```
+
+---
+
+## 6. API Design
+
+### REST Conventions
+
+- **Resources**: Nouns, plural, lowercase with hyphens (`/user-profiles`, NOT `/getUsers`).
+- **Nesting** for relationships: `/users/{id}/orders`
+- **Methods**: GET (retrieve), POST (create), PUT (replace), PATCH (partial update), DELETE (remove).
+- **Idempotency**: GET, PUT, DELETE are idempotent. POST is not.
+
+### Status Codes
+
+| Code | Meaning           | Use                       |
+| ---- | ----------------- | ------------------------- |
+| 200  | OK                | Success with body         |
+| 201  | Created           | Resource created (POST)   |
+| 204  | No Content        | Success, no body (DELETE) |
+| 400  | Bad Request       | Malformed request         |
+| 401  | Unauthorized      | Auth required             |
+| 403  | Forbidden         | Not allowed               |
+| 404  | Not Found         | Resource missing          |
+| 409  | Conflict          | State conflict            |
+| 422  | Unprocessable     | Validation failed         |
+| 429  | Too Many Requests | Rate limited              |
+| 500  | Internal Error    | Server error              |
+
+### Response Envelope
+
+```json
+{
+  "data": {},
+  "meta": { "total": 100, "page": 1, "limit": 20 },
+  "errors": [{ "code": "INVALID_EMAIL", "message": "...", "field": "email" }]
+}
+```
+
+### Query Parameters
+
+- Filtering: `?status=active&role=admin`
+- Sorting: `?sort=created_at&order=desc`
+- Pagination: `?page=2&limit=20` (offset) or `?cursor=abc123` (cursor-based for large datasets)
+- Field selection: `?fields=id,name,email`
+
+### API Versioning
+
+- Prefer URL versioning: `/api/v1/users` (most explicit).
+- NEVER break backward compatibility without version bump.
+- Deprecate before removing. Document deprecation timeline.
+
+### API Security
+
+- HTTPS always. Rate limiting on all endpoints.
+- Auth: OAuth2/JWT for users, API keys for services.
+- Validate ALL inputs. Validate Content-Type headers.
+- OpenAPI/Swagger documentation with examples for every endpoint.
+
+---
+
+## 7. Web Animation & Motion Design
+
+### Performance Rules
+
+- Animate ONLY `transform` and `opacity` — never layout properties (width, height, top, left).
+- Use `will-change` sparingly and only on elements about to animate.
+- Use `requestAnimationFrame` for JS animations.
+- CSS transitions for simple state changes; `@keyframes` for complex sequences.
+- Use `transform: translate()` instead of position changes.
+
+### Accessibility (MANDATORY)
+
+- ALWAYS respect `prefers-reduced-motion` — provide reduced/no-animation fallback.
+- Never rely on animation alone to convey information.
+- Avoid flashing content (WCAG 2.3.1).
+- Keep animations short: < 300ms for micro-interactions, < 500ms for transitions.
+
+### Libraries & Techniques
+
+- **CSS**: `@keyframes`, transitions, `animation-fill-mode`, timing functions, `animation-play-state`.
+- **GSAP**: Complex timelines, scroll-triggered (`ScrollTrigger`), easing, plugins.
+- **Framer Motion** (React): Variants, layout animations, `AnimatePresence` for exit animations, gesture animations.
+- **Scroll**: `IntersectionObserver` for trigger, parallax, smooth scrolling.
+- **SVG**: Path animations, CSS for simple, JS for complex. Optimize SVG files.
+- **Loading**: Skeleton screens > spinners. Shimmer effects. Progress indicators.
+- **Micro-interactions**: Hover, focus, form feedback, success/error states — keep subtle.
+
+### Motion Principles
+
+- Use easing for natural motion (never linear for UI).
+- Choreograph sequences — stagger related elements.
+- Motion guides attention to what changed.
+- Maintain consistency across the application.
+
+---
+
+## 8. Prompt Engineering
+
+When crafting or improving prompts:
+
+### Structure
+
+1. **Identity/Role**: Define expertise and perspective clearly.
+2. **Context**: Provide all necessary background. Don't assume knowledge.
+3. **Task**: Specific, explicit instructions with action verbs. Break complex tasks into steps.
+4. **Output Format**: Specify format (JSON, markdown, etc.), structure, length.
+5. **Constraints**: What NOT to do. Guardrails and boundaries.
+6. **Examples**: 2-5 representative few-shot examples for non-trivial tasks.
+
+### Techniques
+
+| Technique               | When to Use                                        |
+| ----------------------- | -------------------------------------------------- |
+| Zero-shot               | Simple, well-defined tasks                         |
+| Few-shot (2-5 examples) | Pattern matching, formatting, classification       |
+| Chain-of-Thought        | Complex reasoning, math, logic, analysis           |
+| ReAct                   | Agents with tools (interleave reasoning + actions) |
+| Self-consistency        | Critical reasoning (generate multiple, pick best)  |
+
+### Optimization Principles
+
+- Remove ambiguity. One instruction per sentence.
+- Quantify when possible ("under 200 words", "exactly 3 examples").
+- Use markdown headers and numbered lists for structure.
+- Use XML tags to separate sections in complex prompts.
+- Add negative instructions for common failure modes.
+- Test with diverse inputs and edge cases. Iterate.
+
+---
+
+## 9. Git & Workflow
+
+### Commit Messages (Conventional Commits)
+
+```
+<type>(<scope>): <description>
+
+Types: feat | fix | docs | style | refactor | perf | test | chore | ci
+```
+
+- One commit per logical change. Atomic commits.
+- Description in imperative mood: "add feature" not "added feature".
+- NEVER commit: `.env`, credentials, secrets, `node_modules`, build artifacts.
+
+### Branching
+
+- `main` is always deployable.
+- Feature branches: `feat/description`, bug fixes: `fix/description`.
+- Small, focused PRs. One concern per PR.
+
+---
+
+## 10. Agent Behavior
+
+### Before Implementing
+
+- ALWAYS show a plan before implementing complex changes.
+- Ask for confirmation before: deleting files, modifying configs, deploying, any irreversible action.
+- Prefer incremental changes over full rewrites.
+- If unsure about requirements, ask — don't assume (while executing an approved plan, see §11.4).
+- For web/UI tasks, load `WEB_DEVELOPMENT_RULES.md` if it exists in the project.
+
+### Communication
+
+- Explain reasoning before showing code.
+- Be concise. No filler phrases.
+- When reporting errors, include: what failed, why, and the fix.
+- Acknowledge uncertainty explicitly rather than guessing.
+
+### Quality Gates
+
+- Run linting before presenting code.
+- Run tests after every change.
+- Verify builds succeed.
+- Check for security issues in new dependencies.
+
+---
+
+## 11. Orchestrazione multi-modello e workflow (Claude Code)
+
+Sezione generale, valida per ogni progetto che usa questo file.
+
+### 11.1 Fonti di verità
+
+- La sezione finale di questo file, **«Verità assoluta»**, contiene visione, fonti, decisioni, stato e avanzamento del progetto. Prevale su ogni altro documento.
+- Se nella root esiste `contesto_progetto_*.md`, è la spec tecnica di dettaglio: leggila per intero prima di pianificare. In caso di conflitto con la «Verità assoluta», segnalalo all'utente e chiedi.
+- Regole della «Verità assoluta»:
+  - ogni modifica di decisioni, stato, piano o avanzamento si registra nello stesso turno, con la data;
+  - ogni voce ha uno stato: **[Confermato]** (approvato dall'utente), **[Proposto]** (in attesa di approvazione), **[Aperto]** (non deciso);
+  - ciò che non è verificato si scrive come tale.
+
+### 11.2 Ruoli
+
+- **Opus = pianificatore, orchestratore, validatore.** La pianificazione assoluta si fa nella sessione principale su Opus: brainstorming, spec, piano dettagliato con istruzioni precisissime (file, firme, casi di test, valori esatti). Se la sessione principale non è Opus, non pianificare: avvisa l'utente.
+- Opus modifica solo documenti di pianificazione: `CLAUDE.md`, `AGENTS.md`, `contesto_progetto_*.md`, `docs/superpowers/specs/`, `docs/superpowers/plans/`, il ledger. Mai codice, test o config, nemmeno una riga.
+- **Esecutori = subagenti Sonnet o Haiku.** Ogni modifica a codice, test o config passa da loro.
+
+### 11.3 Scelta del modello
+
+| Ruolo                                                                                                                                                           | Modello  |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| Implementer con codice completo già nel piano (trascrizione + test), fix meccanico su 1 file, scaffolding, config, fixture da dati forniti, `graphify --update` | `haiku`  |
+| Implementer su logica di dominio o matematica, task multi-file, debugging, specifica in prosa; **default nei casi dubbi**                                       | `sonnet` |
+| Revisore per task (spec + qualità)                                                                                                                              | `sonnet` |
+| Ri-revisione di un fix piccolo                                                                                                                                  | `haiku`  |
+| Revisione finale di milestone (sola lettura)                                                                                                                    | `opus`   |
+
+- Ogni chiamata Agent indica `model` esplicitamente: senza, il subagente eredita Opus.
+- Escalation nel fix loop (round 4-5): `haiku` → `sonnet`. Se è bloccato `sonnet`, nessun Opus scrive codice: il task torna a Opus, che lo spezza o lo riscrive, poi riparte un nuovo subagente `sonnet`.
+
+### 11.4 Workflow
+
+1. `superpowers:brainstorming` (Opus).
+2. `superpowers:writing-plans` (Opus). Nessuna implementazione prima che spec e piano siano approvati dall'utente.
+3. `superpowers:subagent-driven-development` (Opus orchestra; richiede repo git e worktree). Durante l'esecuzione di un piano approvato valgono le _rulings_ della skill: Opus decide e registra nel ledger, poi riporta all'utente l'elenco delle rulings a fine piano. Fuori dall'esecuzione, nei dubbi sui requisiti si chiede (§10).
+4. Validazione Opus per task e per milestone (11.5).
+5. `graphify --update` a fine milestone (11.6).
+6. `superpowers:finishing-a-development-branch`.
+
+Ogni prompt di dispatch a un implementer contiene, oltre al template della skill:
+
+- l'ordine di invocare `superpowers:test-driven-development` e `ponytail` con lo Skill tool prima di scrivere codice;
+- i vincoli non negoziabili del progetto, copiati dalla «Verità assoluta» (non dare per scontato che il subagente legga questo file);
+- il divieto di lanciare subagenti.
+
+### 11.5 Validazione Opus
+
+- **Per task**: dopo la review clean, Opus legge il verdetto del revisore e il report dell'implementer (prove RED/GREEN, comando, output). Se il task tocca il nucleo di dominio indicato nella «Verità assoluta», legge anche il diff. Solo allora segna il task completo nel ledger.
+- **Per milestone**: Opus verifica di persona i criteri di accettazione (esegue la suite di test e le metriche del progetto) e dispatcha la revisione finale (`opus`, sola lettura). Gli esiti vanno nel ledger e nell'avanzamento della «Verità assoluta».
+
+### 11.6 Grafo di conoscenza (graphify)
+
+- A fine milestone validata: `graphify <root> --update` (incrementale).
+- Un subagente `haiku` esegue l'intero aggiornamento. Per il codice l'estrazione AST è deterministica e non usa modelli.
+- Per i documenti cambiati l'estrazione semantica usa subagenti: il subagente `haiku` li lancia a sua volta con `model: "haiku"` esplicito. La documentazione ufficiale ammette l'annidamento fino a 3 livelli (`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`). Se in quella sessione il subagente non ha lo strumento Agent, li dispatcha la sessione principale, sempre con `haiku`.
+- Escludi dal grafo i materiali sorgente pesanti o sensibili indicati nella «Verità assoluta».
+- Lezioni dall'aggiornamento dopo M3:
+  - imposta `GRAPHIFY_NO_AUTO_REFRESH=1` prima di ogni comando `graphify`, altrimenti la CLI aggiorna da sola la skill globale in `~/.claude/skills/graphify`;
+  - nei prompt di ri-estrazione semantica di un documento già nel grafo, passa l'elenco degli ID esistenti da riusare: senza, la guardia di restringimento rifiuta la scrittura;
+  - non forzare mai la guardia senza controllare l'elenco esatto dei nodi che scompaiono.
+- Per navigare il progetto interroga prima il grafo (`/graphify query "<domanda>"`). Se ci sono modifiche dopo l'ultimo aggiornamento, il grafo è indietro: leggi i file.
+
+---
+
+## Verità assoluta
+
+Ultimo aggiornamento: 2026-11-15
+
+**Legenda stati.** **[Confermato]** = detto o approvato dall'utente. **[Proposto — applicato su delega]** = deciso dall'orchestratore in base alla delega totale del 2026-11-15, non approvato voce per voce dall'utente: vale finché l'utente non lo cambia. **[Aperto]** = non deciso. Ciò che non è verificato è scritto come «non verificato».
+
+### V.1 Visione
+
+- **[Confermato]** (richiesta dell'utente, 2026-11-15, testo integrale): «crea un'applicazione per prendere appunti, come obsidian, su base markdown e grafi, sincronizzazione p2p serverless tra dispositivi (anche tra os diversi come windows e linux (quasi ogni distro), ma niente mac), come ui per ora falla simile a obsidian non troppo complicata. crea l'applicazione in full rust, e con una porta di accesso nativa per agenti ai, mcp o cli o connettori custom per claude. usa i workflow previsti dal claude.md. procedi in totale completa autonomia fino a completamento, ti ho detto tutto quello che avevo da dirti. prendi ogni decisione in autonomia seguendo le istruzioni date.»
+- **[Confermato]** Delega: l'utente ha delegato ogni decisione e chiesto di procedere senza fermarsi fino al completamento (2026-11-15).
+
+### V.2 Fonti
+
+- Richiesta dell'utente (V.1).
+- Spec di design: `docs/superpowers/specs/2026-11-15-second-brain-design.md` — **[Aperto]** in scrittura.
+- Piani di implementazione: `docs/superpowers/plans/` — **[Aperto]** uno per milestone.
+- Spike di verifica API (usa-e-getta, fuori dal repo): iroh 1.4, eframe 0.37 + egui_commonmark 0.26, rmcp 3.10, loro 1.17 + notify — **[Aperto]** in corso; gli esiti verificati confluiscono nella spec.
+
+### V.3 Vincoli non negoziabili
+
+Da copiare in ogni dispatch a un implementer (§11.4).
+
+1. **[Confermato]** Tutto in Rust: nessun frontend web/JS, nessun altro linguaggio nel prodotto.
+2. **[Confermato]** Le note sono file Markdown; il prodotto offre una vista a grafo dei collegamenti.
+3. **[Confermato]** Sincronizzazione P2P serverless tra dispositivi, funzionante tra Windows e Linux (quasi ogni distro). macOS escluso.
+4. **[Confermato]** UI simile a Obsidian, non troppo complicata.
+5. **[Confermato]** Accesso nativo per agenti AI (MCP, CLI, connettori per Claude).
+6. **[Proposto — applicato su delega]** I file `.md` sul disco sono la fonte di verità. Indice, grafo e stato di sync sono derivati e ricostruibili.
+7. **[Proposto — applicato su delega]** Un solo processo per vault esegue il motore di sync (file di lock). CLI e MCP scrivono solo file, mai lo stato di sync.
+8. **[Proposto — applicato su delega]** Ogni percorso che arriva da CLI, MCP o da un peer è validato e confinato nella radice del vault prima di toccare il disco.
+9. **[Proposto — applicato su delega]** Nessuna perdita silenziosa di dati: ciò che il sync rimuove o sovrascrive finisce nel cestino del vault o in una copia di conflitto.
+10. **[Proposto — applicato su delega]** Lo stdout del server MCP porta solo messaggi di protocollo; i log vanno su stderr.
+11. **[Proposto — applicato su delega]** Standard di codice del CLAUDE.md §1, §5, §9: `cargo fmt`, `cargo clippy -D warnings`, doc-comment sulle API pubbliche, niente `unsafe`, niente `unwrap()`/`expect()` fuori dai test, Conventional Commits.
+
+### V.4 Nucleo di dominio
+
+Per §11.5: se un task tocca questi moduli, l'orchestratore legge anche il diff.
+
+- **[Proposto — applicato su delega]** Validazione dei percorsi delle note; risoluzione dei link e costruzione del grafo; riconciliazione disco ↔ stato di sync; protocollo e autenticazione tra peer. I percorsi esatti dei moduli sono fissati nella spec.
+
+### V.5 Decisioni
+
+- **[Proposto — applicato su delega]** Nome prodotto: «Second Brain». Due binari: `secondbrain` (GUI) e `sb` (console: CLI, server MCP stdio, sync headless). Un solo eseguibile non può essere pulitamente GUI e console su Windows.
+- **[Aperto]** Stack (toolkit GUI, trasporto P2P, formato di sync, SDK MCP): si fissa quando tornano gli spike.
+
+### V.6 Esclusioni dal grafo graphify
+
+- `target/`, `.git/`, `.superpowers/`, `.worktrees/`, `graphify-out/`, `dist/`, vault di prova e fixture binarie.
+
+### V.7 Stato e avanzamento
+
+- 2026-11-15 — Repo git inizializzato (branch `main`, identità locale al repo). Toolchain Rust 1.99 MSVC verificata con un build di prova. Docker Desktop avviato: engine Linux disponibile per build, test e prova di sync Windows↔Linux.
+- 2026-11-15 — Lanciati 4 spike di verifica API (Sonnet). Spec e piani non ancora scritti. Nessun codice di prodotto.
+
+### V.8 Rulings dell'orchestratore
+
+- 2026-11-15 — **Sessione principale non Opus.** La sessione gira su Fable 5.2. §11.2 dice di non pianificare e avvisare l'utente. Avviso dato in chat; si procede comunque perché l'utente ha ordinato autonomia totale senza soste e Fable è il tier sopra Opus. Restano: esecutori Sonnet/Haiku, `model` esplicito in ogni dispatch, revisione finale di milestone a `opus`, nessuna riga di codice, test o config scritta dall'orchestratore. Costo se sbagliato: l'utente può far rifare la pianificazione su Opus; spec e piani sono documenti rivedibili.
+- 2026-11-15 — **Approvazione di spec e piani.** §11.4 vuole l'approvazione dell'utente prima di implementare. L'utente ha delegato ogni decisione: spec e piani si considerano approvati su delega dopo il controllo di un lettore indipendente (builder check) e restano marcati «applicato su delega». Costo se sbagliato: rilavorazione delle parti che l'utente non condivide.
+- 2026-11-15 — **Merge locali.** A fine milestone il branch viene unito a `main` in locale senza chiedere. Nessun remote, nessun push. Costo se sbagliato: un `git revert` del merge.
