@@ -73,6 +73,8 @@ struct Collector<'a> {
     run: String,
     in_code: bool,
     open_wiki: Option<OpenWiki>,
+    /// Byte offset and 1-based line of the last link seen; offsets never decrease.
+    line_cursor: (usize, u32),
 }
 
 impl<'a> Collector<'a> {
@@ -84,6 +86,7 @@ impl<'a> Collector<'a> {
             run: String::new(),
             in_code: false,
             open_wiki: None,
+            line_cursor: (0, 1),
         }
     }
 
@@ -95,7 +98,7 @@ impl<'a> Collector<'a> {
             Event::End(TagEnd::Link | TagEnd::Image) => self.end_link(),
             Event::Start(Tag::CodeBlock(_) | Tag::MetadataBlock(_)) => self.set_in_code(true),
             Event::End(TagEnd::CodeBlock | TagEnd::MetadataBlock(_)) => self.set_in_code(false),
-            Event::Text(text) => self.text(&text),
+            Event::Text(text) => self.source_text(&text, offset),
             Event::SoftBreak | Event::HardBreak => self.text("\n"),
             Event::Code(code) => {
                 self.flush_run();
@@ -112,7 +115,7 @@ impl<'a> Collector<'a> {
             return;
         };
         self.flush_run();
-        let line = line_at(self.content, offset);
+        let line = self.line_at(offset);
         match link_type {
             LinkType::WikiLink { has_pothole } => {
                 let kind = if is_image {
@@ -159,6 +162,37 @@ impl<'a> Collector<'a> {
         self.in_code = in_code;
     }
 
+    fn line_at(&mut self, offset: usize) -> u32 {
+        let (from, base) = if offset >= self.line_cursor.0 {
+            self.line_cursor
+        } else {
+            (0, 1)
+        };
+        let newlines = self.content.as_bytes()[from..offset]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count();
+        let line = base.saturating_add(u32::try_from(newlines).unwrap_or(u32::MAX));
+        self.line_cursor = (offset, line);
+        line
+    }
+
+    /// Adds a text event that starts at `offset`, remembering an escaping backslash the parser dropped.
+    fn source_text(&mut self, text: &str, offset: usize) {
+        // Only a `#` can start a tag, so only then is the escape worth looking for.
+        if text.starts_with('#') && self.open_wiki.is_none() && !self.in_code {
+            let backslashes = self.content.as_bytes()[..offset]
+                .iter()
+                .rev()
+                .take_while(|&&byte| byte == b'\\')
+                .count();
+            if backslashes % 2 == 1 {
+                self.run.push('\\');
+            }
+        }
+        self.text(text);
+    }
+
     fn text(&mut self, text: &str) {
         match &mut self.open_wiki {
             Some(wiki) if wiki.has_pothole => wiki.alias.push_str(text),
@@ -198,20 +232,13 @@ fn link_parts<'t>(tag: &'t Tag<'_>) -> Option<(LinkType, &'t str, bool)> {
     }
 }
 
-// shortcut: rescans from the start for every link, quadratic; fine below MAX_NOTE_BYTES.
-fn line_at(content: &str, offset: usize) -> u32 {
-    let newlines = content.as_bytes()[..offset]
-        .iter()
-        .filter(|&&b| b == b'\n')
-        .count();
-    u32::try_from(newlines + 1).unwrap_or(u32::MAX)
-}
-
 fn build_link(dest: &str, kind: LinkKind, line: u32) -> Option<Link> {
     let (target, heading) = dest.split_once('#').unwrap_or((dest, ""));
     let (target, heading) = if kind == LinkKind::Markdown {
         (percent_decode(target), percent_decode(heading))
     } else {
+        // The parser keeps the backslash of an escaped pipe (`[[A\|B]]`) in the destination.
+        let target = target.strip_suffix('\\').unwrap_or(target);
         (target.to_owned(), heading.to_owned())
     };
     let target = target.trim();
@@ -256,7 +283,7 @@ fn percent_decode(text: &str) -> String {
         let escaped = bytes
             .get(i + 1..i + 3)
             .filter(|_| bytes[i] == b'%')
-            .and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
+            .and_then(hex_pair);
         match escaped {
             Some(byte) => {
                 decoded.push(byte);
@@ -269,6 +296,14 @@ fn percent_decode(text: &str) -> String {
         }
     }
     String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_pair(digits: &[u8]) -> Option<u8> {
+    let [high, low] = digits else {
+        return None;
+    };
+    let value = |digit: &u8| char::from(*digit).to_digit(16);
+    u8::try_from(value(high)? * 16 + value(low)?).ok()
 }
 
 fn scan_tags(run: &str, tags: &mut BTreeSet<String>) {
@@ -366,5 +401,87 @@ MD: [text](other/Note%20D.md#h) and [ext](https://example.com/x.md) and [img](pi
     #[test]
     fn should_not_treat_heading_marker_as_tag() {
         assert!(parse("# Heading\n## Another\n").tags.is_empty());
+    }
+
+    #[test]
+    fn should_strip_escaped_pipe_backslash_when_wiki_link_has_alias() {
+        assert_eq!(
+            parse("[[A\\|B]]").links,
+            vec![link("A", None, Some("B"), LinkKind::Wiki, 1)]
+        );
+    }
+
+    #[test]
+    fn should_report_wiki_link_once_when_escaped_pipe_is_in_table_cell() {
+        let md = "| h | h |\n| - | - |\n| x | [[A\\|B]] |\n";
+        assert_eq!(
+            parse(md).links,
+            vec![link("A", None, Some("B"), LinkKind::Wiki, 3)]
+        );
+    }
+
+    #[test]
+    fn should_parse_large_note_in_linear_time() {
+        let md = "[[n]]\n".repeat(200_000);
+        let started = std::time::Instant::now();
+        let links = parse(&md).links;
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(links.len(), 200_000);
+        assert_eq!(links.last().map(|l| l.line), Some(200_000));
+    }
+
+    #[test]
+    fn should_not_treat_escaped_hash_as_tag() {
+        assert_eq!(parse("\\#tag and #real").tags, ["real"]);
+        assert_eq!(parse("\\\\ #tag").tags, ["tag"]);
+    }
+
+    #[test]
+    fn should_keep_percent_sign_when_escape_is_not_two_hex_digits() {
+        assert_eq!(
+            parse("[y](%+1.md)").links,
+            vec![link("%+1.md", None, None, LinkKind::Markdown, 1)]
+        );
+    }
+
+    #[test]
+    fn should_decode_percent_escapes_in_heading_of_markdown_link() {
+        assert_eq!(
+            parse("[z](A.MD#H%23x)").links,
+            vec![link("A.MD", Some("H#x"), None, LinkKind::Markdown, 1)]
+        );
+    }
+
+    #[test]
+    fn should_ignore_markdown_links_with_url_scheme() {
+        assert!(
+            parse("[m](mailto:x.md) [h](http://e.com/a.md)")
+                .links
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn should_keep_pipe_text_as_alias_when_embed_has_pipe() {
+        assert_eq!(
+            parse("![[Img|300]]").links,
+            vec![link("Img", None, Some("300"), LinkKind::Embed, 1)]
+        );
+    }
+
+    #[test]
+    fn should_leave_alias_and_heading_empty_when_they_are_blank() {
+        assert_eq!(
+            parse("[[A|]] [[B#]]").links,
+            vec![
+                link("A", None, None, LinkKind::Wiki, 1),
+                link("B", None, None, LinkKind::Wiki, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn should_not_find_tags_inside_wiki_link_text() {
+        assert!(parse("[[#Only heading]] [[Note #x]]").tags.is_empty());
     }
 }
