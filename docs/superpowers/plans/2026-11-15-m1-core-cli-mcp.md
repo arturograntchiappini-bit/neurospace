@@ -23,6 +23,8 @@
 - Note paths use `/` on every platform. File contents are never altered: no line-ending or trailing-newline normalisation.
 - Every path that comes from outside the process (CLI argument, MCP argument) is parsed with `NotePath::parse` before any disk access.
 - Nothing is ever unlinked directly: deleting moves the file to `.secondbrain/trash/`.
+- Creating a note never replaces an existing file; only an explicit write to a note that was found on disk replaces it.
+- A note is at most 4 MiB (`MAX_NOTE_BYTES`). Larger files are ignored when loading and refused when writing.
 - The MCP server writes only protocol messages to stdout. Diagnostics go to stderr.
 - A dependency is added only where this plan names it.
 - `README.md` and `CHANGELOG.md` are updated by the task that adds a user-visible feature.
@@ -113,7 +115,7 @@ too-many-arguments-threshold = 4
 
 `.gitignore`: `/target`, `/dist`, `.claude/worktrees/`, `.worktrees/`, `graphify-out/`.
 
-`crates/sb-core/Cargo.toml`: package `sb-core`, inherits `version`, `edition`, `publish`; `[lints] workspace = true`; dependencies `serde` and `thiserror` from the workspace; dev-dependency `tempfile` from the workspace.
+`crates/sb-core/Cargo.toml`: package `sb-core`, inherits `version`, `edition`, `publish`; `[lints] workspace = true`; dependencies `serde` and `thiserror` from the workspace; dev-dependencies `tempfile` and `serde_json` from the workspace.
 
 `README.md`: title «Second Brain», one paragraph taken from spec section 1, a «Status» line saying the project is under construction. `CHANGELOG.md`: Keep a Changelog format with an empty `## [Unreleased]` section.
 
@@ -186,8 +188,6 @@ fn should_serialize_as_plain_string() {
 }
 ```
 
-(`serde_json` is a dev-dependency of `sb-core` for this test.)
-
 - [ ] **Step 3: Run the tests and see them fail**
 
 Run: `cargo test -p sb-core path::`
@@ -240,7 +240,8 @@ pub type Result<T> = std::result::Result<T, CoreError>;
 
 // vault.rs
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IgnoreReason { InvalidPath, CaseCollision, NotUtf8 }
+pub enum IgnoreReason { InvalidPath, CaseCollision, NotUtf8, TooLarge }
+pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ignored { pub path: String, pub reason: IgnoreReason }
 #[derive(Debug)]
@@ -254,7 +255,8 @@ impl Vault {
     pub fn load(&self) -> Result<Loaded>;                                // scan (spec 5.3) and read every note
     pub fn locate(&self, path: &NotePath) -> Result<Option<NotePath>>;   // the on-disk spelling of this key, if present
     pub fn read(&self, path: &NotePath) -> Result<String>;               // NotFound, NotUtf8
-    pub fn write(&self, path: &NotePath, content: &str) -> Result<bool>; // atomic; true when the file did not exist
+    pub fn write(&self, path: &NotePath, content: &str) -> Result<bool>; // create or atomically replace; true when the file did not exist
+    pub fn create(&self, path: &NotePath, content: &str) -> Result<()>;  // never replaces: AlreadyExists if anything is at that location
     pub fn append(&self, path: &NotePath, text: &str) -> Result<bool>;   // true when created
     pub fn delete(&self, path: &NotePath) -> Result<()>;                 // move to trash; NotFound
     pub fn rename(&self, from: &NotePath, to: &NotePath) -> Result<()>;  // NotFound, AlreadyExists
@@ -265,7 +267,7 @@ impl Vault {
 pub fn utc_compact(t: std::time::SystemTime) -> String;                  // "20251115T142233Z"
 ```
 
-`read`, `write`, `append`, `delete`, `rename` act on the exact spelling they are given. Case-insensitive lookup is `locate`, used by Task 6.
+`read`, `write`, `create`, `append`, `delete`, `rename` act on the exact spelling they are given. Case-insensitive lookup is `locate`, used by Task 6. `write`, `create` and `append` return `CoreError::InvalidInput` when the resulting note would exceed `MAX_NOTE_BYTES`.
 
 - [ ] **Step 1: Write the failing tests** in `vault.rs` and `time.rs`
 
@@ -298,6 +300,11 @@ fn should_format_utc_compact() {
 #[test] fn should_load_only_valid_notes()                        // files: "b.md", "A.md", ".obsidian/x.md", ".hidden.md", "img.png", "sub/c.md", "bin.md" containing bytes [0xff, 0xfe]
                                                                  // notes == [("A.md", ..), ("b.md", ..), ("sub/c.md", ..)] in that order; ignored == [Ignored { path: "bin.md", reason: NotUtf8 }]
 #[test] fn should_skip_trash_when_loading()                      // a deleted note does not come back from load()
+#[test] fn should_not_replace_anything_when_creating()           // create(p("n.md"), "1") is Ok and the file holds "1"; a second create(p("n.md"), "2") is Err(AlreadyExists) and the file still holds "1";
+                                                                 // with a directory named "d.md" in the vault, create(p("d.md"), "x") is Err(AlreadyExists); no ".sb-*.tmp" or partial file is left behind
+#[test] fn should_refuse_notes_over_the_size_limit()             // content of exactly MAX_NOTE_BYTES bytes: write is Ok; MAX_NOTE_BYTES + 1 bytes: write and create are Err(InvalidInput) and no file is created;
+                                                                 // append that would take an existing note over the limit is Err(InvalidInput) and leaves the note unchanged
+#[test] fn should_ignore_oversized_files_when_loading()          // a file "big.md" of MAX_NOTE_BYTES + 1 bytes written with std::fs: load() does not list it; ignored == [Ignored { path: "big.md", reason: TooLarge }]
 #[cfg(unix)] #[test] fn should_ignore_invalid_names_and_case_collisions()
                                                                  // files "a:b.md", "Note.md", "note.md": notes == ["Note.md"]; ignored holds ("a:b.md", InvalidPath) and ("note.md", CaseCollision)
 #[cfg(unix)] #[test] fn should_not_follow_symlinks()             // a symlinked directory "link" -> outside dir holding "x.md": load() does not list it; write(p("link/y.md")) is Err(SymlinkInPath); nothing is created outside
@@ -314,10 +321,11 @@ Civil date from days since 1970-01-01 with integer arithmetic only (no date crat
 
 - [ ] **Step 4: Implement `Vault`**
 
-- `load`: walk recursively with `std::fs::read_dir` and `DirEntry::file_type` (which does not follow links). Skip names starting with `.`; skip symbolic links; recurse into directories; consider files whose extension is `md` ASCII-case-insensitively. Build the relative path with `/`. A name that is not valid Unicode, or a path `NotePath::parse` rejects → `Ignored { InvalidPath }` with the lossy path. Among paths sharing one key keep the bytewise smallest; the others → `CaseCollision`. Read each kept file; invalid UTF-8 → `NotUtf8`. `ignored` is ordered by path.
+- `load`: walk recursively with `std::fs::read_dir` and `DirEntry::file_type` (which does not follow links). Skip names starting with `.`; skip symbolic links; recurse into directories; consider files whose extension is `md` ASCII-case-insensitively. Build the relative path with `/`. A name that is not valid Unicode, or a path `NotePath::parse` rejects → `Ignored { InvalidPath }` with the lossy path. Among paths sharing one key keep the bytewise smallest; the others → `CaseCollision`. A kept file whose size on disk exceeds `MAX_NOTE_BYTES` → `TooLarge`, without reading it. Read each remaining file; invalid UTF-8 → `NotUtf8`. `ignored` is ordered by path.
 - `locate`: walk the components from the root; in each directory find the entry whose name lowercases (`str::to_lowercase`) to the component's lowercase, preferring an exact match. Never use `Path::exists` for this: on Windows it would return the requested spelling instead of the stored one.
 - `write`: check confinement (spec 5.4: every existing ancestor below the root must be a directory and not a symbolic link, else `SymlinkInPath`), create parent directories, write a sibling file `.sb-<process id>-<counter>-<nanoseconds>.tmp`, `sync_all`, then `std::fs::rename` over the target. Remove the temporary file if any step fails.
-- `append`: read (missing means empty and created), apply the separator rule of spec 5.4, `write`.
+- `create`: same confinement check and parent creation, then open the target with `OpenOptions::new().write(true).create_new(true)`, write, `sync_all`. An `AlreadyExists` error from the file system, whatever kind of entry is there, becomes `CoreError::AlreadyExists`. If writing fails after the file was created, remove it.
+- `append`: read (missing means empty and created), apply the separator rule of spec 5.4, then `write` for an existing note or `create` for a new one.
 - `delete`: `NotFound` if missing; create `trash_dir()`; target name `<utc_compact(now)>-<path with "/" replaced by "__">`; if taken, add `-1`, `-2`, …; `std::fs::rename`.
 - `rename`: `NotFound` if `from` is missing; `AlreadyExists` if `locate(to)` finds a note whose key differs from `from.key()`; confinement check and parent creation for `to`; `std::fs::rename`.
 - Every `std::io::Error` becomes `CoreError::Io` carrying the path it happened on.
@@ -870,7 +878,7 @@ Expected: compilation fails, `ops` not found.
 - [ ] **Step 3: Implement the operations**
 
 - Parse each path with `NotePath::parse`, mapping the error to `CoreError::InvalidPath { path: raw, source }`.
-- `read`, `write`, `append`, `delete`, `rename` use `Vault::locate` to find the stored spelling and act on it; a new note uses the spelling given. `rename` to a key held by a different note is `AlreadyExists`; a case-only rename of the same note is allowed.
+- `read`, `write`, `append`, `delete`, `rename` use `Vault::locate` to find the stored spelling and act on it. A note that `locate` does not find is new: it is made with `Vault::create` using the spelling given, so it can never replace a file the lookup did not see. `rename` to a key held by a different note is `AlreadyExists`; a case-only rename of the same note is allowed.
 - `list`, `search`, `links`, `graph`, `tags` build an `Index` from the vault and answer from it. `get_links` and `get_graph(around)` return `NotFound` when the note is not in the index.
 - `list_notes` folder filter: trim a trailing `/`, lowercase, then keep notes whose key starts with that folder followed by `/`. `None` or an empty folder keeps everything. `ignored` is the number of ignored files.
 - `search_notes` uses `DEFAULT_SEARCH_LIMIT` when no limit is given; `get_graph` uses depth 1.
