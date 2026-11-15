@@ -169,7 +169,7 @@ Ignored files are never indexed and never synced, and the sync engine never modi
 
 ### 5.5 Trash
 
-Deleting a note moves it to `.secondbrain/trash/<UTC timestamp>-<flattened path>`, where the timestamp is `YYYYMMDDThhmmssZ` and the flattened path replaces `/` with `__`. Nothing is ever unlinked directly. This applies to deletions by the user, by an agent and by the sync engine. The trash is never emptied automatically.
+Deleting a note moves it to `.secondbrain/trash/<UTC timestamp>-<flattened path>`, where the timestamp is `YYYYMMDDThhmmssZ` and the flattened path replaces `/` with `__`. A trash file name never exceeds 255 bytes: when it would, the flattened path is shortened from the front, at a character boundary, keeping the timestamp and the end of the path. If the name is taken, `-1`, `-2`, … is appended. Nothing is ever unlinked directly. This applies to deletions by the user, by an agent and by the sync engine. The trash is never emptied automatically.
 
 ## 6. Markdown model
 
@@ -305,10 +305,10 @@ All sync state lives **outside** the vault, so copying or sharing the vault fold
 | File | Content |
 | --- | --- |
 | `vault-path.txt` | the canonical vault path, for humans |
-| `device.key` | device secret key |
+| `device.key`, `device.id` | device secret key, and its public id for tools that only read files |
 | `secret` | group secret, hex. Its presence means «sync is on». |
 | `peers.json` | known peers: device id and optional address hints |
-| `config.json` | `{ "mode": "internet" \| "lan", "bind_port": <u16 or null> }`, default `internet`, `null` |
+| `config.json` | `{ "mode": "internet" \| "lan", "bind_port": <u16 or null>, "mdns": <bool> }`, defaults `internet`, `null`, `true` |
 | `doc.snap`, `doc.log` | the sync document: snapshot plus append-only update log |
 | `base.json` | per note key, the content hash at the last point disk and document agreed |
 | `engine.lock` | exclusive lock held by the running engine |
@@ -377,7 +377,7 @@ A blocked key is left completely alone in this round: no document change, no fil
 
 Document follows disk:
 
-- file present, note alive: the note's text is updated from the file. If the new text matches a tombstone of that note, a new note is created instead, so an edit can never fall into an old deletion.
+- file present, note alive: the note's text is updated from the file. If the new text matches a tombstone of that note, the note is tombstoned as it stands and a new note is created with the file's content, so an edit can never fall into an old deletion.
 - file present, no note: a new note is created with a new id, this path and this content.
 - file absent, note alive: the note is tombstoned.
 
@@ -389,7 +389,7 @@ Disk follows document:
 
 Both changed:
 
-- both present: the file's content becomes a **new note claiming the same path**, and `B := hash(D)`. The next claim resolution separates the two notes: one keeps the path, the other becomes a conflict copy, or they are recognised as duplicates.
+- both present: the file's content becomes a **new note claiming the same path**, and `B := hash(D)`. The next claim resolution separates the two notes: one keeps the path, the other becomes a conflict copy, or they are recognised as duplicates. Exception: if an alive note that has no file and no base yet already holds exactly the file's content, the content is already captured (an earlier round was interrupted) and only `B := hash(D)` is recorded.
 - file present, no note (local edit against remote delete): the local edit wins; a new note is created. `B := hash(D)`.
 - file absent, note alive (local delete against remote edit): the remote edit wins; the file is created. `B := hash(H)`.
 
