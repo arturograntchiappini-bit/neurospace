@@ -174,7 +174,7 @@ impl Index {
     /// Lines linking to a note, once per (note, line), ordered by note key then line.
     pub fn backlinks(&self, key: &NoteKey) -> Vec<Backlink> {
         let mut backlinks = Vec::new();
-        for entry in self.notes.values() {
+        for entry in self.notes.iter().filter(|(k, _)| *k != key).map(|(_, e)| e) {
             let lines: BTreeSet<u32> = entry
                 .links
                 .iter()
@@ -218,10 +218,11 @@ pub(crate) fn truncate_chars(s: &str, max: usize) -> &str {
     s.char_indices().nth(max).map_or(s, |(end, _)| &s[..end])
 }
 
-/// Spec 6.2 normalisation: trim, `\` to `/`, drop a leading `./` and a trailing `.md`, lowercase.
+/// Spec 6.2 normalisation: trim, `\` to `/`, drop a leading `./` or `/` and a trailing `.md`, lowercase.
 pub(crate) fn normalize_target(target: &str) -> String {
     let slashed = target.trim().replace('\\', "/");
     let without_dot = slashed.strip_prefix("./").unwrap_or(&slashed);
+    let without_dot = without_dot.strip_prefix('/').unwrap_or(without_dot);
     let split = without_dot.len().saturating_sub(MARKDOWN_SUFFIX.len());
     let without_extension = match without_dot.get(split..) {
         Some(tail) if tail.eq_ignore_ascii_case(MARKDOWN_SUFFIX) => &without_dot[..split],
@@ -467,5 +468,85 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(2),
             "resolution must not scan every note per link"
         );
+    }
+
+    fn index_of(notes: &[(&str, &str)]) -> Index {
+        Index::from_notes(
+            notes
+                .iter()
+                .map(|(n, c)| (p(n), (*c).to_string()))
+                .collect(),
+        )
+    }
+
+    fn resolved(ix: &Index, target: &str, from: &str) -> Option<String> {
+        ix.resolve(target, &p(from)).map(|x| x.as_str().to_string())
+    }
+
+    #[test]
+    fn should_not_list_a_note_as_its_own_backlink() {
+        let ix = index_of(&[("a.md", "[[a]] [[b]]"), ("b.md", "[[a]]")]);
+        let from: Vec<_> = ix
+            .backlinks(&p("a.md").key())
+            .into_iter()
+            .map(|b| b.from.as_str().to_string())
+            .collect();
+        assert_eq!(from, ["b.md"]);
+        assert_eq!(ix.outgoing(&p("a.md").key()).len(), 2);
+        assert!(ix.outgoing(&p("a.md").key())[0].resolved.is_some());
+    }
+
+    #[test]
+    fn should_treat_leading_slash_as_vault_root() {
+        let ix = fixture();
+        assert_eq!(
+            resolved(&ix, "/projects/Plan", "archive/Idea.md").as_deref(),
+            Some("projects/Plan.md")
+        );
+        assert_eq!(
+            resolved(&ix, "/Home", "projects/Plan.md").as_deref(),
+            Some("Home.md")
+        );
+        assert_eq!(normalize_target("/A/B.md"), "a/b");
+        assert_eq!(normalize_target("./x"), normalize_target("/x"));
+    }
+
+    #[test]
+    fn should_prefer_relative_match_over_suffix_match() {
+        let ix = index_of(&[("a/x/n.md", ""), ("b/x/n.md", ""), ("b/s.md", "")]);
+        assert_eq!(resolved(&ix, "x/n", "b/s.md").as_deref(), Some("b/x/n.md"));
+        assert_eq!(resolved(&ix, "x/n", "c/s.md").as_deref(), Some("a/x/n.md"));
+        assert_eq!(resolved(&ix, "../../x/n", "b/s.md"), None);
+    }
+
+    #[test]
+    fn should_prefer_same_folder_over_shallower_note() {
+        let ix = index_of(&[("n.md", ""), ("deep/er/n.md", ""), ("deep/er/s.md", "")]);
+        assert_eq!(
+            resolved(&ix, "n", "deep/er/s.md").as_deref(),
+            Some("deep/er/n.md")
+        );
+    }
+
+    #[test]
+    fn should_normalize_and_reject_degenerate_targets() {
+        assert_eq!(normalize_target("X.MD"), "x");
+        assert_eq!(normalize_target(".md"), "");
+        assert_eq!(normalize_target(""), "");
+        let ix = fixture();
+        assert_eq!(resolved(&ix, "", "Home.md"), None);
+        assert_eq!(resolved(&ix, ".md", "Home.md"), None);
+    }
+
+    #[test]
+    fn should_keep_ignored_files_when_building_from_a_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "[[b]]").unwrap();
+        std::fs::write(dir.path().join("b.md"), "").unwrap();
+        std::fs::write(dir.path().join("bad.md"), [0xff, 0xfe, 0xfd]).unwrap();
+        let ix = Index::build(&Vault::open(dir.path()).unwrap()).unwrap();
+        assert_eq!(ix.len(), 2);
+        assert_eq!(ix.ignored().len(), 1);
+        assert_eq!(ix.ignored()[0].path, "bad.md");
     }
 }
