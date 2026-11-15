@@ -29,6 +29,8 @@ pub enum IgnoreReason {
     NotUtf8,
     /// The file is larger than `MAX_NOTE_BYTES`.
     TooLarge,
+    /// The file exists but could not be read (locked, no permission).
+    Unreadable,
 }
 
 /// A `.md` file the scan did not turn into a note.
@@ -81,11 +83,11 @@ impl Vault {
     /// Scans the vault (spec 5.3) and reads every note.
     ///
     /// # Errors
-    /// `Io` when a directory or a listed file cannot be read.
+    /// `Io` when a directory cannot be listed. An unreadable note is reported as ignored.
     pub fn load(&self) -> Result<Loaded> {
         let mut scan = Scan::default();
         scan.walk(&self.root, "", true)?;
-        scan.read_notes()
+        Ok(scan.read_notes())
     }
 
     /// The on-disk spelling of `path`, matched case-insensitively, if present.
@@ -183,12 +185,19 @@ impl Vault {
     /// # Errors
     /// `NotFound` when there is no such note, `SymlinkInPath` or `Io` otherwise.
     pub fn delete(&self, path: &NotePath) -> Result<()> {
+        self.delete_with_stamp(path, &utc_compact(SystemTime::now()))
+    }
+
+    fn delete_with_stamp(&self, path: &NotePath, stamp: &str) -> Result<()> {
         let source = self.require_file(path)?;
         self.confine(TRASH_RELATIVE.split('/'), TRASH_RELATIVE)?;
         let trash = self.trash_dir();
         fs::create_dir_all(&trash).map_err(io_error(&trash))?;
-        let destination = free_trash_path(&trash, path)?;
-        fs::rename(&source, &destination).map_err(io_error(&source))
+        let destination = claim_trash_path(&trash, path, stamp)?;
+        fs::rename(&source, &destination).map_err(|error| {
+            let _ = fs::remove_file(&destination);
+            io_error(&source)(error)
+        })
     }
 
     /// Moves a note, creating the destination's folders.
@@ -291,7 +300,7 @@ impl Scan {
         }
     }
 
-    fn read_notes(self) -> Result<Loaded> {
+    fn read_notes(self) -> Loaded {
         let Scan {
             mut files,
             mut ignored,
@@ -300,27 +309,23 @@ impl Scan {
         let mut seen = HashSet::new();
         let mut notes = Vec::new();
         for (path, full) in files {
-            let reason = if seen.insert(path.key()) {
-                match read_content(&full)? {
-                    Ok(content) => {
-                        notes.push((path.clone(), content));
-                        None
-                    }
-                    Err(reason) => Some(reason),
-                }
+            let outcome = if seen.insert(path.key()) {
+                read_content(&full)
             } else {
-                Some(IgnoreReason::CaseCollision)
+                ReadOutcome::Ignore(IgnoreReason::CaseCollision)
             };
-            if let Some(reason) = reason {
-                ignored.push(Ignored {
+            match outcome {
+                ReadOutcome::Content(content) => notes.push((path, content)),
+                ReadOutcome::Ignore(reason) => ignored.push(Ignored {
                     path: path.to_string(),
                     reason,
-                });
+                }),
+                ReadOutcome::Vanished => {}
             }
         }
         notes.sort_by_key(|(path, _)| path.key());
         ignored.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(Loaded { notes, ignored })
+        Loaded { notes, ignored }
     }
 }
 
@@ -346,14 +351,36 @@ fn has_markdown_extension(file_name: &std::ffi::OsStr) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case(MARKDOWN_EXTENSION))
 }
 
-/// The note's text, or the reason it must be ignored; the outer error is a real failure.
-fn read_content(full: &Path) -> Result<std::result::Result<String, IgnoreReason>> {
-    let size = fs::metadata(full).map_err(io_error(full))?.len();
+/// What reading one scanned file yielded.
+enum ReadOutcome {
+    Content(String),
+    Ignore(IgnoreReason),
+    /// The file disappeared between the walk and the read.
+    Vanished,
+}
+
+fn read_content(full: &Path) -> ReadOutcome {
+    let size = match fs::metadata(full) {
+        Ok(meta) => meta.len(),
+        Err(error) => return read_failure(&error),
+    };
     if size > MAX_NOTE_BYTES as u64 {
-        return Ok(Err(IgnoreReason::TooLarge));
+        return ReadOutcome::Ignore(IgnoreReason::TooLarge);
     }
-    let bytes = fs::read(full).map_err(io_error(full))?;
-    Ok(String::from_utf8(bytes).map_err(|_| IgnoreReason::NotUtf8))
+    match fs::read(full) {
+        Ok(bytes) => String::from_utf8(bytes).map_or(
+            ReadOutcome::Ignore(IgnoreReason::NotUtf8),
+            ReadOutcome::Content,
+        ),
+        Err(error) => read_failure(&error),
+    }
+}
+
+fn read_failure(error: &io::Error) -> ReadOutcome {
+    match error.kind() {
+        io::ErrorKind::NotFound => ReadOutcome::Vanished,
+        _ => ReadOutcome::Ignore(IgnoreReason::Unreadable),
+    }
 }
 
 /// The entry of `dir` whose name matches `component` ignoring case; an exact match wins,
@@ -433,19 +460,26 @@ fn temp_sibling(target: &Path) -> PathBuf {
     target.with_file_name(format!(".sb-{}-{counter}-{nanos}.tmp", std::process::id()))
 }
 
-/// A trash location that is not taken yet: `<timestamp>-<flattened path>`, then `-1`, `-2`, ...
-fn free_trash_path(trash: &Path, path: &NotePath) -> Result<PathBuf> {
-    let stamp = utc_compact(SystemTime::now());
+/// Claims a trash location by creating an empty placeholder file there, so a name is never
+/// handed out twice: `<stamp>-<flattened path>`, then `-1`, `-2`, ...
+fn claim_trash_path(trash: &Path, path: &NotePath, stamp: &str) -> Result<PathBuf> {
     let flattened = path.as_str().replace('/', "__");
     let mut suffix = String::new();
     let mut counter = 0_u32;
     loop {
-        let candidate = trash.join(trash_name(&stamp, &flattened, &suffix));
-        if lstat(&candidate)?.is_none() {
-            return Ok(candidate);
+        let candidate = trash.join(trash_name(stamp, &flattened, &suffix));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return Ok(candidate),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                counter += 1;
+                suffix = format!("-{counter}");
+            }
+            Err(error) => return Err(io_error(&candidate)(error)),
         }
-        counter += 1;
-        suffix = format!("-{counter}");
     }
 }
 
@@ -726,6 +760,93 @@ mod tests {
             vault.delete(&path).unwrap();
             assert_eq!(entry_count(&vault.trash_dir()), 2);
         }
+    }
+
+    fn assert_only_locked_note_is_unreadable(vault: &Vault) {
+        let loaded = vault.load().unwrap();
+        assert_eq!(note_names(&loaded), ["a.md", "z.md"]);
+        assert_eq!(
+            loaded.ignored,
+            [Ignored {
+                path: "locked.md".into(),
+                reason: IgnoreReason::Unreadable
+            }]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn should_ignore_unreadable_file_and_keep_loading() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let (dir, vault) = vault();
+        for name in ["a.md", "locked.md", "z.md"] {
+            put(&dir, name, b"x");
+        }
+        let _exclusive = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(dir.path().join("locked.md"))
+            .unwrap();
+        assert_only_locked_note_is_unreadable(&vault);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_ignore_unreadable_file_and_keep_loading() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, vault) = vault();
+        for name in ["a.md", "locked.md", "z.md"] {
+            put(&dir, name, b"x");
+        }
+        let locked = dir.path().join("locked.md");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&locked).is_ok() {
+            return; // running as root: permissions do not apply
+        }
+        assert_only_locked_note_is_unreadable(&vault);
+    }
+
+    #[test]
+    fn should_keep_suffix_and_stay_within_limit_when_trash_name_is_shortened() {
+        let stamp = "20251115T142233Z";
+        let ascii = trash_name(stamp, &"x".repeat(900), "-12");
+        assert_eq!(ascii.len(), 255);
+        assert!(ascii.starts_with("20251115T142233Z-") && ascii.ends_with("-12"));
+        let accented = trash_name(stamp, &"é".repeat(600), "-12");
+        assert!(accented.len() <= 255 && accented.ends_with("-12"));
+        assert!(accented.starts_with("20251115T142233Z-é"));
+    }
+
+    #[test]
+    fn should_not_overwrite_an_existing_trash_entry() {
+        let (_dir, vault) = vault();
+        let stamp = "20251115T142233Z";
+        fs::create_dir_all(vault.trash_dir()).unwrap();
+        let taken = vault.trash_dir().join(trash_name(stamp, "a.md", ""));
+        fs::write(&taken, "old").unwrap();
+        vault.write(&p("a.md"), "new").unwrap();
+        vault.delete_with_stamp(&p("a.md"), stamp).unwrap();
+        assert_eq!(fs::read_to_string(&taken).unwrap(), "old");
+        let next = vault.trash_dir().join(trash_name(stamp, "a.md", "-1"));
+        assert_eq!(fs::read_to_string(next).unwrap(), "new");
+        assert_eq!(entry_count(&vault.trash_dir()), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_refuse_rename_onto_a_different_spelling_that_exists() {
+        let (_dir, vault) = vault();
+        vault.write(&p("a.md"), "1").unwrap();
+        vault.write(&p("A.md"), "2").unwrap();
+        assert!(matches!(
+            vault.rename(&p("a.md"), &p("A.md")),
+            Err(CoreError::AlreadyExists(_))
+        ));
+        assert_eq!(vault.read(&p("a.md")).unwrap(), "1");
+        assert_eq!(vault.read(&p("A.md")).unwrap(), "2");
     }
 
     #[cfg(unix)]
