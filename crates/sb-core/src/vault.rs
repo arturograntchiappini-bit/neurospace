@@ -162,26 +162,40 @@ impl Vault {
     /// Reads the note stored under exactly this spelling.
     ///
     /// # Errors
-    /// `NotFound` when no regular file is there, `NotUtf8` when its bytes are not text.
+    /// `NotFound` when no regular file is there, `NotUtf8` when its bytes are not text,
+    /// `InvalidInput` when the file is over `MAX_NOTE_BYTES` (it is not read).
     pub fn read(&self, path: &NotePath) -> Result<String> {
         let full = self.require_file(path)?;
+        let size = fs::metadata(&full).map_err(io_error(&full))?.len();
+        if size > MAX_NOTE_BYTES as u64 {
+            return Err(CoreError::InvalidInput(format!(
+                "{path} is larger than 4 MiB and is not treated as a note"
+            )));
+        }
         let bytes = fs::read(&full).map_err(io_error(&full))?;
         String::from_utf8(bytes).map_err(|_| CoreError::NotUtf8(path.to_string()))
     }
 
-    /// Creates or atomically replaces a note; true when it did not exist before.
+    /// Creates or atomically replaces a note; true when it did not exist before. The caller
+    /// must first resolve the spelling of `path` with `locate` (existing note) or
+    /// `adopt_folders` (new note): this method uses the path as given.
     ///
     /// # Errors
-    /// `InvalidInput` over `MAX_NOTE_BYTES`, `SymlinkInPath` or `Io` on file system trouble.
+    /// `InvalidInput` over `MAX_NOTE_BYTES`, `SymlinkInPath` when the note itself or a
+    /// folder on the way is a link, `Io` on file system trouble.
     pub fn write(&self, path: &NotePath, content: &str) -> Result<bool> {
         check_size(content.len())?;
         let target = self.prepare_target(path)?;
-        let existed = lstat(&target)?.is_some();
+        let existing = lstat(&target)?;
+        if existing.as_ref().is_some_and(fs::Metadata::is_symlink) {
+            return Err(CoreError::SymlinkInPath(path.to_string()));
+        }
         write_atomically(&target, content.as_bytes())?;
-        Ok(!existed)
+        Ok(existing.is_none())
     }
 
-    /// Creates a note and never replaces anything.
+    /// Creates a note and never replaces anything. The caller must first resolve the spelling
+    /// of `path` with `adopt_folders`: this method uses the path as given.
     ///
     /// # Errors
     /// `AlreadyExists` when anything occupies the location, plus the errors of `write`.
@@ -505,13 +519,16 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
 fn write_atomically(target: &Path, bytes: &[u8]) -> Result<()> {
     let temp = temp_sibling(target);
     write_new_file(&temp, bytes).map_err(io_error(&temp))?;
-    fs::rename(&temp, target).map_err(|source| {
+    replace_keeping_permissions(&temp, target).inspect_err(|_| {
         let _ = fs::remove_file(&temp);
-        CoreError::Io {
-            path: target.to_path_buf(),
-            source,
-        }
     })
+}
+
+fn replace_keeping_permissions(temp: &Path, target: &Path) -> Result<()> {
+    if let Some(existing) = lstat(target)? {
+        fs::set_permissions(temp, existing.permissions()).map_err(io_error(temp))?;
+    }
+    fs::rename(temp, target).map_err(io_error(target))
 }
 
 fn temp_sibling(target: &Path) -> PathBuf {
@@ -800,6 +817,54 @@ mod tests {
             Err(CoreError::InvalidInput(_))
         ));
         assert_eq!(vault.read(&p("n.md")).unwrap(), "x");
+    }
+
+    #[test]
+    fn should_refuse_to_read_an_oversized_file() {
+        let (dir, vault) = vault();
+        put(&dir, "big.md", &vec![b'a'; MAX_NOTE_BYTES + 1]);
+        assert!(matches!(
+            vault.read(&p("big.md")),
+            Err(CoreError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            vault.append(&p("big.md"), "x"),
+            Err(CoreError::InvalidInput(_))
+        ));
+        let length = fs::metadata(dir.path().join("big.md")).unwrap().len();
+        assert_eq!(length, MAX_NOTE_BYTES as u64 + 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_refuse_to_write_over_a_symlinked_note() {
+        let (dir, vault) = vault();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("x.md");
+        fs::write(&target, "secret").unwrap();
+        let link = dir.path().join("note.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(matches!(
+            vault.write(&p("note.md"), "new"),
+            Err(CoreError::SymlinkInPath(_))
+        ));
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_keep_permissions_when_replacing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, vault) = vault();
+        vault.write(&p("n.md"), "old").unwrap();
+        let file = dir.path().join("n.md");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        vault.write(&p("n.md"), "new").unwrap();
+        let mode = fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "new");
     }
 
     #[test]
