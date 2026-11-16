@@ -188,7 +188,12 @@ Each link records: target text as written (without heading), optional heading, o
 
 ### 6.2 Link resolution (call)
 
-Resolving target `T` written in note `S`. First normalise: trim, replace `\` with `/`, drop a leading `./` or `/` (a target starting with `/` is relative to the vault root), drop a trailing `.md` (ASCII case-insensitive), lowercase. Then, in order:
+Resolving target `T` written in note `S`. First trim and replace `\` with `/`. Two prefixes anchor the target and switch the general rules off:
+
+- a target starting with `/` is anchored at the vault root: it resolves only to the note at exactly that path, otherwise it is unresolved;
+- a target starting with `./` is relative to the folder of `S` and nothing else, `..` components allowed; a path leaving the vault matches nothing.
+
+Otherwise normalise (drop a trailing `.md`, ASCII case-insensitive; lowercase) and apply, in order:
 
 1. **`T` contains `/`:**
    1. exact vault-relative match: the note whose key is `T.md`;
