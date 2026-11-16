@@ -206,7 +206,7 @@ impl Vault {
         if lstat(&target)?.is_some() {
             return Err(CoreError::AlreadyExists(path.to_string()));
         }
-        write_new_file(&target, content.as_bytes()).map_err(|source| match source.kind() {
+        create_atomically(&target, content.as_bytes()).map_err(|source| match source.kind() {
             io::ErrorKind::AlreadyExists => CoreError::AlreadyExists(path.to_string()),
             _ => CoreError::Io {
                 path: target.clone(),
@@ -515,6 +515,19 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     })
 }
 
+/// Creates `target` complete or not at all: the content is written to a synced temporary sibling
+/// and hard-linked into place, which fails when the name is taken.
+fn create_atomically(target: &Path, bytes: &[u8]) -> io::Result<()> {
+    let temp = temp_sibling(target);
+    write_new_file(&temp, bytes)?;
+    let linked = fs::hard_link(&temp, target);
+    let _ = fs::remove_file(&temp);
+    match linked {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => write_new_file(target, bytes),
+        other => other,
+    }
+}
+
 /// Replaces `target` through a synced sibling temporary file, so readers never see a partial note.
 fn write_atomically(target: &Path, bytes: &[u8]) -> Result<()> {
     let temp = temp_sibling(target);
@@ -526,6 +539,9 @@ fn write_atomically(target: &Path, bytes: &[u8]) -> Result<()> {
 
 fn replace_keeping_permissions(temp: &Path, target: &Path) -> Result<()> {
     if let Some(existing) = lstat(target)? {
+        if existing.permissions().readonly() {
+            return Err(io_error(target)(io::ErrorKind::PermissionDenied.into()));
+        }
         fs::set_permissions(temp, existing.permissions()).map_err(io_error(temp))?;
     }
     fs::rename(temp, target).map_err(io_error(target))
@@ -622,6 +638,56 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), dir.path().join("Link")).unwrap();
         let result = vault.adopt_folders(&p("link/n.md"));
         assert!(matches!(result, Err(CoreError::SymlinkInPath(_))));
+    }
+
+    #[test]
+    fn should_create_without_leaving_temporary_files() {
+        let (dir, vault) = vault();
+        let folder = dir.path().join("d");
+        vault.create(&p("d/n.md"), "content").unwrap();
+        assert_eq!(entry_count(&folder), 1);
+        assert_eq!(fs::read_to_string(folder.join("n.md")).unwrap(), "content");
+
+        let again = vault.create(&p("d/n.md"), "other");
+        assert!(matches!(again, Err(CoreError::AlreadyExists(_))));
+        assert_eq!(fs::read_to_string(folder.join("n.md")).unwrap(), "content");
+        assert_eq!(entry_count(&folder), 1);
+
+        fs::create_dir(folder.join("dir.md")).unwrap();
+        let blocked = vault.create(&p("d/dir.md"), "x");
+        assert!(matches!(blocked, Err(CoreError::AlreadyExists(_))));
+        let temporary = fs::read_dir(&folder)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".sb-"))
+            .count();
+        assert_eq!(temporary, 0);
+    }
+
+    #[test]
+    fn should_refuse_to_replace_a_read_only_note() {
+        let (dir, vault) = vault();
+        vault.write(&p("n.md"), "old").unwrap();
+        let file = dir.path().join("n.md");
+        let set_readonly = |readonly: bool| {
+            let mut permissions = fs::metadata(&file).unwrap().permissions();
+            permissions.set_readonly(readonly);
+            fs::set_permissions(&file, permissions).unwrap();
+        };
+        set_readonly(true);
+        let written = vault.write(&p("n.md"), "new");
+        let appended = vault.append(&p("n.md"), "x");
+        set_readonly(false);
+        for result in [written.map(|_| ()), appended.map(|_| ())] {
+            match result {
+                Err(CoreError::Io { source, .. }) => {
+                    assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+                }
+                other => panic!("expected a permission error, got {other:?}"),
+            }
+        }
+        assert_eq!(fs::read_to_string(&file).unwrap(), "old");
+        assert_eq!(entry_count(dir.path()), 1);
     }
 
     #[test]

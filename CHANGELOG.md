@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reading a note larger than 4 MiB is refused instead of loading it; writing over a note that is a symbolic link is refused; replacing a note keeps its file permissions.
 - The folder filter of `list` and `list_notes` is validated like a note path (`Projects\Sub`, `../x`, `./projects` and hidden folders are errors) and accepts one trailing `/`.
+- Note paths reject more Windows device names (`CON .md` with trailing spaces, `COM0`, `LPT0`, `COM¹`–`COM³`, `LPT¹`–`LPT³`, `CONIN$`, `CONOUT$`), because a Linux peer may legally hold such names.
+- Creating a note writes a temporary file and links it into place, so a crash never leaves a half-written file under the note's name.
+- Writing or appending to a read-only note is refused with a permission error on every platform; it used to replace the file on Linux.
 - MCP tool descriptions now state limits, result shapes and that rename does not rewrite links; read-only and destructive tools carry annotations.
 
 ### Fixed
