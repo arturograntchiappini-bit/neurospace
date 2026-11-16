@@ -29,14 +29,15 @@ pub enum IgnoreReason {
     NotUtf8,
     /// The file is larger than `MAX_NOTE_BYTES`.
     TooLarge,
-    /// The file exists but could not be read (locked, no permission).
+    /// The file could not be read (locked, no permission), or the folder could not be listed.
     Unreadable,
 }
 
 /// A `.md` file the scan did not turn into a note.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ignored {
-    /// Vault-relative path, `/`-separated (lossy for names that are not Unicode).
+    /// Vault-relative path, `/`-separated (lossy for names that are not Unicode). A trailing
+    /// `/` marks a folder whose notes could not be listed.
     pub path: String,
     /// Why it was left out.
     pub reason: IgnoreReason,
@@ -83,10 +84,12 @@ impl Vault {
     /// Scans the vault (spec 5.3) and reads every note.
     ///
     /// # Errors
-    /// `Io` when a directory cannot be listed. An unreadable note is reported as ignored.
+    /// `Io` when the vault root cannot be listed. An unreadable note or sub-folder is
+    /// reported as ignored.
     pub fn load(&self) -> Result<Loaded> {
         let mut scan = Scan::default();
-        scan.walk(&self.root, "", true)?;
+        scan.walk(&self.root, "", true)
+            .map_err(io_error(&self.root))?;
         Ok(scan.read_notes())
     }
 
@@ -307,25 +310,46 @@ struct Scan {
 
 impl Scan {
     /// `prefix` is the relative path of `dir` with a trailing `/`; `unicode` is false
-    /// when any name on the way was not valid Unicode.
-    fn walk(&mut self, dir: &Path, prefix: &str, unicode: bool) -> Result<()> {
-        for entry in fs::read_dir(dir).map_err(io_error(dir))? {
-            let entry = entry.map_err(io_error(dir))?;
-            let file_name = entry.file_name();
-            let name = file_name.to_string_lossy();
-            if name.starts_with('.') {
-                continue;
-            }
-            let full = entry.path();
-            let kind = entry.file_type().map_err(io_error(&full))?;
-            let unicode = unicode && file_name.to_str().is_some();
-            if kind.is_dir() {
-                self.walk(&full, &format!("{prefix}{name}/"), unicode)?;
-            } else if kind.is_file() && has_markdown_extension(&file_name) {
-                self.classify(full, format!("{prefix}{name}"), unicode);
-            }
+    /// when any name on the way was not valid Unicode. Fails when `dir` or one of its
+    /// entries cannot be listed.
+    fn walk(&mut self, dir: &Path, prefix: &str, unicode: bool) -> io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            self.visit(&entry?, prefix, unicode);
         }
         Ok(())
+    }
+
+    fn visit(&mut self, entry: &fs::DirEntry, prefix: &str, unicode: bool) {
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if name.starts_with('.') {
+            return;
+        }
+        let relative = format!("{prefix}{name}");
+        let unicode = unicode && file_name.to_str().is_some();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => self.walk_folder(&entry.path(), relative, unicode),
+            Ok(kind) if kind.is_file() && has_markdown_extension(&file_name) => {
+                self.classify(entry.path(), relative, unicode);
+            }
+            Err(_) if has_markdown_extension(&file_name) => self.ignore_unreadable(relative),
+            _ => {}
+        }
+    }
+
+    /// A folder that cannot be listed is recorded with a trailing `/` and the scan goes on.
+    fn walk_folder(&mut self, dir: &Path, mut relative: String, unicode: bool) {
+        relative.push('/');
+        if self.walk(dir, &relative, unicode).is_err() {
+            self.ignore_unreadable(relative);
+        }
+    }
+
+    fn ignore_unreadable(&mut self, path: String) {
+        self.ignored.push(Ignored {
+            path,
+            reason: IgnoreReason::Unreadable,
+        });
     }
 
     fn classify(&mut self, full: PathBuf, relative: String, unicode: bool) {
@@ -866,6 +890,70 @@ mod tests {
             return; // running as root: permissions do not apply
         }
         assert_only_locked_note_is_unreadable(&vault);
+    }
+
+    struct OnDrop<F: FnMut()>(F);
+
+    impl<F: FnMut()> Drop for OnDrop<F> {
+        fn drop(&mut self) {
+            (self.0)();
+        }
+    }
+
+    fn assert_unlistable_folder_is_ignored(vault: &Vault) {
+        let loaded = vault.load().unwrap();
+        assert_eq!(note_names(&loaded), ["good.md"]);
+        assert_eq!(
+            loaded.ignored,
+            [Ignored {
+                path: "locked/".into(),
+                reason: IgnoreReason::Unreadable
+            }]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn should_ignore_an_unlistable_folder_and_keep_scanning() {
+        let (dir, vault) = vault();
+        put(&dir, "good.md", b"x");
+        put(&dir, "locked/hidden.md", b"x");
+        let locked = dir.path().join("locked");
+        let user = std::env::var("USERNAME").unwrap();
+        let icacls = |flag: &str, rule: &str| {
+            let status = std::process::Command::new("icacls")
+                .arg(&locked)
+                .args([flag, rule])
+                .output()
+                .unwrap()
+                .status;
+            assert!(status.success());
+        };
+        icacls("/deny", &format!("{user}:(RD)"));
+        let _restore = OnDrop(|| icacls("/remove:d", &user));
+        assert!(fs::read_dir(&locked).is_err());
+        assert_unlistable_folder_is_ignored(&vault);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_ignore_an_unlistable_folder_and_keep_scanning() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, vault) = vault();
+        put(&dir, "good.md", b"x");
+        put(&dir, "locked/hidden.md", b"x");
+        let locked = dir.path().join("locked");
+        let set_mode = |mode| fs::set_permissions(&locked, fs::Permissions::from_mode(mode));
+        set_mode(0o000).unwrap();
+        let _restore = OnDrop(|| {
+            let _ = set_mode(0o755);
+        });
+        if fs::read_dir(&locked).is_ok() {
+            eprintln!("running as root: permissions do not apply; skipping");
+            return;
+        }
+        assert_unlistable_folder_is_ignored(&vault);
     }
 
     #[test]
