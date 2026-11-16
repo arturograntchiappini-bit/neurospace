@@ -7,7 +7,7 @@ use sb_core::ops;
 use sb_core::{CoreError, Vault};
 
 use crate::cli::{Cli, Command};
-use crate::render;
+use crate::{mcp, render};
 
 /// Everything that makes a command fail.
 #[derive(Debug, thiserror::Error)]
@@ -21,9 +21,9 @@ pub enum CliError {
     /// A result could not be serialised.
     #[error("cannot serialise the result: {0}")]
     Json(#[from] serde_json::Error),
-    /// The command exists but is not implemented yet.
-    #[error("`sb {0}` is not available yet")]
-    NotAvailable(&'static str),
+    /// The MCP server stopped on a protocol failure.
+    #[error("MCP server failed: {0}")]
+    Mcp(String),
 }
 
 /// Runs the parsed command line.
@@ -44,7 +44,7 @@ pub fn run(cli: Cli) -> Result<(), CliError> {
         Command::Links { path } => links(&vault, &path, json),
         Command::Graph { around, depth } => graph(&vault, around.as_deref(), depth, json),
         Command::Tags => render::emit(json, &ops::list_tags(&vault)?, render::tags),
-        Command::Mcp => Err(CliError::NotAvailable("mcp")),
+        Command::Mcp => mcp::serve_stdio(vault),
     }
 }
 

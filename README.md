@@ -20,6 +20,42 @@ Status: under construction.
 | `sb links <PATH>` | Outgoing links and backlinks of a note. | `sb links Home.md`, `sb --json links Home.md` |
 | `sb graph [--around <PATH>] [--depth <N>]` | The link graph, or the part around a note. | `sb graph`, `sb graph --around Home.md --depth 2` |
 | `sb tags` | Every tag with its note count. | `sb tags`, `sb --json tags` |
-| `sb mcp` | Run the MCP server on stdio (not available yet). | `sb mcp` |
+| `sb mcp` | Run the MCP server on stdio until stdin closes. | `sb --vault ~/notes mcp` |
 
 Exit code 0 means success, 1 an operation error (one line on stderr), 2 a usage error.
+
+## Use with AI agents
+
+`sb mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio. It lets an AI agent such as Claude Code or Claude Desktop read, search, write and navigate a vault with the same operations as the command line. Stdout carries protocol messages only; a failed operation (bad path, missing note) comes back as a tool result with `isError: true`.
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `list_notes` | `folder?` | `{ notes: [{ path, title }], ignored }` |
+| `read_note` | `path` | the note's Markdown text |
+| `write_note` | `path`, `content` | `{ path, created }`; creates or replaces the whole note |
+| `append_to_note` | `path`, `content` | `{ path, created }` |
+| `delete_note` | `path` | `{ path, trashed: true }`; moves the note to the trash |
+| `rename_note` | `from`, `to` | `{ from, to }` |
+| `search_notes` | `query`, `limit?` | `{ hits: [{ path, title, score, snippets }] }` |
+| `get_links` | `path` | `{ outgoing, backlinks }` |
+| `get_graph` | `around?`, `depth?` | `{ nodes, edges }` |
+| `list_tags` | none | `{ tags: [{ tag, count }] }` |
+
+Register it in Claude Code:
+
+```sh
+claude mcp add second-brain -- sb --vault /path/to/vault mcp
+```
+
+Or in Claude Desktop, in `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "second-brain": {
+      "command": "sb",
+      "args": ["--vault", "/path/to/vault", "mcp"]
+    }
+  }
+}
+```
