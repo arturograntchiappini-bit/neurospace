@@ -213,6 +213,9 @@ impl Replica {
     /// `now` is the time since the engine started. Carries out a pending command, ends an
     /// expired fresh-join wait and writes `status.json`. A bad pending command is dropped and
     /// reported in the status; only failures of the state directory or the document are errors.
+    /// Once a command changed the group, its `Tick` is always returned: a later failure of the
+    /// same tick is reported in `last_error` instead, so the host still learns of the change.
+    /// Hosts should also re-read `secret` on every tick (spec section 8.3).
     ///
     /// # Errors
     /// Failures of the state directory, the document or the vault's state.
@@ -221,9 +224,20 @@ impl Replica {
         if tick.left {
             return Ok(tick);
         }
-        tick.outgoing.extend(self.end_expired_wait(now)?);
-        self.local.state.write_status(&self.status())?;
+        if let Err(error) = self.finish_tick(now, &mut tick) {
+            if !tick.secret_changed {
+                return Err(error);
+            }
+            self.last_error = Some(error.to_string());
+            // shortcut: the second status write is best effort, the failure is already recorded.
+            let _ = self.local.state.write_status(&self.status());
+        }
         Ok(tick)
+    }
+
+    fn finish_tick(&mut self, now: Duration, tick: &mut Tick) -> Result<()> {
+        tick.outgoing.extend(self.end_expired_wait(now)?);
+        self.local.state.write_status(&self.status())
     }
 
     /// Joins the group of a ticket. Its own group only adds the inviting peer. Another group
@@ -232,8 +246,13 @@ impl Replica {
     /// secret is what makes the device a member. Local notes are never touched.
     ///
     /// # Errors
-    /// Failures of the state directory.
+    /// `InvalidTicket` for a ticket of this very device; failures of the state directory.
     pub fn join(&mut self, ticket: &Ticket, now: Duration) -> Result<Tick> {
+        if ticket.device_id == self.device_id {
+            return Err(SyncError::InvalidTicket(
+                "the ticket belongs to this device".to_string(),
+            ));
+        }
         let inviter = PeerEntry {
             id: to_hex(&ticket.device_id),
             addrs: ticket.addrs.iter().map(ToString::to_string).collect(),
@@ -288,15 +307,24 @@ impl Replica {
             }
             Err(error) => return Err(error),
         };
+        // A command that fails is reported below; one that works leaves nothing to report.
+        self.last_error = None;
         match command {
-            PendingCommand::Join(text) => match text.parse::<Ticket>() {
-                Ok(ticket) => self.join(&ticket, now),
-                Err(_) => {
-                    Ok(self.drop_command("a pending join with an invalid ticket was dropped"))
-                }
-            },
+            PendingCommand::Join(text) => self.join_from_text(&text, now),
             PendingCommand::Leave(true) => self.leave(),
             PendingCommand::Leave(false) => Ok(Tick::default()),
+        }
+    }
+
+    fn join_from_text(&mut self, text: &str, now: Duration) -> Result<Tick> {
+        let joined = text
+            .parse::<Ticket>()
+            .and_then(|ticket| self.join(&ticket, now));
+        match joined {
+            Err(SyncError::InvalidTicket(_)) => {
+                Ok(self.drop_command("a pending join with an invalid ticket was dropped"))
+            }
+            other => other,
         }
     }
 

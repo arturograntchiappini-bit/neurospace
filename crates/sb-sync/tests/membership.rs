@@ -9,7 +9,7 @@ use std::time::Duration;
 use common::{Net, Node, assert_converged, node};
 use sb_sync::{
     Base, FRESH_JOIN_WAIT, Message, PeerEntry, PeerStatus, PendingCommand, SessionId, StateDir,
-    Tick, Ticket, to_hex,
+    SyncError, Tick, Ticket, to_hex,
 };
 
 const OTHER_SECRET: [u8; 32] = [8; 32];
@@ -337,9 +337,16 @@ fn should_carry_out_a_pending_command_on_tick() {
 
 #[test]
 fn should_drop_a_bad_pending_command_and_report_it() {
-    let mut nodes = vec![node(1)];
-    let mut net = Net::new();
-    for content in [r#"{"join":"not-a-ticket-garbage"}"#, "{ garbage"] {
+    let own_ticket = PendingCommand::Join(ticket(1, OTHER_SECRET).to_string());
+    let own_ticket = serde_json::to_string(&own_ticket).unwrap();
+    for content in [
+        r#"{"join":"not-a-ticket-garbage"}"#.to_string(),
+        "{ garbage".to_string(),
+        own_ticket,
+    ] {
+        // A fresh node per case: a report left over from an earlier case must not satisfy this one.
+        let mut nodes = vec![node(1)];
+        let mut net = Net::new();
         std::fs::write(state(&nodes[0]).file("command.pending"), content).unwrap();
         let tick = net.tick(&mut nodes, 0, Duration::ZERO);
         assert!(!tick.secret_changed && !tick.left);
@@ -349,6 +356,63 @@ fn should_drop_a_bad_pending_command_and_report_it() {
         let reported = status.last_error.expect("the problem is reported");
         assert!(!reported.contains("garbage"), "{reported}");
     }
+}
+
+#[test]
+fn should_clear_the_reported_error_when_a_later_command_succeeds() {
+    let mut nodes = vec![node(1)];
+    let mut net = Net::new();
+    std::fs::write(state(&nodes[0]).file("command.pending"), "{ garbage").unwrap();
+    net.tick(&mut nodes, 0, Duration::ZERO);
+    assert!(nodes[0].replica.status().last_error.is_some());
+
+    let command = PendingCommand::Join(ticket(9, OTHER_SECRET).to_string());
+    state(&nodes[0]).write_pending(&command).unwrap();
+    net.tick(&mut nodes, 0, Duration::from_secs(5));
+
+    assert_eq!(nodes[0].replica.status().last_error, None);
+    let status = state(&nodes[0]).read_status().unwrap().unwrap();
+    assert_eq!(status.last_error, None);
+}
+
+#[test]
+fn should_keep_the_tick_of_a_carried_out_command_when_a_later_step_fails() {
+    let mut node = node(1);
+    let command = PendingCommand::Join(ticket(9, OTHER_SECRET).to_string());
+    state(&node).write_pending(&command).unwrap();
+    // A directory in the place of status.json makes every status write fail.
+    std::fs::create_dir(state(&node).file("status.json")).unwrap();
+
+    let tick = node.replica.tick(Duration::ZERO).unwrap();
+
+    assert!(tick.secret_changed);
+    assert_eq!(state(&node).secret().unwrap(), Some(OTHER_SECRET));
+    assert!(node.replica.status().last_error.is_some());
+}
+
+#[test]
+fn should_still_fail_the_tick_when_no_command_ran_and_the_status_cannot_be_written() {
+    let mut node = node(1);
+    std::fs::create_dir(state(&node).file("status.json")).unwrap();
+    assert!(node.replica.tick(Duration::ZERO).is_err());
+}
+
+#[test]
+fn should_refuse_a_ticket_for_this_device() {
+    let (_net, mut nodes, _session) = connected_pair_with_notes();
+    let files = nodes[0].files();
+    let peers = state(&nodes[0]).peers().unwrap();
+    for secret in [GROUP_SECRET, OTHER_SECRET] {
+        let own = ticket(1, secret);
+        let result = nodes[0].replica.join(&own, Duration::ZERO);
+        assert!(matches!(result, Err(SyncError::InvalidTicket(_))));
+    }
+    assert_eq!(state(&nodes[0]).secret().unwrap(), Some(GROUP_SECRET));
+    assert_eq!(state(&nodes[0]).peers().unwrap(), peers);
+    assert!(!state(&nodes[0]).fresh_join());
+    assert_eq!(nodes[0].replica.local().doc.alive_notes().len(), 2);
+    assert_eq!(nodes[0].replica.connected_peers(), [[2; 32]]);
+    assert_eq!(nodes[0].files(), files);
 }
 
 #[test]

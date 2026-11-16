@@ -7,7 +7,7 @@ use sb_core::Vault;
 
 use crate::error::{Result, SyncError};
 use crate::replica::{Replica, Tick, unix_now};
-use crate::state::{PendingCommand, StateDir, Status};
+use crate::state::{PendingCommand, StateDir, Status, remove_if_exists};
 use crate::ticket::Ticket;
 
 /// A status older than this many seconds means that no engine is running.
@@ -84,6 +84,8 @@ fn apply_or_queue(
         }
         Err(error) => return Err(error),
     };
+    // A command left from before would otherwise run on top of the new state at the next engine start.
+    remove_if_exists(&state.file("command.pending"))?;
     // The id is not used on this path: no session is opened.
     let device_id = state.device_id()?.unwrap_or_default();
     let mut replica = Replica::open(vault.clone(), state.clone(), device_id)?;
@@ -160,6 +162,20 @@ mod tests {
         let expected = serde_json::json!({ "join": ticket().to_string() });
         assert_eq!(pending(state), expected);
         assert_eq!(state.secret().unwrap(), None);
+    }
+
+    #[test]
+    fn should_discard_a_stale_pending_command_when_applying_directly() {
+        let fx = fixture();
+        let (vault, state) = (&fx.vault, &fx.state);
+        state.save_secret(&[7; 32]).unwrap();
+        let stale = PendingCommand::Leave(true);
+        state.write_pending(&stale).unwrap();
+        assert_eq!(join(vault, state, &ticket()).unwrap(), Applied::Now);
+        assert!(!state.file("command.pending").exists());
+        state.write_pending(&stale).unwrap();
+        assert_eq!(leave(vault, state).unwrap(), Applied::Now);
+        assert!(!state.file("command.pending").exists());
     }
 
     #[test]
