@@ -233,12 +233,16 @@ fn link_parts<'t>(tag: &'t Tag<'_>) -> Option<(LinkType, &'t str, bool)> {
 }
 
 fn build_link(dest: &str, kind: LinkKind, line: u32) -> Option<Link> {
+    // The parser keeps the backslash of an escaped pipe (`[[A#H\|B]]`) in a wiki destination.
+    let dest = if kind == LinkKind::Markdown {
+        dest
+    } else {
+        dest.strip_suffix('\\').unwrap_or(dest)
+    };
     let (target, heading) = dest.split_once('#').unwrap_or((dest, ""));
     let (target, heading) = if kind == LinkKind::Markdown {
         (percent_decode(target), percent_decode(heading))
     } else {
-        // The parser keeps the backslash of an escaped pipe (`[[A\|B]]`) in the destination.
-        let target = target.strip_suffix('\\').unwrap_or(target);
         (target.to_owned(), heading.to_owned())
     };
     let target = target.trim();
@@ -417,6 +421,29 @@ MD: [text](other/Note%20D.md#h) and [ext](https://example.com/x.md) and [img](pi
         assert_eq!(
             parse(md).links,
             vec![link("A", None, Some("B"), LinkKind::Wiki, 3)]
+        );
+    }
+
+    #[test]
+    fn should_strip_escaped_pipe_backslash_from_heading() {
+        let expected = vec![link(
+            "Note",
+            Some("Heading"),
+            Some("Alias"),
+            LinkKind::Wiki,
+            3,
+        )];
+        let table = "| h | h |\n| - | - |\n| [[Note#Heading\\|Alias]] | x |\n";
+        assert_eq!(parse(table).links, expected);
+        assert_eq!(
+            parse("[[Note#Heading\\|Alias]]").links,
+            vec![link(
+                "Note",
+                Some("Heading"),
+                Some("Alias"),
+                LinkKind::Wiki,
+                1
+            )]
         );
     }
 
