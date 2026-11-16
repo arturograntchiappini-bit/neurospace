@@ -2,6 +2,7 @@
 //! directory, the sync document, the base and the store.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 use sb_core::{CoreError, NotePath, Vault};
 
@@ -70,6 +71,8 @@ pub struct LocalReplica {
     /// The document's durable storage.
     pub store: DocStore,
     stage: StageRecord,
+    /// The version last written to `base.version`, if any.
+    base_version: Option<Vec<u8>>,
 }
 
 impl LocalReplica {
@@ -82,7 +85,7 @@ impl LocalReplica {
         ensure_marker(&vault, &state)?;
         let (store, doc) = DocStore::open(&state)?;
         let mut base = Base::load(&state)?;
-        drop_base_without_history(&state, &doc, &mut base)?;
+        let base_version = drop_base_without_history(&state, &doc, &mut base)?;
         Ok(LocalReplica {
             vault,
             state,
@@ -90,6 +93,7 @@ impl LocalReplica {
             base,
             store,
             stage: StageRecord::default(),
+            base_version,
         })
     }
 
@@ -111,7 +115,10 @@ impl LocalReplica {
     }
 
     /// Scans, resolves path claims, plans, applies the document actions and persists the document.
+    /// Stops before touching anything when the vault lost its marker folder (spec 8.5 rule 5):
+    /// an unmounted vault looks like a vault whose notes were all deleted.
     pub(crate) fn run_doc_stage(&mut self) -> Result<Vec<Step>> {
+        require_marker(&self.vault)?;
         let before = self.doc.version();
         let scan = scan(&self.vault)?;
         self.doc.resolve_claims()?;
@@ -141,20 +148,37 @@ impl LocalReplica {
             blocked: self.stage.scan_blocked.clone(),
             ..Outcome::default()
         };
+        let mut base_changed = false;
         for step in &steps {
             match self.carry_out(step) {
                 Ok(changed) => {
                     outcome.disk_changed |= changed;
                     self.apply_base(step);
+                    base_changed = true;
                 }
                 Err(blocked) => outcome.blocked.push(blocked),
             }
         }
-        self.base.save(&self.state)?;
-        let version_file = self.state.file(BASE_VERSION_FILE);
-        write_atomic(&version_file, to_hex(&self.stage.version).as_bytes())?;
+        self.save_base(base_changed)?;
         outcome.blocked = unique_by_path(outcome.blocked);
         Ok(outcome)
+    }
+
+    /// Every planned step changes the base, so `changed` means at least one step succeeded.
+    /// `base.version` follows the document version, and is written only when something differs.
+    fn save_base(&mut self, changed: bool) -> Result<()> {
+        if changed {
+            self.base.save(&self.state)?;
+        }
+        let version = &self.stage.version;
+        if changed || self.base_version.as_ref() != Some(version) {
+            write_atomic(
+                &self.state.file(BASE_VERSION_FILE),
+                to_hex(version).as_bytes(),
+            )?;
+            self.base_version = Some(version.clone());
+        }
+        Ok(())
     }
 
     fn plan_steps(&self, scan: &DiskScan) -> Vec<Step> {
@@ -193,9 +217,21 @@ impl LocalReplica {
     }
 }
 
+fn marker_path(vault: &Vault) -> PathBuf {
+    vault.root().join(MARKER_DIR)
+}
+
+fn require_marker(vault: &Vault) -> Result<()> {
+    let marker = marker_path(vault);
+    if marker.is_dir() {
+        return Ok(());
+    }
+    Err(SyncError::VaultMarkerMissing(marker))
+}
+
 /// Without the folder, a vault that has sync state is not the vault that was synced.
 fn ensure_marker(vault: &Vault, state: &StateDir) -> Result<()> {
-    let marker = vault.root().join(MARKER_DIR);
+    let marker = marker_path(vault);
     if marker.is_dir() {
         return Ok(());
     }
@@ -209,24 +245,31 @@ fn ensure_marker(vault: &Vault, state: &StateDir) -> Result<()> {
 }
 
 /// A base the loaded document cannot vouch for would turn every note into a remote deletion.
-fn drop_base_without_history(state: &StateDir, doc: &SyncDoc, base: &mut Base) -> Result<()> {
-    if base.is_empty() || base_version_is_known(state, doc)? {
-        return Ok(());
+/// Returns the version `base.version` held, as far as it is readable and decodes.
+fn drop_base_without_history(
+    state: &StateDir,
+    doc: &SyncDoc,
+    base: &mut Base,
+) -> Result<Option<Vec<u8>>> {
+    let version = read_base_version(state);
+    let known = version
+        .as_ref()
+        .is_some_and(|version| doc.includes_version(version).unwrap_or(false));
+    if base.is_empty() || known {
+        return Ok(version);
     }
     base.clear();
     base.save(state)?;
-    remove_if_exists(&state.file(BASE_VERSION_FILE))
+    remove_if_exists(&state.file(BASE_VERSION_FILE))?;
+    Ok(None)
 }
 
-fn base_version_is_known(state: &StateDir, doc: &SyncDoc) -> Result<bool> {
-    let Some(bytes) = read_optional(&state.file(BASE_VERSION_FILE))? else {
-        return Ok(false);
-    };
-    let version = std::str::from_utf8(&bytes)
-        .ok()
-        .and_then(|text| from_hex(text.trim()))
-        .filter(|version| !version.is_empty());
-    Ok(version.is_some_and(|version| doc.includes_version(&version).unwrap_or(false)))
+/// Missing, unreadable or not hexadecimal means «unknown»; an empty or undecodable version
+/// fails later, in `SyncDoc::includes_version`.
+fn read_base_version(state: &StateDir) -> Option<Vec<u8>> {
+    let bytes = read_optional(&state.file(BASE_VERSION_FILE)).ok()??;
+    let text = std::str::from_utf8(&bytes).ok()?;
+    from_hex(text.trim())
 }
 
 fn apply_doc_action(doc: &mut SyncDoc, action: &DocAction) -> Result<()> {
@@ -305,11 +348,12 @@ fn create_file(vault: &Vault, path: &NotePath, content: &str) -> FileResult {
     vault.create(&spelled, content).map_err(describe)
 }
 
-/// Any failure to read the file counts as a change: the file is not what the scan saw.
+/// A different or vanished file counts as a change; any other failure is reported as it is.
 fn still_has_content(vault: &Vault, path: &NotePath, expect: &Hash32) -> FileResult {
     match vault.read(path) {
         Ok(content) if content_hash(&content) == *expect => Ok(()),
-        _ => Err(CHANGED_WHILE_SYNCING.to_owned()),
+        Ok(_) | Err(CoreError::NotFound(_)) => Err(CHANGED_WHILE_SYNCING.to_owned()),
+        Err(error) => Err(describe(error)),
     }
 }
 
@@ -461,10 +505,14 @@ mod tests {
         assert_eq!(note(&replica, "d/b.md").unwrap().text, "B\n");
         assert_eq!(replica.doc.alive_notes().len(), 2);
         assert_eq!(replica.base.keys().count(), 2);
+        let modified = |name: &str| std::fs::metadata(dirs.state_file(name)).unwrap().modified();
+        let (base_time, version_time) = (modified("base.json"), modified("base.version"));
         let second = replica.reconcile().unwrap();
         assert!(!second.doc_changed && !second.disk_changed);
         assert_eq!(second.passes, 1);
         assert!(dirs.path(".secondbrain").is_dir());
+        assert_eq!(modified("base.json").unwrap(), base_time.unwrap());
+        assert_eq!(modified("base.version").unwrap(), version_time.unwrap());
     }
 
     #[test]
@@ -778,18 +826,73 @@ mod tests {
         assert_eq!(reopened.base.keys().count(), 2);
     }
 
-    #[test]
-    fn should_not_trash_notes_when_the_base_version_is_missing() {
+    /// The document loses its history and `base.version` is left in the given state
+    /// (`None`: the file is deleted); nothing may be trashed whichever way it is broken.
+    fn assert_nothing_trashed_when_base_version_is(content: Option<&[u8]>) {
         let dirs = Dirs::new(&[("a.md", "A\n"), ("b.md", "B\n")]);
         let mut replica = dirs.open();
         replica.reconcile().unwrap();
         drop(replica);
-        std::fs::remove_file(dirs.state_file("base.version")).unwrap();
+        forget_document(&dirs);
+        match content {
+            Some(bytes) => std::fs::write(dirs.state_file("base.version"), bytes).unwrap(),
+            None => std::fs::remove_file(dirs.state_file("base.version")).unwrap(),
+        }
         let mut reopened = dirs.open();
-        let outcome = reopened.reconcile().unwrap();
-        assert!(!outcome.doc_changed && !outcome.disk_changed);
+        reopened.reconcile().unwrap();
         expect_files(&reopened, &[("a.md", "A\n"), ("b.md", "B\n")]);
         assert!(trash(&reopened).is_empty());
+        assert_eq!(reopened.doc.alive_notes().len(), 2);
+        assert_eq!(reopened.base.keys().count(), 2);
+    }
+
+    #[test]
+    fn should_not_trash_notes_when_base_version_is_missing() {
+        assert_nothing_trashed_when_base_version_is(None);
+    }
+
+    #[test]
+    fn should_not_trash_notes_when_base_version_is_not_hex() {
+        assert_nothing_trashed_when_base_version_is(Some(b"zz"));
+    }
+
+    #[test]
+    fn should_not_trash_notes_when_base_version_has_odd_length() {
+        assert_nothing_trashed_when_base_version_is(Some(b"abc"));
+    }
+
+    #[test]
+    fn should_not_trash_notes_when_base_version_is_empty() {
+        assert_nothing_trashed_when_base_version_is(Some(b""));
+    }
+
+    #[test]
+    fn should_not_trash_notes_when_base_version_does_not_decode() {
+        assert_nothing_trashed_when_base_version_is(Some(b"ffff"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_not_trash_notes_when_base_version_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dirs = Dirs::new(&[("a.md", "A\n"), ("b.md", "B\n")]);
+        let mut replica = dirs.open();
+        replica.reconcile().unwrap();
+        drop(replica);
+        forget_document(&dirs);
+        let version = dirs.state_file("base.version");
+        let set_mode = |mode: u32| {
+            std::fs::set_permissions(&version, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        set_mode(0o000);
+        if std::fs::read(&version).is_ok() {
+            set_mode(0o600);
+            eprintln!("skipped: the file can still be read (running as root)");
+            return;
+        }
+        let reopened = dirs.open();
+        set_mode(0o600);
+        assert_eq!(reopened.base.keys().count(), 0);
     }
 
     #[test]
@@ -802,6 +905,104 @@ mod tests {
         let vault = Vault::open(dirs.vault.path()).unwrap();
         let reopened = LocalReplica::open(vault, StateDir::at(dirs.state.path()).unwrap());
         assert!(matches!(reopened, Err(SyncError::VaultMarkerMissing(_))));
+    }
+
+    #[test]
+    fn should_stop_the_round_when_the_vault_marker_disappears_while_running() {
+        let dirs = Dirs::new(&[("a.md", "A\n"), ("b.md", "B\n")]);
+        let mut replica = dirs.open();
+        replica.reconcile().unwrap();
+        std::fs::remove_dir_all(dirs.path(".secondbrain")).unwrap();
+        dirs.remove("a.md");
+        dirs.remove("b.md");
+        let stopped = replica.reconcile();
+        assert!(matches!(stopped, Err(SyncError::VaultMarkerMissing(_))));
+        assert_eq!(replica.doc.alive_notes().len(), 2);
+        std::fs::create_dir(dirs.path(".secondbrain")).unwrap();
+        dirs.write("a.md", "A\n");
+        dirs.write("b.md", "B\n");
+        let resumed = replica.reconcile().unwrap();
+        assert!(!resumed.doc_changed && !resumed.disk_changed);
+        assert_eq!(replica.doc.alive_notes().len(), 2);
+    }
+
+    #[test]
+    fn should_leave_the_base_alone_when_a_new_file_is_blocked() {
+        let dirs = Dirs::new(&[]);
+        std::fs::create_dir(dirs.path("x.md")).unwrap();
+        let mut replica = dirs.open();
+        replica.doc.create_note(&np("x.md"), "remote").unwrap();
+        replica.reconcile().unwrap();
+        assert_eq!(replica.base.get(&np("x.md").key()), None);
+        assert!(note(&replica, "x.md").is_some());
+        replica.reconcile().unwrap();
+        assert!(note(&replica, "x.md").is_some());
+        assert!(dirs.path("x.md").is_dir());
+    }
+
+    #[test]
+    fn should_leave_the_base_alone_when_a_trash_is_blocked() {
+        let dirs = Dirs::new(&[("a.md", "A\n")]);
+        let mut replica = dirs.open();
+        replica.reconcile().unwrap();
+        let a = note(&replica, "a.md").unwrap();
+        replica.doc.tombstone(&a.id).unwrap();
+        let steps = replica.run_doc_stage().unwrap();
+        dirs.write("a.md", "late\n");
+        let outcome = replica.run_disk_stage(steps).unwrap();
+        assert_eq!(dirs.read("a.md"), "late\n");
+        assert!(trash(&replica).is_empty());
+        let old_hash = content_hash("A\n");
+        assert_eq!(replica.base.get(&np("a.md").key()), Some(&old_hash));
+        assert_eq!(outcome.blocked.len(), 1);
+        assert_eq!(outcome.blocked[0].path, "a.md");
+        replica.reconcile().unwrap();
+        expect_files(&replica, &[("a.md", "late\n")]);
+        assert!(trash(&replica).is_empty());
+    }
+
+    #[test]
+    fn should_leave_the_base_alone_when_a_rename_is_blocked() {
+        let dirs = Dirs::new(&[("a.md", "A\n")]);
+        let mut replica = dirs.open();
+        replica.reconcile().unwrap();
+        let a = note(&replica, "a.md").unwrap();
+        replica.doc.set_path(&a.id, &np("moved/a2.md")).unwrap();
+        let steps = replica.run_doc_stage().unwrap();
+        dirs.write("a.md", "late\n");
+        replica.run_disk_stage(steps).unwrap();
+        assert_eq!(dirs.read("a.md"), "late\n");
+        assert!(!dirs.path("moved/a2.md").exists());
+        assert_eq!(
+            replica.base.get(&np("a.md").key()),
+            Some(&content_hash("A\n"))
+        );
+        assert_eq!(replica.base.get(&np("moved/a2.md").key()), None);
+        replica.reconcile().unwrap();
+        let mut texts: Vec<String> = files(&replica).into_values().collect();
+        texts.sort_unstable();
+        assert_eq!(texts, ["A\n", "late\n"]);
+    }
+
+    #[test]
+    fn should_say_why_a_file_could_not_be_checked() {
+        let dirs = Dirs::new(&[("a.md", "A\n"), ("b.md", "B\n")]);
+        let mut replica = dirs.open();
+        replica.reconcile().unwrap();
+        for path in ["a.md", "b.md"] {
+            let id = note(&replica, path).unwrap().id;
+            replica.doc.tombstone(&id).unwrap();
+        }
+        let steps = replica.run_doc_stage().unwrap();
+        dirs.write("a.md", [0xff, 0xfe]);
+        dirs.remove("b.md");
+        let outcome = replica.run_disk_stage(steps).unwrap();
+        let reason = |path: &str| {
+            let found = outcome.blocked.iter().find(|note| note.path == path);
+            found.unwrap().reason.clone()
+        };
+        assert!(reason("a.md").contains("UTF-8"));
+        assert_eq!(reason("b.md"), "changed while syncing");
     }
 
     fn edit_remotely(replica: &mut LocalReplica, path: &str, text: &str) {
