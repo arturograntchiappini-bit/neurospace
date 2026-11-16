@@ -5,6 +5,8 @@ mod doc;
 mod error;
 mod local;
 mod plan;
+mod protocol;
+mod session;
 mod state;
 mod store;
 mod ticket;
@@ -16,6 +18,10 @@ pub use local::{LocalReplica, MAX_PASSES, Outcome};
 pub use plan::{
     BaseChange, DiskAction, DiskEntry, DiskScan, DiskState, DocAction, PlanInput, Step, plan, scan,
 };
+pub use protocol::{
+    ALPN, FRAME_MAX, HELLO_MAX, Message, PROTOCOL_VERSION, read_frame, write_frame,
+};
+pub use session::{Role, SessionEvent, SessionParams, run_session};
 pub use state::{
     BlockedNote, DeviceId, EngineLock, NetConfig, NetMode, PeerEntry, PeerStatus, PendingCommand,
     Secret, StateDir, Status, base_dir_from, from_hex32, random_bytes, to_hex, vault_dir_name,

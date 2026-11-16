@@ -15,6 +15,7 @@ thiserror.workspace = true
 blake3.workspace = true
 getrandom.workspace = true
 loro.workspace = true
+tokio = { version = "1", features = ["io-util", "sync", "macros", "rt", "time"] }
 
 [dev-dependencies]
 tempfile.workspace = true
