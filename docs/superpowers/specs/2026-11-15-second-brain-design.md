@@ -255,7 +255,7 @@ sb [--vault <DIR>] [--json] <command>
   sync run | invite | join <TICKET> | leave | status      (section 8.8)
 ```
 
-- Without `--json` the output is human-readable text. With `--json`, stdout carries exactly one JSON document with the same shape the matching MCP tool returns.
+- Without `--json` the output is human-readable text. With `--json`, stdout carries exactly one JSON document with the same shape the matching MCP tool returns; the one exception is `read`, which prints the note as a single JSON string (the MCP tool returns the raw text).
 - Exit code 0 on success, 1 on an operation error with a one-line message on stderr, 2 on a usage error.
 
 ### 7.3 MCP server
