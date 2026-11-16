@@ -15,6 +15,7 @@ tempfile = "3"
 clap = { version = "4", features = ["derive", "env"] }
 blake3 = "1"
 getrandom = "0.3"
+loro = "1.17"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
