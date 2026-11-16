@@ -94,13 +94,23 @@ impl Default for NetConfig {
 }
 
 /// A command for the running engine, left in `command.pending`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PendingCommand {
     /// Join the group described by this ticket.
     Join(String),
     /// Leave the group (the flag is always `true`).
     Leave(bool),
+}
+
+// A join ticket contains the group secret, so it never reaches logs.
+impl std::fmt::Debug for PendingCommand {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Join(_) => out.debug_tuple("Join").field(&"<redacted>").finish(),
+            Self::Leave(flag) => out.debug_tuple("Leave").field(flag).finish(),
+        }
+    }
 }
 
 /// A peer as shown in the status file.
@@ -204,15 +214,68 @@ fn remove_if_exists(path: &Path) -> Result<()> {
     }
 }
 
+/// Options for every file in the state directory: readable by the owner only on Unix.
+#[cfg(unix)]
+fn private_options() -> OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = OpenOptions::new();
+    options.mode(0o600);
+    options
+}
+
+#[cfg(not(unix))]
+fn private_options() -> OpenOptions {
+    OpenOptions::new()
+}
+
+/// Creates a directory and its missing parents, accessible to the owner only on Unix.
+#[cfg(unix)]
+fn create_private_dirs(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+}
+
+#[cfg(not(unix))]
+fn create_private_dirs(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+fn write_temporary(tmp: &Path, bytes: &[u8]) -> Result<()> {
+    let written = private_options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(tmp)
+        .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()));
+    written.map_err(|source| {
+        let _ = std::fs::remove_file(tmp);
+        io_error(tmp)(source)
+    })
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
     tmp_name.push(".tmp");
     let tmp = path.with_file_name(tmp_name);
-    let mut file = File::create(&tmp).map_err(io_error(&tmp))?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(io_error(&tmp))?;
-    std::fs::rename(&tmp, path).map_err(io_error(path))
+    write_temporary(&tmp, bytes)?;
+    std::fs::rename(&tmp, path).map_err(|source| {
+        let _ = std::fs::remove_file(&tmp);
+        io_error(path)(source)
+    })
+}
+
+/// Describes a JSON failure by kind and position only: the message may quote the input.
+fn json_corrupt(path: &Path, error: &serde_json::Error) -> SyncError {
+    let reason = format!(
+        "{:?} error at line {} column {}",
+        error.classify(),
+        error.line(),
+        error.column()
+    );
+    corrupt(path, reason)
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
@@ -221,7 +284,7 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     };
     serde_json::from_slice(&bytes)
         .map(Some)
-        .map_err(|error| corrupt(path, error))
+        .map_err(|error| json_corrupt(path, &error))
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -274,7 +337,7 @@ impl StateDir {
     /// Exactly this directory, created if missing.
     pub fn at(dir: impl Into<PathBuf>) -> Result<StateDir> {
         let dir = dir.into();
-        std::fs::create_dir_all(&dir).map_err(io_error(&dir))?;
+        create_private_dirs(&dir).map_err(io_error(&dir))?;
         Ok(StateDir { dir })
     }
 
@@ -291,7 +354,7 @@ impl StateDir {
     /// Takes the engine lock, or fails with `AlreadyRunning` when another process holds it.
     pub fn lock(&self) -> Result<EngineLock> {
         let path = self.file("engine.lock");
-        let file = OpenOptions::new()
+        let file = private_options()
             .read(true)
             .write(true)
             .create(true)
@@ -409,7 +472,7 @@ impl StateDir {
         remove_if_exists(&path)?;
         serde_json::from_slice(&bytes)
             .map(Some)
-            .map_err(|error| corrupt(&path, error))
+            .map_err(|error| json_corrupt(&path, &error))
     }
 
     /// Publishes the engine's status.
@@ -553,6 +616,70 @@ mod tests {
         assert_eq!(state.device_id().unwrap(), None);
         state.save_device_id(&[8; 32]).unwrap();
         assert_eq!(state.device_id().unwrap(), Some([8; 32]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_keep_state_private_to_the_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir(&vault).unwrap();
+        let base = tmp.path().join("base");
+        let state = StateDir::for_vault_in(&base, &vault).unwrap();
+        state.save_secret(&[1; 32]).unwrap();
+        state.save_device_key(&[2; 32]).unwrap();
+        state.save_peers(&[]).unwrap();
+        drop(state.lock().unwrap());
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&base), 0o700);
+        assert_eq!(mode(state.path()), 0o700);
+        for name in [
+            "secret",
+            "device.key",
+            "peers.json",
+            "vault-path.txt",
+            "engine.lock",
+        ] {
+            assert_eq!(mode(&state.file(name)), 0o600, "{name}");
+        }
+    }
+
+    #[test]
+    fn should_leave_no_temporary_file_when_the_rename_fails() {
+        let (_tmp, state) = fresh();
+        std::fs::create_dir(state.file("peers.json")).unwrap();
+        assert!(matches!(state.save_peers(&[]), Err(SyncError::Io { .. })));
+        assert!(names(&state).iter().all(|n| !n.ends_with(".tmp")));
+    }
+
+    #[test]
+    fn should_not_quote_file_content_in_corrupt_state_errors() {
+        let (_tmp, state) = fresh();
+        for content in [
+            r#"{"join": 5 "SECRETSECRET""#,
+            r#"{"leave": "SECRETSECRET"}"#,
+        ] {
+            std::fs::write(state.file("command.pending"), content).unwrap();
+            let error = state.take_pending().unwrap_err();
+            assert!(matches!(error, SyncError::CorruptState { .. }));
+            assert!(!error.to_string().contains("SECRETSECRET"), "{error}");
+        }
+        std::fs::write(state.file("config.json"), r#"{"mdns": "SECRETSECRET"}"#).unwrap();
+        assert!(
+            !state
+                .config()
+                .unwrap_err()
+                .to_string()
+                .contains("SECRETSECRET")
+        );
+    }
+
+    #[test]
+    fn should_redact_join_ticket_in_debug_output() {
+        let join = PendingCommand::Join("sb1/SECRETSECRET".to_string());
+        assert_eq!(format!("{join:?}"), r#"Join("<redacted>")"#);
+        assert_eq!(format!("{:?}", PendingCommand::Leave(true)), "Leave(true)");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use crate::state::{DeviceId, Secret, from_hex32, to_hex};
 /// What one device hands another to join its sync group: `sb1/<id hex>/<secret hex>[/<addr>,<addr>]`.
 ///
 /// A ticket is a password: anyone holding it can read and write the vault.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Ticket {
     /// Device id of the issuing device.
     pub device_id: DeviceId,
@@ -16,6 +16,16 @@ pub struct Ticket {
     pub secret: Secret,
     /// Addresses the issuing device can be reached at; may be empty.
     pub addrs: Vec<SocketAddr>,
+}
+
+impl fmt::Debug for Ticket {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        out.debug_struct("Ticket")
+            .field("device_id", &to_hex(&self.device_id))
+            .field("secret", &"<redacted>")
+            .field("addrs", &self.addrs)
+            .finish()
+    }
 }
 
 impl fmt::Display for Ticket {
@@ -92,6 +102,20 @@ mod tests {
         };
         let upper = format!("sb1/{}/{}", "AB".repeat(32), "CD".repeat(32));
         assert_eq!(upper.parse::<Ticket>().unwrap(), letters);
+    }
+
+    #[test]
+    fn should_redact_secret_in_debug_output() {
+        let issued = Ticket {
+            device_id: [0x11; 32],
+            secret: [0x5e; 32],
+            addrs: vec!["1.2.3.4:5".parse().unwrap()],
+        };
+        let shown = format!("{issued:?}");
+        assert!(!shown.contains(&"5e".repeat(32)), "{shown}");
+        assert!(shown.contains(&"11".repeat(32)), "{shown}");
+        assert!(shown.contains("1.2.3.4:5"), "{shown}");
+        assert!(shown.contains(r#"secret: "<redacted>""#), "{shown}");
     }
 
     #[test]
