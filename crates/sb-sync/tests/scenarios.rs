@@ -406,3 +406,105 @@ fn should_store_at_most_sixty_four_foreign_peers_and_never_its_own_id() {
             .all(|peer| from_hex32(&peer.id) != Some(own) && peer.addrs.is_empty())
     );
 }
+
+#[test]
+fn should_recover_after_a_failed_round_once_the_session_is_reopened() {
+    let mut nodes = vec![node(1), node(2)];
+    let mut net = Net::new();
+    let session = net.connect(&mut nodes, 0, 1);
+    net.settle(&mut nodes);
+    nodes[0].write("a.md", "from a\n");
+    let outgoing = nodes[0].replica.reconcile().unwrap();
+    let updates = outgoing
+        .into_iter()
+        .find(|out| matches!(out.message, Message::Updates { .. }));
+    let marker = nodes[1].vault_dir.path().join(".secondbrain");
+    std::fs::remove_dir_all(&marker).unwrap();
+    let failed = nodes[1]
+        .replica
+        .on_message(session, updates.unwrap().message);
+    assert!(
+        matches!(failed, Err(SyncError::VaultMarkerMissing(_))),
+        "{failed:?}"
+    );
+    std::fs::create_dir_all(&marker).unwrap();
+    net.disconnect(&mut nodes, 0, 1);
+    net.connect(&mut nodes, 0, 1);
+    sync(&mut net, &mut nodes);
+    assert_eq!(nodes[1].files()["a.md"], "from a\n");
+    assert_converged(&mut nodes);
+}
+
+#[test]
+fn should_settle_three_notes_created_at_one_path() {
+    let mut nodes = vec![node(1), node(2), node(3)];
+    let mut net = Net::new();
+    for (i, text) in ["A\n", "B\n", "C\n"].iter().enumerate() {
+        nodes[i].write("n.md", text);
+        net.reconcile(&mut nodes, i);
+    }
+    net.connect(&mut nodes, 0, 1);
+    net.connect(&mut nodes, 1, 2);
+    sync(&mut net, &mut nodes);
+    sync(&mut net, &mut nodes);
+    let files = nodes[0].files();
+    assert_eq!(files.len(), 3, "{files:?}");
+    let copies = files
+        .keys()
+        .filter(|name| is_conflict_name(name, "n"))
+        .count();
+    assert!(files.contains_key("n.md") && copies == 2, "{files:?}");
+    let mut texts: Vec<&str> = files.values().map(String::as_str).collect();
+    texts.sort_unstable();
+    assert_eq!(texts, ["A\n", "B\n", "C\n"]);
+    assert_converged(&mut nodes);
+}
+
+#[test]
+fn should_keep_crlf_and_missing_final_newline_exactly() {
+    let mut nodes = vec![node(1), node(2)];
+    let mut net = Net::new();
+    net.connect(&mut nodes, 0, 1);
+    nodes[0].write("crlf.md", "a\r\nb\r\n");
+    nodes[0].write("bare.md", "no newline at end");
+    sync(&mut net, &mut nodes);
+    assert_eq!(nodes[1].files()["crlf.md"], "a\r\nb\r\n");
+    assert_eq!(nodes[1].files()["bare.md"], "no newline at end");
+    nodes[1].write("crlf.md", "a\r\nb\r\nc\r\n");
+    nodes[1].write("bare.md", "no newline at end\nmore");
+    sync(&mut net, &mut nodes);
+    assert_eq!(nodes[0].files(), nodes[1].files());
+    assert_eq!(nodes[0].files()["crlf.md"], "a\r\nb\r\nc\r\n");
+    assert_eq!(nodes[0].files()["bare.md"], "no newline at end\nmore");
+    assert_converged(&mut nodes);
+}
+
+/// Rewrites one line (0-based) of `n.md` on a node.
+fn replace_line(node: &Node, line: usize, text: &str) {
+    let current = node.files()["n.md"].clone();
+    let mut lines: Vec<&str> = current.lines().collect();
+    lines[line] = text;
+    node.write("n.md", &format!("{}\n", lines.join("\n")));
+}
+
+#[test]
+fn should_not_loop_when_both_sides_change_the_same_note_repeatedly() {
+    let (mut net, mut nodes) = shared_pair("n.md", "l1\nl2\nl3\nl4\nl5\n");
+    for round in 0..5 {
+        replace_line(&nodes[0], 0, &format!("A{round}"));
+        replace_line(&nodes[1], 4, &format!("B{round}"));
+        sync(&mut net, &mut nodes);
+        let text = nodes[0].files()["n.md"].clone();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            (lines[0], lines[4]),
+            (format!("A{round}").as_str(), format!("B{round}").as_str())
+        );
+        assert_converged(&mut nodes);
+    }
+    assert!(
+        net.deliveries.len() < 200,
+        "{} deliveries",
+        net.deliveries.len()
+    );
+}

@@ -146,7 +146,9 @@ impl Replica {
     ///
     /// # Errors
     /// `Doc` for a version or updates the document refuses, `Protocol` for a `Hello`,
-    /// and failures of the vault's state. The replica stays usable after any of them.
+    /// and failures of the vault's state. The replica stays usable after any of them, but the
+    /// host must close that session after an `Err`: this side may have dropped what the peer
+    /// sent, and only the `Version` exchange of a new session fetches it again.
     pub fn on_message(&mut self, session: SessionId, message: Message) -> Result<Vec<Outgoing>> {
         if !self.sessions.contains_key(&session) {
             return Ok(Vec::new());
@@ -342,6 +344,7 @@ impl Replica {
     }
 
     fn on_version(&mut self, session: SessionId, peer_version: &[u8]) -> Result<Vec<Outgoing>> {
+        self.local.store.persist(&self.local.doc)?;
         let doc = &self.local.doc;
         let updates = doc.updates_for(peer_version)?.unwrap_or_default();
         let version = doc.version();
@@ -361,9 +364,9 @@ impl Replica {
         peer_version: &[u8],
         updates: &[u8],
     ) -> Result<Vec<Outgoing>> {
-        self.learn_version(session, peer_version)?;
         self.reconcile_local()?;
         let pending = self.import_updates(updates)?;
+        self.learn_version(session, peer_version)?;
         self.end_wait()?;
         self.reconcile_local()?;
         let mut outgoing = Vec::new();
@@ -413,6 +416,7 @@ impl Replica {
 
     /// For every session whose peer lacks something: the updates, then the peer counts as up to date.
     fn updates_for_sessions(&mut self) -> Result<Vec<Outgoing>> {
+        self.local.store.persist(&self.local.doc)?;
         let doc = &self.local.doc;
         let version = doc.version();
         let mut outgoing = Vec::new();
@@ -436,5 +440,81 @@ fn peer_status(entry: PeerEntry, connected: &[DeviceId]) -> PeerStatus {
     PeerStatus {
         id: entry.id,
         connected: is_connected,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use sb_core::NotePath;
+
+    use super::*;
+    use crate::store::DocStore;
+
+    struct Fixture {
+        replica: Replica,
+        _vault: tempfile::TempDir,
+        state: tempfile::TempDir,
+    }
+
+    fn fixture() -> Fixture {
+        let vault = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let state_dir = StateDir::at(state.path()).unwrap();
+        let replica =
+            Replica::open(Vault::open(vault.path()).unwrap(), state_dir, [1; 32]).unwrap();
+        Fixture {
+            replica,
+            _vault: vault,
+            state,
+        }
+    }
+
+    fn note_path() -> NotePath {
+        NotePath::parse("x.md").unwrap()
+    }
+
+    fn durable_notes(fixture: &Fixture) -> usize {
+        let state = StateDir::at(fixture.state.path()).unwrap();
+        DocStore::open(&state).unwrap().1.alive_notes().len()
+    }
+
+    #[test]
+    fn should_persist_before_answering_a_version_request() {
+        let mut fixture = fixture();
+        fixture.replica.session_opened(1, [2; 32]);
+        let doc = &mut fixture.replica.local.doc;
+        doc.create_note(&note_path(), "not yet durable\n").unwrap();
+        let empty = SyncDoc::new().version();
+        let reply = fixture.replica.on_message(1, Message::Version(empty));
+        assert!(reply.is_ok());
+        assert_eq!(durable_notes(&fixture), 1);
+    }
+
+    #[test]
+    fn should_persist_before_sending_updates_for_a_session() {
+        let mut fixture = fixture();
+        fixture.replica.session_opened(1, [2; 32]);
+        let doc = &mut fixture.replica.local.doc;
+        doc.create_note(&note_path(), "not yet durable\n").unwrap();
+        let outgoing = fixture.replica.updates_for_sessions().unwrap();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(durable_notes(&fixture), 1);
+    }
+
+    #[test]
+    fn should_not_advance_the_known_version_when_updates_fail() {
+        let mut fixture = fixture();
+        fixture.replica.session_opened(1, [2; 32]);
+        let mut peer = SyncDoc::new();
+        peer.create_note(&note_path(), "peer\n").unwrap();
+        let before = fixture.replica.sessions[&1].known.clone();
+        let garbage = Message::Updates {
+            version: peer.version(),
+            updates: vec![1, 2, 3, 4],
+        };
+        assert!(fixture.replica.on_message(1, garbage).is_err());
+        assert_eq!(fixture.replica.sessions[&1].known, before);
     }
 }

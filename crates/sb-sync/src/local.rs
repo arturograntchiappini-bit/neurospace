@@ -900,8 +900,8 @@ mod tests {
             return;
         }
         let reopened = dirs.open();
-        set_mode(0o600);
         assert_eq!(reopened.base.keys().count(), 0);
+        assert!(!version.exists(), "the guard removes the unreadable file");
     }
 
     #[test]
