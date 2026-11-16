@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive", "env"] }
 blake3 = "1"
 getrandom = "0.3"
 loro = "1.17"
+notify = "8.2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
