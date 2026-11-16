@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use sb_core::{Vault, VaultWatcher, watch};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::auth::{GroupTag, group_tag};
 use crate::error::{Result, SyncError};
 use crate::protocol::Message;
 use crate::replica::{Outgoing, Replica, SessionId, Tick};
@@ -42,10 +43,13 @@ pub trait Network: Send + 'static {
     /// The addresses this device listens on.
     fn addresses(&self) -> Vec<SocketAddr>;
     /// Called on every tick with the current secret, the known peers and the peers that already have a session.
+    /// When the secret differs from the previous call, abort every open session and every dial in flight.
+    /// Session ids are never reused.
     fn refresh(&mut self, secret: Secret, peers: &[PeerEntry], connected: &[DeviceId]);
     /// Ends the connection of one session.
     fn close_session(&mut self, session: SessionId);
-    /// Stops listening and dialling.
+    /// Stops listening and dialling; returns within a few seconds. An implementation also stops in `Drop`
+    /// when `shutdown` was never called.
     fn shutdown(&mut self);
 }
 
@@ -58,6 +62,8 @@ pub enum Command {
     Session {
         /// The session.
         session: SessionId,
+        /// The network stamps each event with the tag of the secret the session authenticated under.
+        group: GroupTag,
         /// What happened.
         event: SessionEvent,
     },
@@ -86,7 +92,8 @@ const MAX_POSTPONE: Duration = Duration::from_secs(5);
 /// How long a call on the handle waits for the actor.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A running engine. Dropping it asks the engine to stop without waiting; `shutdown` waits.
+/// A running engine. Dropping it asks the engine to stop without waiting, so a `start` right after a drop may
+/// get `AlreadyRunning`; `shutdown` waits until the lock is released.
 pub struct EngineHandle {
     commands: Sender<Command>,
     thread: Option<JoinHandle<()>>,
@@ -134,19 +141,19 @@ impl EngineHandle {
         Ok(self.ask(Command::Invite)??.to_string())
     }
 
-    /// Joins the group of a ticket.
+    /// Joins the group of a ticket. After a timeout the command may still be carried out later.
     ///
     /// # Errors
-    /// An invalid ticket, state failures, or `Net` when the engine is gone.
+    /// An invalid ticket, state failures, or `Net` when the engine is gone or does not answer within 10 s.
     pub fn join(&self, ticket: &str) -> Result<()> {
         let ticket: Ticket = ticket.parse()?;
         self.ask(|reply| Command::Join(ticket, reply))?
     }
 
-    /// Leaves the group; the engine stops.
+    /// Leaves the group; the engine stops. After a timeout the command may still be carried out later.
     ///
     /// # Errors
-    /// State failures, or `Net` when the engine is gone.
+    /// State failures, or `Net` when the engine is gone or does not answer within 10 s.
     pub fn leave(&self) -> Result<()> {
         self.ask(Command::Leave)?
     }
@@ -270,6 +277,19 @@ impl Schedule {
     }
 }
 
+/// Releases the engine lock and only then announces `Stopped`.
+struct StopGuard {
+    lock: Option<EngineLock>,
+    events: Option<Sender<EngineEvent>>,
+}
+
+impl Drop for StopGuard {
+    fn drop(&mut self) {
+        drop(self.lock.take());
+        emit(self.events.as_ref(), EngineEvent::Stopped);
+    }
+}
+
 struct SessionLink {
     peer: DeviceId,
     outbound: UnboundedSender<Message>,
@@ -285,6 +305,8 @@ struct Actor {
     schedule: Schedule,
     blocked: usize,
     last_error: Option<String>,
+    /// The tag of the current group secret; sessions authenticated under another one are refused.
+    group: Option<GroupTag>,
     _watcher: VaultWatcher,
 }
 
@@ -296,7 +318,7 @@ impl Actor {
         watcher: VaultWatcher,
     ) -> Actor {
         let started = Instant::now();
-        Actor {
+        let mut actor = Actor {
             replica,
             network,
             events,
@@ -305,16 +327,31 @@ impl Actor {
             schedule: Schedule::new(started),
             blocked: 0,
             last_error: None,
+            group: None,
             _watcher: watcher,
+        };
+        actor.group = actor.read_group();
+        actor
+    }
+
+    /// The tag of the secret on disk; `None` (and an error report) when it cannot be read, so no session is accepted.
+    fn read_group(&mut self) -> Option<GroupTag> {
+        match self.replica.local().state.secret() {
+            Ok(secret) => secret.map(|secret| group_tag(&secret)),
+            Err(error) => {
+                self.report(&error);
+                None
+            }
         }
     }
 
-    /// Runs the actor, then releases the lock and only then announces `Stopped`.
+    /// Runs the actor; the guard then releases the lock and announces `Stopped`, also after a panic.
     fn run_until_stopped(self, lock: EngineLock, inbox: &Receiver<Command>) {
-        let events = self.events.clone();
+        let _guard = StopGuard {
+            lock: Some(lock),
+            events: self.events.clone(),
+        };
         self.run(inbox);
-        drop(lock);
-        emit(events.as_ref(), EngineEvent::Stopped);
     }
 
     fn run(mut self, inbox: &Receiver<Command>) {
@@ -350,7 +387,11 @@ impl Actor {
     fn handle(&mut self, command: Command) -> bool {
         match command {
             Command::VaultChanged => self.schedule.changed(Instant::now()),
-            Command::Session { session, event } => self.on_session(session, event),
+            Command::Session {
+                session,
+                group,
+                event,
+            } => self.on_session(session, group, event),
             Command::Invite(reply) => {
                 let _ = reply.send(self.replica.invite());
             }
@@ -399,10 +440,14 @@ impl Actor {
     fn tick(&mut self) -> bool {
         self.schedule.tick_done(Instant::now());
         self.replica.set_addresses(self.network.addresses());
+        let was_waiting = self.replica.is_waiting_for_first_state();
         match self.replica.tick(self.started.elapsed()) {
             Ok(tick) => {
                 if self.apply_tick(tick) {
                     return false;
+                }
+                if was_waiting && !self.replica.is_waiting_for_first_state() {
+                    self.after_reconcile();
                 }
                 self.publish_status();
             }
@@ -414,6 +459,9 @@ impl Actor {
 
     /// `true` when the replica left its group.
     fn apply_tick(&mut self, tick: Tick) -> bool {
+        if tick.secret_changed {
+            self.group = self.read_group();
+        }
         for session in tick.close_sessions {
             self.close(session);
         }
@@ -438,7 +486,14 @@ impl Actor {
         }
     }
 
-    fn on_session(&mut self, session: SessionId, event: SessionEvent) {
+    /// A session authenticated under another secret is closed, never shown to the replica.
+    fn on_session(&mut self, session: SessionId, group: GroupTag, event: SessionEvent) {
+        if self.group != Some(group) {
+            if matches!(event, SessionEvent::Opened { .. }) {
+                self.network.close_session(session);
+            }
+            return;
+        }
         match event {
             SessionEvent::Opened { peer, outbound } => self.open_session(session, peer, outbound),
             SessionEvent::Received(message) => self.receive(session, message),
@@ -582,6 +637,7 @@ mod tests {
     use super::*;
     use crate::doc::SyncDoc;
     use crate::protocol::Message;
+    use crate::state::PendingCommand;
     use crate::state::to_hex;
 
     const LIMIT: Duration = Duration::from_secs(5);
@@ -694,13 +750,53 @@ mod tests {
         panic!("event {wanted:?} never arrived");
     }
 
+    fn current_tag(rig: &Rig) -> GroupTag {
+        group_tag(&rig.state.secret().unwrap().unwrap())
+    }
+
+    fn send_session_event(rig: &Rig, session: SessionId, group: GroupTag, event: SessionEvent) {
+        let command = Command::Session {
+            session,
+            group,
+            event,
+        };
+        rig.commands.send(command).unwrap();
+    }
+
     fn open_session(rig: &Rig, session: SessionId, peer: DeviceId) -> UnboundedReceiver<Message> {
+        open_session_in_group(rig, session, peer, current_tag(rig))
+    }
+
+    fn open_session_in_group(
+        rig: &Rig,
+        session: SessionId,
+        peer: DeviceId,
+        group: GroupTag,
+    ) -> UnboundedReceiver<Message> {
         let (outbound, receiver) = unbounded_channel();
-        let event = SessionEvent::Opened { peer, outbound };
-        rig.commands
-            .send(Command::Session { session, event })
-            .unwrap();
+        send_session_event(rig, session, group, SessionEvent::Opened { peer, outbound });
         receiver
+    }
+
+    /// Asserts that no event matching `unwanted` arrives within `window`.
+    fn expect_no_event(
+        events: &Receiver<EngineEvent>,
+        window: Duration,
+        unwanted: impl Fn(&EngineEvent) -> bool,
+    ) {
+        let deadline = Instant::now() + window;
+        while Instant::now() < deadline {
+            if let Ok(event) = events.recv_timeout(Duration::from_millis(50)) {
+                assert!(!unwanted(&event), "unexpected event {event:?}");
+            }
+        }
+    }
+
+    fn garbage_updates() -> Message {
+        Message::Updates {
+            version: SyncDoc::new().version(),
+            updates: vec![1, 2, 3, 4],
+        }
     }
 
     #[test]
@@ -744,8 +840,8 @@ mod tests {
         let b = start_rig([2; 32], &[]);
         let from_a = open_session(&a, 1, [2; 32]);
         let from_b = open_session(&b, 1, [1; 32]);
-        pump(from_a, b.commands.clone());
-        pump(from_b, a.commands.clone());
+        pump(from_a, b.commands.clone(), current_tag(&b));
+        pump(from_b, a.commands.clone(), current_tag(&a));
         std::fs::write(a.vault.path().join("from-a.md"), "hello from a\n").unwrap();
         let in_b = b.vault.path().join("from-a.md");
         wait_up_to("note in b", Duration::from_secs(10), || in_b.exists());
@@ -758,11 +854,16 @@ mod tests {
     }
 
     /// Hands every message the engine puts on a session to the other engine.
-    fn pump(mut outbound: UnboundedReceiver<Message>, other: Sender<Command>) {
+    fn pump(mut outbound: UnboundedReceiver<Message>, other: Sender<Command>, group: GroupTag) {
         std::thread::spawn(move || {
             while let Some(message) = outbound.blocking_recv() {
                 let event = SessionEvent::Received(message);
-                if other.send(Command::Session { session: 1, event }).is_err() {
+                let command = Command::Session {
+                    session: 1,
+                    group,
+                    event,
+                };
+                if other.send(command).is_err() {
                     break;
                 }
             }
@@ -775,12 +876,7 @@ mod tests {
         expect_event(&rig.events, &EngineEvent::Synced);
         let _outbound = open_session(&rig, 7, [9; 32]);
         expect_event(&rig.events, &EngineEvent::PeerConnected(to_hex(&[9; 32])));
-        rig.commands
-            .send(Command::Session {
-                session: 7,
-                event: SessionEvent::Closed,
-            })
-            .unwrap();
+        send_session_event(&rig, 7, current_tag(&rig), SessionEvent::Closed);
         expect_event(
             &rig.events,
             &EngineEvent::PeerDisconnected(to_hex(&[9; 32])),
@@ -791,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn should_hand_secret_and_peers_to_the_network_on_tick() {
+    fn should_hand_secret_and_peers_to_the_network_after_a_join() {
         let rig = start_rig([1; 32], &[]);
         let ticket = Ticket {
             device_id: [5; 32],
@@ -832,14 +928,8 @@ mod tests {
     fn should_close_the_session_when_a_message_is_refused() {
         let rig = start_rig([1; 32], &[]);
         let _outbound = open_session(&rig, 5, [9; 32]);
-        let garbage = Message::Updates {
-            version: SyncDoc::new().version(),
-            updates: vec![1, 2, 3, 4],
-        };
-        let event = SessionEvent::Received(garbage);
-        rig.commands
-            .send(Command::Session { session: 5, event })
-            .unwrap();
+        let event = SessionEvent::Received(garbage_updates());
+        send_session_event(&rig, 5, current_tag(&rig), event);
         wait_until("the session to be closed", || {
             rig.calls.lock().unwrap().closed.contains(&5)
         });
@@ -873,5 +963,92 @@ mod tests {
         let events = rig.events;
         drop(rig.handle);
         expect_event(&events, &EngineEvent::Stopped);
+    }
+
+    fn other_group_ticket() -> String {
+        let ticket = Ticket {
+            device_id: [5; 32],
+            secret: [6; 32],
+            addrs: Vec::new(),
+        };
+        ticket.to_string()
+    }
+
+    #[test]
+    fn should_refuse_a_session_of_the_old_group_after_a_join() {
+        let rig = start_rig([1; 32], &[]);
+        let old = current_tag(&rig);
+        rig.handle.join(&other_group_ticket()).unwrap();
+        let _old = open_session_in_group(&rig, 5, [9; 32], old);
+        wait_until("the old session to be closed", || {
+            rig.calls.lock().unwrap().closed.contains(&5)
+        });
+        let connected = |event: &EngineEvent| matches!(event, EngineEvent::PeerConnected(_));
+        expect_no_event(&rig.events, Duration::from_secs(1), connected);
+        let status = rig.handle.status().unwrap();
+        assert!(status.peers.iter().all(|peer| !peer.connected));
+        let _new = open_session_in_group(&rig, 6, [9; 32], current_tag(&rig));
+        expect_event(&rig.events, &EngineEvent::PeerConnected(to_hex(&[9; 32])));
+        rig.handle.shutdown().unwrap();
+    }
+
+    #[test]
+    fn should_ignore_messages_stamped_with_another_group() {
+        let rig = start_rig([1; 32], &[]);
+        let _outbound = open_session(&rig, 5, [9; 32]);
+        expect_event(&rig.events, &EngineEvent::PeerConnected(to_hex(&[9; 32])));
+        let event = SessionEvent::Received(garbage_updates());
+        send_session_event(&rig, 5, [0xAA; 8], event);
+        let error = |event: &EngineEvent| matches!(event, EngineEvent::Error(_));
+        expect_no_event(&rig.events, Duration::from_secs(1), error);
+        assert!(!rig.calls.lock().unwrap().closed.contains(&5));
+        rig.handle.shutdown().unwrap();
+    }
+
+    #[test]
+    fn should_free_the_lock_when_the_network_cannot_be_built() {
+        let vault = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let state = StateDir::at(state_dir.path()).unwrap();
+        let failed = EngineHandle::start(vault.path(), state.clone(), None, |_, _| {
+            Err(SyncError::Net("no network".into()))
+        });
+        assert!(matches!(failed, Err(SyncError::Net(_))));
+        assert!(state.lock().is_ok());
+    }
+
+    #[test]
+    fn should_free_the_lock_and_stop_the_network_when_the_vault_cannot_be_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_folder = dir.path().join("file.txt");
+        std::fs::write(&not_a_folder, "x").unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let state = StateDir::at(state_dir.path()).unwrap();
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let shared = Arc::clone(&calls);
+        let failed = EngineHandle::start(&not_a_folder, state.clone(), None, move |_, _| {
+            Ok(Box::new(FakeNetwork {
+                id: [1; 32],
+                calls: shared,
+            }))
+        });
+        assert!(failed.is_err());
+        assert!(state.lock().is_ok());
+        assert!(calls.lock().unwrap().shut_down);
+    }
+
+    #[test]
+    fn should_stop_when_a_leave_arrives_through_command_pending() {
+        let rig = start_rig([1; 32], &[]);
+        let command = PendingCommand::Leave(true);
+        rig.state.write_pending(&command).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stopped = false;
+        while !stopped && Instant::now() < deadline {
+            let event = rig.events.recv_timeout(Duration::from_millis(50));
+            stopped = event == Ok(EngineEvent::Stopped);
+        }
+        assert!(stopped, "Stopped never arrived");
+        assert!(rig.state.lock().is_ok());
     }
 }

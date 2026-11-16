@@ -14,7 +14,7 @@ mod state;
 mod store;
 mod ticket;
 
-pub use auth::{proof, verify};
+pub use auth::{GroupTag, group_tag, proof, verify};
 pub use doc::{Hash32, NoteId, NoteView, SyncDoc, conflict_path, content_hash};
 pub use engine::{Command, DEBOUNCE, EngineEvent, EngineHandle, Network, RESCAN, TICK};
 pub use error::{Result, SyncError};

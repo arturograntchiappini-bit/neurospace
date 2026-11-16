@@ -1,12 +1,25 @@
 use crate::state::{DeviceId, Secret};
 
 const CONTEXT: &[u8] = b"sb-sync-auth-v1";
+const GROUP_TAG_CONTEXT: &str = "sb-sync-group-tag-v1";
+
+/// The first 8 bytes of a key derived from the group secret.
+pub type GroupTag = [u8; 8];
 
 /// The proof `sender` shows to `receiver` that it knows the group secret.
 pub fn proof(secret: &Secret, sender: &DeviceId, receiver: &DeviceId) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new_keyed(secret);
     hasher.update(CONTEXT).update(sender).update(receiver);
     *hasher.finalize().as_bytes()
+}
+
+/// Names a group of devices by its secret, so the engine can tell which group a session authenticated under.
+/// It identifies the group without revealing the secret; never compare secrets through it for authentication.
+pub fn group_tag(secret: &Secret) -> GroupTag {
+    let key = blake3::derive_key(GROUP_TAG_CONTEXT, secret);
+    let mut tag = GroupTag::default();
+    tag.copy_from_slice(&key[..GroupTag::default().len()]);
+    tag
 }
 
 /// Checks a received proof in constant time.
@@ -28,5 +41,13 @@ mod tests {
         assert_ne!(proof(&s, &a, &b), proof(&s, &a, &c));
         assert!(verify(&s, &a, &b, &proof(&s, &a, &b)));
         assert!(!verify(&s, &b, &a, &proof(&s, &a, &b)));
+    }
+
+    #[test]
+    fn should_tell_groups_apart_without_exposing_the_secret() {
+        let (one, two) = ([1u8; 32], [2u8; 32]);
+        assert_eq!(group_tag(&one), group_tag(&one));
+        assert_ne!(group_tag(&one), group_tag(&two));
+        assert!(!one.windows(8).any(|window| window == group_tag(&one)));
     }
 }

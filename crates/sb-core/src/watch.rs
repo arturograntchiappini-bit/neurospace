@@ -3,7 +3,7 @@
 use std::io;
 use std::path::Path;
 
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::{CoreError, Result};
 
@@ -20,8 +20,7 @@ pub struct VaultWatcher {
 pub fn watch(root: &Path, on_change: impl Fn() + Send + 'static) -> Result<VaultWatcher> {
     let watched_root = root.to_path_buf();
     let handler = move |event: notify::Result<Event>| {
-        // Event kinds are not reliable facts (spec A.4), so errors and rescan requests count as changes too.
-        if !event.is_ok_and(|event| is_hidden_only(&watched_root, &event)) {
+        if signals(&watched_root, &event) {
             on_change();
         }
     };
@@ -34,6 +33,16 @@ pub fn watch(root: &Path, on_change: impl Fn() + Send + 'static) -> Result<Vault
         .watch(root, RecursiveMode::Recursive)
         .map_err(io_error)?;
     Ok(VaultWatcher { _watcher: watcher })
+}
+
+/// Event kinds are not reliable facts (spec A.4), so errors and rescan requests count as changes too.
+/// Only reads (`Access`, which inotify reports for every open) never do: a write always comes with a `Modify` as well.
+fn signals(root: &Path, event: &notify::Result<Event>) -> bool {
+    match event {
+        Ok(event) if matches!(event.kind, EventKind::Access(_)) => false,
+        Ok(event) => !is_hidden_only(root, event),
+        Err(_) => true,
+    }
 }
 
 /// An event without paths (a rescan request) is never hidden.
@@ -57,9 +66,12 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
+    use notify::event::{AccessKind, AccessMode, ModifyKind};
+
     use super::*;
 
     const LIMIT: Duration = Duration::from_secs(5);
+    const SETTLE: Duration = Duration::from_millis(300);
 
     fn counting_watcher(root: &Path) -> (VaultWatcher, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
@@ -84,16 +96,61 @@ mod tests {
         false
     }
 
+    /// Waits until the count has not changed for `SETTLE`, so a late event of one step cannot count for the next.
+    fn settle(count: &AtomicUsize) {
+        let mut last = count.load(Ordering::SeqCst);
+        let mut stable_since = Instant::now();
+        while stable_since.elapsed() < SETTLE {
+            std::thread::sleep(Duration::from_millis(50));
+            let now = count.load(Ordering::SeqCst);
+            if now != last {
+                last = now;
+                stable_since = Instant::now();
+            }
+        }
+    }
+
     #[test]
     fn should_signal_when_a_note_is_written_created_renamed_or_deleted() {
         let dir = tempfile::tempdir().unwrap();
         let (_watcher, count) = counting_watcher(dir.path());
         let note = dir.path().join("n.md");
         assert!(grows_after(&count, || fs::write(&note, "a\n").unwrap()));
+        settle(&count);
         assert!(grows_after(&count, || fs::write(&note, "b\n").unwrap()));
+        settle(&count);
         let renamed = dir.path().join("m.md");
         assert!(grows_after(&count, || fs::rename(&note, &renamed).unwrap()));
+        settle(&count);
         assert!(grows_after(&count, || fs::remove_file(&renamed).unwrap()));
+    }
+
+    #[test]
+    fn should_not_signal_for_an_access_event() {
+        let root = Path::new("vault");
+        let path = root.join("n.md");
+        let open = EventKind::Access(AccessKind::Open(AccessMode::Any));
+        let read = Event::new(open).add_path(path.clone());
+        assert!(!signals(root, &Ok(read)));
+        let modify = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(path);
+        assert!(signals(root, &Ok(modify)));
+        assert!(signals(root, &Ok(Event::new(EventKind::Other))));
+    }
+
+    #[test]
+    fn should_stay_quiet_when_a_note_is_only_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("n.md");
+        fs::write(&note, "a\n").unwrap();
+        let (_watcher, count) = counting_watcher(dir.path());
+        std::thread::sleep(Duration::from_millis(500));
+        let before = count.load(Ordering::SeqCst);
+        for _ in 0..3 {
+            fs::read_to_string(&note).unwrap();
+        }
+        fs::read_dir(dir.path()).unwrap().count();
+        std::thread::sleep(Duration::from_secs(1));
+        assert_eq!(count.load(Ordering::SeqCst), before);
     }
 
     #[test]
@@ -114,11 +171,13 @@ mod tests {
         fs::create_dir_all(dir.path().join(".secondbrain/trash")).unwrap();
         fs::create_dir(dir.path().join(".obsidian")).unwrap();
         let (_watcher, count) = counting_watcher(dir.path());
+        std::thread::sleep(Duration::from_millis(500));
+        let before = count.load(Ordering::SeqCst);
         fs::write(dir.path().join(".sb-1.tmp"), "x").unwrap();
         fs::write(dir.path().join(".secondbrain/trash/x"), "x").unwrap();
         fs::write(dir.path().join(".obsidian/a.md"), "x").unwrap();
         std::thread::sleep(Duration::from_secs(1));
-        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert_eq!(count.load(Ordering::SeqCst), before);
     }
 
     #[test]
