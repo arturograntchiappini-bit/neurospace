@@ -815,7 +815,7 @@ mod tests {
     #[test]
     fn should_supersede_note_when_edit_matches_a_tombstone() {
         let (disk, view, base) = (
-            disk_of(vec![present("n.md", "x0")]),
+            disk_of(vec![present("N.md", "x0")]),
             view_of(vec![note('a', "n.md", "x1")]),
             base(&[("n.md", "x1")]),
         );
@@ -829,7 +829,7 @@ mod tests {
         });
         let supersede = DocAction::Supersede {
             old: id('a'),
-            path: npath("n.md"),
+            path: npath("N.md"),
             content: "x0".to_owned(),
         };
         assert_eq!(steps, vec![step("n.md", Some(supersede), None, set("x0"))]);
@@ -851,6 +851,48 @@ mod tests {
         assert_eq!(steps, expected);
     }
 
+    /// The interrupted-round setup with the other note at `conflict`, plus extra disk and base entries.
+    fn n_step_with_other_note(
+        conflict: &str,
+        extra_disk: Vec<DiskEntry>,
+        extra_base: &[(&str, &str)],
+        blocked_folders: &[&str],
+    ) -> Step {
+        let mut entries = base(&[("n.md", "orig")]);
+        for (path, text) in extra_base {
+            entries.set(key(path), h(text));
+        }
+        let mut files = vec![present("n.md", "mine")];
+        files.extend(extra_disk);
+        let notes = vec![note('a', "n.md", "theirs"), note('c', conflict, "mine")];
+        let steps = run(files, notes, &entries, blocked_folders);
+        steps.into_iter().find(|s| s.key == key("n.md")).unwrap()
+    }
+
+    fn captured_again() -> Step {
+        step("n.md", create_doc("n.md", "mine"), None, set("mine"))
+    }
+
+    #[test]
+    fn should_capture_again_when_the_other_note_already_has_a_file() {
+        let conflict = "n (conflict cccccccc).md";
+        let found = n_step_with_other_note(conflict, vec![present(conflict, "mine")], &[], &[]);
+        assert_eq!(found, captured_again());
+    }
+
+    #[test]
+    fn should_capture_again_when_the_other_note_has_a_base() {
+        let conflict = "n (conflict cccccccc).md";
+        let found = n_step_with_other_note(conflict, vec![], &[(conflict, "old")], &[]);
+        assert_eq!(found, captured_again());
+    }
+
+    #[test]
+    fn should_capture_again_when_the_other_note_is_under_a_blocked_folder() {
+        let found = n_step_with_other_note("private/c.md", vec![], &[], &["private/"]);
+        assert_eq!(found, captured_again());
+    }
+
     #[test]
     fn should_leave_blocked_keys_alone() {
         let with_note = run(
@@ -864,6 +906,15 @@ mod tests {
             run(vec![blocked("n.md")], vec![], &Base::default(), &[]),
             vec![]
         );
+        let tombstone = DocAction::Tombstone { id: id('a') };
+        let expected = step("n.md", Some(tombstone), None, BaseChange::Clear);
+        let absent = run(
+            vec![],
+            vec![note('a', "n.md", "x")],
+            &base(&[("n.md", "x")]),
+            &[],
+        );
+        assert_eq!(absent, vec![expected]);
     }
 
     #[test]
