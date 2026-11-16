@@ -235,6 +235,35 @@ async fn should_carry_large_notes() {
     assert_eq!(outcome, (false, big));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn should_keep_every_text_when_appends_run_concurrently() {
+    const APPENDS: usize = 40;
+    let tmp = seeded();
+    let client = connect(tmp.path()).await;
+    let mut calls = tokio::task::JoinSet::new();
+    for n in 0..APPENDS {
+        let peer = client.peer().clone();
+        let arguments = json!({ "path": "log.md", "content": format!("line-{n}") });
+        let Value::Object(arguments) = arguments else {
+            unreachable!()
+        };
+        calls.spawn(async move {
+            let request = CallToolRequestParams::new("append_to_note").with_arguments(arguments);
+            peer.call_tool(request).await.unwrap().is_error
+        });
+    }
+    while let Some(outcome) = calls.join_next().await {
+        assert_eq!(outcome.unwrap(), Some(false));
+    }
+    let (_, text) = call(&client, "read_note", json!({ "path": "log.md" })).await;
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), APPENDS, "{text}");
+    for n in 0..APPENDS {
+        let wanted = format!("line-{n}");
+        assert_eq!(lines.iter().filter(|line| **line == wanted).count(), 1);
+    }
+}
+
 const SESSION: [&str; 4] = [
     r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
     r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,

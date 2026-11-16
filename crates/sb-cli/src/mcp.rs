@@ -1,6 +1,6 @@
 //! The MCP server behind `sb mcp`: the `sb_core::ops` note operations as tools on stdio.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::transport::stdio;
@@ -65,6 +65,8 @@ pub struct GraphParams {
 #[derive(Clone)]
 pub struct NotesServer {
     vault: Arc<Vault>,
+    /// Serialises operations: append is read-modify-write, and tool calls run in parallel.
+    lock: Arc<Mutex<()>>,
 }
 
 impl NotesServer {
@@ -72,20 +74,27 @@ impl NotesServer {
     pub fn new(vault: Vault) -> Self {
         Self {
             vault: Arc::new(vault),
+            lock: Arc::new(Mutex::new(())),
         }
     }
 
-    /// Runs a blocking vault operation off the async threads; errors become tool error text.
+    /// Runs a blocking vault operation off the async threads, one at a time; errors become
+    /// tool error text.
     async fn run<T, F>(&self, operation: F) -> Result<T, String>
     where
         T: Send + 'static,
         F: FnOnce(&Vault) -> Result<T, CoreError> + Send + 'static,
     {
         let vault = Arc::clone(&self.vault);
-        tokio::task::spawn_blocking(move || operation(&vault))
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())
+        let lock = Arc::clone(&self.lock);
+        tokio::task::spawn_blocking(move || {
+            // A panic in an earlier operation must not stop the server: the guard protects no data.
+            let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            operation(&vault)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
     }
 
     /// Like `run`, but the result is returned as one JSON document.
@@ -210,7 +219,6 @@ impl NotesServer {
 
 #[tool_handler(
     name = "second-brain",
-    version = "0.1.0",
     instructions = "A vault is a folder of Markdown notes. Note paths are relative to the vault root, use `/` separators, end with `.md` and are matched case-insensitively. `[[Note Name]]` in a note links to another note; use get_links and get_graph to navigate those links. write_note replaces the whole note, while append_to_note adds text to the end of it."
 )]
 impl ServerHandler for NotesServer {}
@@ -223,7 +231,7 @@ pub fn serve_stdio(vault: Vault) -> Result<(), CliError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async {
+    let outcome = runtime.block_on(async {
         let service = NotesServer::new(vault)
             .serve(stdio())
             .await
@@ -233,5 +241,8 @@ pub fn serve_stdio(vault: Vault) -> Result<(), CliError> {
             .await
             .map_err(|error| CliError::Mcp(error.to_string()))?;
         Ok(())
-    })
+    });
+    // Dropping the runtime would wait for the blocking thread that may still be reading stdin.
+    runtime.shutdown_background();
+    outcome
 }
