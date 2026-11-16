@@ -420,7 +420,7 @@ Rules that make this safe:
 2. **Compare before overwrite.** A file is replaced, renamed or trashed only if, re-read immediately beforehand with the replacement already prepared, it still has the content seen during the scan. Otherwise the key is blocked for this round. A writer that slips in between that check and the rename can still be overwritten; the window is a few system calls and is accepted.
 3. **Local first.** When a remote update arrives, the engine reconciles, then imports the update, then reconciles again. Pending local edits therefore enter the document as edits and merge with the remote ones line by line; the «both changed» rows are reached only in crash and race situations and after a join without contact (section 8.6).
 4. **Echo.** The engine's own writes trigger the watcher; the resulting round finds everything in agreement and produces nothing.
-5. **Missing vault.** If the vault directory does not exist, or `.secondbrain/` has disappeared from a vault that has sync state, the engine stops with an error instead of treating every note as deleted.
+5. **Missing vault.** If the vault directory does not exist, or `.secondbrain/` has disappeared from a vault that has sync state, nothing is treated as deleted: starting the engine fails with an error, and a running engine abandons the round before touching the document or any file. The check runs at the start of every round, because a drive can be unmounted while the engine runs and leave an empty folder behind. A running engine reports the error, keeps going and tries again at the next round, so sync resumes by itself when the vault is back.
 6. New files use the display path from `paths`. A note that already exists locally keeps its local casing.
 
 ### 8.6 Joining and leaving
