@@ -242,15 +242,15 @@ pub fn get_links(vault: &Vault, path: &str) -> Result<LinksReport> {
 /// # Errors
 /// `InvalidPath`, or `NotFound` when `around` is not in the index.
 pub fn get_graph(vault: &Vault, around: Option<&str>, depth: Option<u8>) -> Result<Graph> {
+    let target = around
+        .map(|raw| parse_path(raw).map(|path| (raw, path.key())))
+        .transpose()?;
     let index = Index::build(vault)?;
-    let Some(raw) = around else {
+    let Some((raw, key)) = target else {
         return Ok(index.graph());
     };
     index
-        .graph_around(
-            &parse_path(raw)?.key(),
-            depth.unwrap_or(DEFAULT_GRAPH_DEPTH),
-        )
+        .graph_around(&key, depth.unwrap_or(DEFAULT_GRAPH_DEPTH))
         .ok_or_else(|| CoreError::NotFound(raw.to_owned()))
 }
 
@@ -352,6 +352,8 @@ mod tests {
         );
         assert_eq!(list_notes(&vault, None).unwrap().notes.len(), 2);
         assert_eq!(read_note(&vault, "Projects/Idea.md").unwrap(), "new");
+        let on_disk = fs::read_to_string(vault.root().join("Projects/Idea.md")).unwrap();
+        assert_eq!(on_disk, "new");
     }
 
     #[test]
@@ -365,17 +367,25 @@ mod tests {
                 created: true
             }
         );
+        assert_eq!(
+            fs::read_to_string(vault.root().join("new/n.md")).unwrap(),
+            "x"
+        );
     }
 
     #[test]
     fn should_append_to_note() {
         let (_tmp, vault) = seeded();
-        assert!(!append_to_note(&vault, "home.md", "more").unwrap().created);
+        let existing = append_to_note(&vault, "home.md", "more").unwrap();
+        assert_eq!(existing.path, p("Home.md"));
+        assert!(!existing.created);
         assert_eq!(
             read_note(&vault, "Home.md").unwrap(),
             "[[Idea]] #start\nmore"
         );
-        assert!(append_to_note(&vault, "log.md", "first").unwrap().created);
+        let fresh = append_to_note(&vault, "log.md", "first").unwrap();
+        assert_eq!(fresh.path, p("log.md"));
+        assert!(fresh.created);
     }
 
     #[test]
@@ -412,7 +422,30 @@ mod tests {
         ));
         assert!(matches!(
             rename_note(&vault, "missing.md", "x.md"),
-            Err(CoreError::NotFound(_))
+            Err(CoreError::NotFound(p)) if p == "missing.md"
+        ));
+        assert!(!vault.root().join("Home.md").exists());
+        let moved = fs::read_to_string(vault.root().join("Start/Home.md")).unwrap();
+        assert_eq!(moved, "[[Idea]] #start");
+    }
+
+    #[test]
+    fn should_rename_note_when_only_the_case_changes() {
+        let (_tmp, vault) = seeded();
+        let outcome = rename_note(&vault, "Home.md", "home.md").unwrap();
+        assert_eq!(outcome.to, p("home.md"));
+        let list = list_notes(&vault, None).unwrap();
+        assert_eq!(paths(&list), ["home.md", "Projects/Idea.md"]);
+        assert_eq!(read_note(&vault, "HOME.md").unwrap(), "[[Idea]] #start");
+    }
+
+    #[test]
+    fn should_reject_bad_around_path_without_scanning_the_vault() {
+        let (tmp, vault) = seeded();
+        fs::remove_dir_all(tmp.path().join("vault")).unwrap();
+        assert!(matches!(
+            get_graph(&vault, Some("../x.md"), None),
+            Err(CoreError::InvalidPath { .. })
         ));
     }
 
@@ -479,6 +512,7 @@ mod tests {
                 get_links(&vault, raw).map(drop),
                 rename_note(&vault, raw, "ok.md").map(drop),
                 rename_note(&vault, "Home.md", raw).map(drop),
+                get_graph(&vault, Some(raw), None).map(drop),
             ];
             for result in results {
                 assert!(
