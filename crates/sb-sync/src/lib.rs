@@ -6,6 +6,7 @@ mod error;
 mod local;
 mod plan;
 mod protocol;
+mod replica;
 mod session;
 mod state;
 mod store;
@@ -21,6 +22,7 @@ pub use plan::{
 pub use protocol::{
     ALPN, FRAME_MAX, HELLO_MAX, Message, PROTOCOL_VERSION, read_frame, write_frame,
 };
+pub use replica::{MAX_PEERS_PER_MESSAGE, Outgoing, Replica, SessionId};
 pub use session::{Role, SessionEvent, SessionParams, run_session};
 pub use state::{
     BlockedNote, DeviceId, EngineLock, NetConfig, NetMode, PeerEntry, PeerStatus, PendingCommand,
