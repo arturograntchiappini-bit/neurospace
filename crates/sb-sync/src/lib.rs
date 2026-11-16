@@ -3,6 +3,7 @@
 mod auth;
 mod doc;
 mod error;
+mod local;
 mod plan;
 mod state;
 mod store;
@@ -11,6 +12,7 @@ mod ticket;
 pub use auth::{proof, verify};
 pub use doc::{Hash32, NoteId, NoteView, SyncDoc, conflict_path, content_hash};
 pub use error::{Result, SyncError};
+pub use local::{LocalReplica, MAX_PASSES, Outcome};
 pub use plan::{
     BaseChange, DiskAction, DiskEntry, DiskScan, DiskState, DocAction, PlanInput, Step, plan, scan,
 };

@@ -303,6 +303,11 @@ impl SyncDoc {
         self.doc.oplog_vv().encode()
     }
 
+    /// Whether this document holds all history up to `version` (an encoded version vector).
+    pub fn includes_version(&self, version: &[u8]) -> Result<bool> {
+        Ok(self.doc.oplog_vv().includes_vv(&decode_version(version)?))
+    }
+
     /// Everything a document at `version` lacks.
     pub fn updates_since(&self, version: &[u8]) -> Result<Vec<u8>> {
         let version = decode_version(version)?;
@@ -671,6 +676,21 @@ mod tests {
         sync(&mut a, &mut b);
         assert_eq!(a.updates_for(&merged).unwrap(), None);
         assert!(SyncDoc::merge_versions(&a.version(), b"garbage").is_err());
+    }
+
+    #[test]
+    fn should_tell_whether_the_document_includes_a_version() {
+        let mut doc = SyncDoc::new();
+        doc.create_note(&p("a.md"), "a").unwrap();
+        let earlier = doc.version();
+        doc.create_note(&p("b.md"), "b").unwrap();
+        assert!(doc.includes_version(&earlier).unwrap());
+        assert!(doc.includes_version(&doc.version()).unwrap());
+        assert!(!SyncDoc::new().includes_version(&doc.version()).unwrap());
+        assert!(matches!(
+            doc.includes_version(b"garbage"),
+            Err(SyncError::Doc(_))
+        ));
     }
 
     #[test]

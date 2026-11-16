@@ -13,12 +13,13 @@ pub type Secret = [u8; 32];
 pub type DeviceId = [u8; 32];
 
 const APP_DIR: &str = "secondbrain";
-const GROUP_FILES: [&str; 8] = [
+const GROUP_FILES: [&str; 9] = [
     "secret",
     "peers.json",
     "doc.snap",
     "doc.log",
     "base.json",
+    "base.version",
     "fresh-join",
     "command.pending",
     "status.json",
@@ -39,16 +40,20 @@ pub fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Decodes exactly 64 hexadecimal characters (either case) into 32 bytes.
-pub fn from_hex32(text: &str) -> Option<[u8; 32]> {
-    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+/// Decodes hexadecimal text (either case, even length) into bytes.
+pub(crate) fn from_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
-    let mut bytes = [0u8; 32];
-    for (byte, pair) in bytes.iter_mut().zip(text.as_bytes().chunks(2)) {
-        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
-    }
-    Some(bytes)
+    text.as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect()
+}
+
+/// Decodes exactly 64 hexadecimal characters (either case) into 32 bytes.
+pub fn from_hex32(text: &str) -> Option<[u8; 32]> {
+    from_hex(text)?.try_into().ok()
 }
 
 /// A known peer: its device id (64 hex characters) and address hints (`ip:port`).
@@ -818,6 +823,7 @@ mod tests {
             "doc.snap",
             "doc.log",
             "base.json",
+            "base.version",
             "fresh-join",
             "command.pending",
             "status.json",
