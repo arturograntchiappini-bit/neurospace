@@ -188,7 +188,7 @@ Each link records: target text as written (without heading), optional heading, o
 
 ### 6.2 Link resolution (call)
 
-Resolving target `T` written in note `S`. First normalise: trim, replace `\` with `/`, drop a leading `./`, drop a trailing `.md` (ASCII case-insensitive), lowercase. Then, in order:
+Resolving target `T` written in note `S`. First normalise: trim, replace `\` with `/`, drop a leading `./` or `/` (a target starting with `/` is relative to the vault root), drop a trailing `.md` (ASCII case-insensitive), lowercase. Then, in order:
 
 1. **`T` contains `/`:**
    1. exact vault-relative match: the note whose key is `T.md`;
@@ -199,7 +199,7 @@ Resolving target `T` written in note `S`. First normalise: trim, replace `\` wit
 
 Tie-break among several candidates: a note in the same folder as `S` first; then fewest path components; then smallest key.
 
-An empty target (`[[#Heading]]`) refers to `S` itself and is not a link between notes.
+An empty target (`[[#Heading]]`) refers to `S` itself and is not a link between notes. A note that links to itself is not listed among its own backlinks.
 
 ### 6.3 Graph
 
