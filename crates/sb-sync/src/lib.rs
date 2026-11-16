@@ -4,6 +4,7 @@ mod auth;
 mod doc;
 mod error;
 mod state;
+mod store;
 mod ticket;
 
 pub use auth::{proof, verify};
@@ -13,4 +14,5 @@ pub use state::{
     BlockedNote, DeviceId, EngineLock, NetConfig, NetMode, PeerEntry, PeerStatus, PendingCommand,
     Secret, StateDir, Status, base_dir_from, from_hex32, random_bytes, to_hex, vault_dir_name,
 };
+pub use store::{Base, COMPACT_LOG_BYTES, DocStore};
 pub use ticket::Ticket;

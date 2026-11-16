@@ -184,21 +184,21 @@ pub fn vault_dir_name(canonical_vault_path: &str, windows: bool) -> String {
     to_hex(&blake3::hash(text.as_bytes()).as_bytes()[..8])
 }
 
-fn io_error(path: &Path) -> impl FnOnce(io::Error) -> SyncError + '_ {
+pub(crate) fn io_error(path: &Path) -> impl FnOnce(io::Error) -> SyncError + '_ {
     move |source| SyncError::Io {
         path: path.to_path_buf(),
         source,
     }
 }
 
-fn corrupt(path: &Path, reason: impl ToString) -> SyncError {
+pub(crate) fn corrupt(path: &Path, reason: impl ToString) -> SyncError {
     SyncError::CorruptState {
         path: path.to_path_buf(),
         reason: reason.to_string(),
     }
 }
 
-fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(crate) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
@@ -206,7 +206,7 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
-fn remove_if_exists(path: &Path) -> Result<()> {
+pub(crate) fn remove_if_exists(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
@@ -216,7 +216,7 @@ fn remove_if_exists(path: &Path) -> Result<()> {
 
 /// Options for every file in the state directory: readable by the owner only on Unix.
 #[cfg(unix)]
-fn private_options() -> OpenOptions {
+pub(crate) fn private_options() -> OpenOptions {
     use std::os::unix::fs::OpenOptionsExt;
     let mut options = OpenOptions::new();
     options.mode(0o600);
@@ -224,7 +224,7 @@ fn private_options() -> OpenOptions {
 }
 
 #[cfg(not(unix))]
-fn private_options() -> OpenOptions {
+pub(crate) fn private_options() -> OpenOptions {
     OpenOptions::new()
 }
 
@@ -256,7 +256,7 @@ fn write_temporary(tmp: &Path, bytes: &[u8]) -> Result<()> {
     })
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
     tmp_name.push(".tmp");
     let tmp = path.with_file_name(tmp_name);
@@ -278,7 +278,7 @@ fn json_corrupt(path: &Path, error: &serde_json::Error) -> SyncError {
     corrupt(path, reason)
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     let Some(bytes) = read_optional(path)? else {
         return Ok(None);
     };
@@ -287,7 +287,7 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
         .map_err(|error| json_corrupt(path, &error))
 }
 
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value).map_err(|error| SyncError::Doc(error.to_string()))?;
     write_atomic(path, &bytes)
 }
