@@ -530,6 +530,10 @@ fn create_atomically(target: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Replaces `target` through a synced sibling temporary file, so readers never see a partial note.
 fn write_atomically(target: &Path, bytes: &[u8]) -> Result<()> {
+    // A read-only note is refused on every platform, before any temporary file exists.
+    if lstat(target)?.is_some_and(|existing| existing.permissions().readonly()) {
+        return Err(io_error(target)(io::ErrorKind::PermissionDenied.into()));
+    }
     let temp = temp_sibling(target);
     write_new_file(&temp, bytes).map_err(io_error(&temp))?;
     replace_keeping_permissions(&temp, target).inspect_err(|_| {
@@ -539,9 +543,6 @@ fn write_atomically(target: &Path, bytes: &[u8]) -> Result<()> {
 
 fn replace_keeping_permissions(temp: &Path, target: &Path) -> Result<()> {
     if let Some(existing) = lstat(target)? {
-        if existing.permissions().readonly() {
-            return Err(io_error(target)(io::ErrorKind::PermissionDenied.into()));
-        }
         fs::set_permissions(temp, existing.permissions()).map_err(io_error(temp))?;
     }
     fs::rename(temp, target).map_err(io_error(target))
@@ -656,12 +657,43 @@ mod tests {
         fs::create_dir(folder.join("dir.md")).unwrap();
         let blocked = vault.create(&p("d/dir.md"), "x");
         assert!(matches!(blocked, Err(CoreError::AlreadyExists(_))));
-        let temporary = fs::read_dir(&folder)
+        assert_eq!(temporary_entries(&folder), 0);
+    }
+
+    fn temporary_entries(folder: &Path) -> usize {
+        fs::read_dir(folder)
             .unwrap()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_name().to_string_lossy().starts_with(".sb-"))
-            .count();
-        assert_eq!(temporary, 0);
+            .count()
+    }
+
+    #[test]
+    fn should_create_the_whole_file_when_the_name_is_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("n.md");
+        create_atomically(&target, b"content").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "content");
+        assert_eq!(entry_count(dir.path()), 1);
+    }
+
+    #[test]
+    fn should_not_replace_or_litter_when_the_name_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("n.md");
+        fs::write(&file, "old").unwrap();
+        let error = create_atomically(&file, b"new").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "old");
+        assert_eq!(temporary_entries(dir.path()), 0);
+
+        let folder = dir.path().join("dir.md");
+        fs::create_dir(&folder).unwrap();
+        let error = create_atomically(&folder, b"new").unwrap_err();
+        eprintln!("directory in the way reported {:?}", error.kind());
+        assert!(folder.is_dir());
+        assert_eq!(entry_count(&folder), 0);
+        assert_eq!(temporary_entries(dir.path()), 0);
     }
 
     #[test]
