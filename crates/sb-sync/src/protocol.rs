@@ -194,9 +194,8 @@ mod tests {
         matches!(result, Err(SyncError::Protocol(_)))
     }
 
-    #[test]
-    fn should_round_trip_every_message() {
-        let messages = [
+    fn sample_messages() -> Vec<Message> {
+        vec![
             Message::Hello {
                 version: 1,
                 proof: [7; 32],
@@ -221,9 +220,31 @@ mod tests {
             },
             Message::Peers(vec![]),
             Message::Peers(vec![[1; 32], [2; 32]]),
-        ];
-        for message in messages {
+        ]
+    }
+
+    #[test]
+    fn should_round_trip_every_message() {
+        for message in sample_messages() {
             assert_eq!(Message::decode(&message.encode()).unwrap(), message);
+        }
+    }
+
+    #[test]
+    fn should_never_decode_a_prefix_as_another_kind_of_message() {
+        for message in sample_messages() {
+            let encoded = message.encode();
+            for len in 0..encoded.len() {
+                match Message::decode(&encoded[..len]) {
+                    Err(SyncError::Protocol(_)) => {}
+                    Ok(other) => assert_eq!(
+                        std::mem::discriminant(&other),
+                        std::mem::discriminant(&message),
+                        "prefix of {len} bytes of {message:?} decoded as {other:?}"
+                    ),
+                    Err(other) => panic!("unexpected error {other:?}"),
+                }
+            }
         }
     }
 
@@ -242,11 +263,12 @@ mod tests {
     fn should_reject_malformed_payloads() {
         let mut updates_past_end = vec![3, 0, 0, 0, 5];
         updates_past_end.extend([1, 2]);
-        let malformed: [Vec<u8>; 7] = [
+        let malformed: [Vec<u8>; 8] = [
             vec![],
             vec![0],
             vec![9, 1, 2],
             [vec![1], vec![0; 33]].concat(),
+            [vec![1], vec![0; 35]].concat(),
             updates_past_end,
             vec![3, 0, 0],
             [vec![4], vec![0; 33]].concat(),
@@ -295,6 +317,26 @@ mod tests {
         let mut prefix_cut = &[0u8, 0][..];
         assert!(is_protocol_error(
             read_frame(&mut prefix_cut, FRAME_MAX).await
+        ));
+    }
+
+    #[tokio::test]
+    async fn should_read_a_zero_length_frame_but_not_decode_it() {
+        let mut reader = &[0u8, 0, 0, 0][..];
+        let frame = read_frame(&mut reader, FRAME_MAX).await.unwrap();
+        assert_eq!(frame, Some(vec![]));
+        assert!(is_protocol_error(Message::decode(&[])));
+    }
+
+    #[tokio::test]
+    async fn should_accept_a_frame_of_exactly_max_and_refuse_one_more() {
+        let max = 8;
+        let mut at_limit = [&8u32.to_be_bytes()[..], &[1u8; 8]].concat();
+        let frame = read_frame(&mut at_limit.as_slice(), max).await.unwrap();
+        assert_eq!(frame, Some(vec![1; 8]));
+        at_limit = [&9u32.to_be_bytes()[..], &[1u8; 9]].concat();
+        assert!(is_protocol_error(
+            read_frame(&mut at_limit.as_slice(), max).await
         ));
     }
 }

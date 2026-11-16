@@ -58,11 +58,14 @@ pub enum SessionEvent {
 }
 
 /// Authenticates, then relays messages until either side closes. `on_event` sees `Opened` once after a successful
-/// handshake, then every received message, then `Closed` exactly once if `Opened` was seen.
+/// handshake, then every received message, then `Closed` exactly once if `Opened` was seen, on every way out:
+/// when the returned future is dropped or aborted after `Opened`, `Closed` is reported from a drop guard.
+/// A cancelled session cannot shut its writer down; the stream is simply dropped.
 ///
 /// # Errors
 /// `SyncError::AuthFailed` when the peer's proof is wrong, `SyncError::Protocol` for anything else the peer
-/// or the stream gets wrong. `Ok(())` when the stream ended cleanly or the outbound channel was closed.
+/// or the stream gets wrong, and (before any I/O) when `own_id` equals `peer_id`. `Ok(())` when the stream
+/// ended cleanly or the outbound channel was closed.
 pub async fn run_session<R, W>(
     mut reader: R,
     mut writer: W,
@@ -73,6 +76,11 @@ where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
+    if params.own_id == params.peer_id {
+        return Err(SyncError::Protocol(
+            "a device does not sync with itself".to_string(),
+        ));
+    }
     let outcome = open_and_relay(&mut reader, &mut writer, &params, &mut on_event).await;
     let _ = writer.shutdown().await;
     outcome
@@ -91,20 +99,33 @@ where
 {
     handshake(reader, writer, params).await?;
     let (outbound, outbox) = unbounded_channel();
-    on_event(SessionEvent::Opened {
-        peer: params.peer_id,
-        outbound,
-    });
+    let mut session = OpenSession::open(on_event, params.peer_id, outbound);
     // Neither loop is cancel-safe, which is fine: when one ends, the whole session ends.
-    let outcome = tokio::select! {
-        outcome = receive_loop(reader, on_event) => outcome,
+    tokio::select! {
+        outcome = receive_loop(reader, &mut session) => outcome,
         outcome = send_loop(writer, outbox) => outcome,
-    };
-    on_event(SessionEvent::Closed);
-    outcome
+    }
 }
 
-async fn receive_loop<R, E>(reader: &mut R, on_event: &mut E) -> Result<()>
+/// An opened session's channel to the host. Dropping it, however the session ends, reports `Closed`.
+struct OpenSession<'a, E: FnMut(SessionEvent)> {
+    on_event: &'a mut E,
+}
+
+impl<'a, E: FnMut(SessionEvent)> OpenSession<'a, E> {
+    fn open(on_event: &'a mut E, peer: DeviceId, outbound: UnboundedSender<Message>) -> Self {
+        on_event(SessionEvent::Opened { peer, outbound });
+        Self { on_event }
+    }
+}
+
+impl<E: FnMut(SessionEvent)> Drop for OpenSession<'_, E> {
+    fn drop(&mut self) {
+        (self.on_event)(SessionEvent::Closed);
+    }
+}
+
+async fn receive_loop<R, E>(reader: &mut R, session: &mut OpenSession<'_, E>) -> Result<()>
 where
     R: AsyncRead + Unpin,
     E: FnMut(SessionEvent),
@@ -114,7 +135,7 @@ where
             Message::Hello { .. } => {
                 return Err(SyncError::Protocol("Hello after the handshake".to_string()));
             }
-            message => on_event(SessionEvent::Received(message)),
+            message => (session.on_event)(SessionEvent::Received(message)),
         }
     }
     Ok(())
@@ -226,13 +247,27 @@ mod tests {
         )
     }
 
-    /// An acceptor driven by a hand-written dialler: the returned streams are the dialler's ends.
+    /// A session driven by a hand-written peer: the returned streams are the peer's ends.
+    fn session_with_hand_peer(
+        role: Role,
+        ids: (DeviceId, DeviceId),
+    ) -> (DuplexStream, DuplexStream, Side) {
+        let (to_session, session_reader) = duplex(PIPE_BYTES);
+        let (session_writer, from_session) = duplex(PIPE_BYTES);
+        let side = spawn_side(role, SECRET, ids, (session_reader, session_writer));
+        (to_session, from_session, side)
+    }
+
     fn acceptor_with_hand_peer() -> (DuplexStream, DuplexStream, Side) {
-        let (to_acceptor, acceptor_reader) = duplex(PIPE_BYTES);
-        let (acceptor_writer, from_acceptor) = duplex(PIPE_BYTES);
-        let io = (acceptor_reader, acceptor_writer);
-        let side = spawn_side(Role::Acceptor, SECRET, (B, A), io);
-        (to_acceptor, from_acceptor, side)
+        session_with_hand_peer(Role::Acceptor, (B, A))
+    }
+
+    async fn read_hello_frame(from_session: &mut DuplexStream) -> Vec<u8> {
+        let frame = timeout(WAIT, read_frame(from_session, HELLO_MAX)).await;
+        frame
+            .expect("a frame in time")
+            .unwrap()
+            .expect("a frame, not the end")
     }
 
     async fn next_event(side: &mut Side) -> SessionEvent {
@@ -382,10 +417,7 @@ mod tests {
         write_frame(&mut to_acceptor, &hello_frame(PROTOCOL_VERSION, &SECRET))
             .await
             .unwrap();
-        let answer = read_frame(&mut from_acceptor, HELLO_MAX)
-            .await
-            .unwrap()
-            .unwrap();
+        let answer = read_hello_frame(&mut from_acceptor).await;
         let Message::Hello { version, proof } = Message::decode(&answer).unwrap() else {
             panic!("the acceptor must answer with a Hello");
         };
@@ -443,7 +475,7 @@ mod tests {
         write_frame(&mut to_acceptor, &hello_frame(PROTOCOL_VERSION, &SECRET))
             .await
             .unwrap();
-        read_frame(&mut from_acceptor, HELLO_MAX).await.unwrap();
+        read_hello_frame(&mut from_acceptor).await;
         write_frame(&mut to_acceptor, &[9, 9]).await.unwrap();
         let (result, events) = finish(acceptor).await;
         assert!(matches!(result, Err(SyncError::Protocol(_))), "{result:?}");
@@ -452,5 +484,82 @@ mod tests {
             [SessionEvent::Opened { .. }, SessionEvent::Closed]
         );
         assert!(shape, "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn should_report_closed_when_the_session_task_is_aborted() {
+        let (mut a, mut b) = pair(SECRET, SECRET);
+        let (_, _a_out) = opened(&mut a).await;
+        let (_, _b_out) = opened(&mut b).await;
+        a.task.abort();
+        let _ = timeout(WAIT, &mut a.task)
+            .await
+            .expect("the abort completes");
+        let mut a_events = Vec::new();
+        while let Ok(event) = a.events.try_recv() {
+            a_events.push(event);
+        }
+        assert!(
+            matches!(a_events.as_slice(), [SessionEvent::Closed]),
+            "{a_events:?}"
+        );
+        let (b_result, b_events) = finish(b).await;
+        assert!(b_result.is_ok(), "{b_result:?}");
+        assert!(
+            matches!(b_events.as_slice(), [SessionEvent::Closed]),
+            "{b_events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_refuse_a_session_with_itself() {
+        let (_to_session, from_session, session) = session_with_hand_peer(Role::Dialer, (A, A));
+        let (result, events) = finish(session).await;
+        assert!(matches!(result, Err(SyncError::Protocol(_))), "{result:?}");
+        assert!(events.is_empty());
+        assert_nothing_written(from_session).await;
+    }
+
+    #[tokio::test]
+    async fn should_prefer_auth_failure_when_proof_and_version_are_both_wrong() {
+        let (mut to_acceptor, from_acceptor, acceptor) = acceptor_with_hand_peer();
+        write_frame(&mut to_acceptor, &hello_frame(2, &OTHER_SECRET))
+            .await
+            .unwrap();
+        let (result, events) = finish(acceptor).await;
+        assert!(matches!(result, Err(SyncError::AuthFailed)), "{result:?}");
+        assert!(events.is_empty());
+        assert_nothing_written(from_acceptor).await;
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_reflected_proof() {
+        let (mut to_acceptor, from_acceptor, acceptor) = acceptor_with_hand_peer();
+        let reflected = Message::Hello {
+            version: PROTOCOL_VERSION,
+            proof: proof(&SECRET, &B, &A),
+        };
+        write_frame(&mut to_acceptor, &reflected.encode())
+            .await
+            .unwrap();
+        let (result, events) = finish(acceptor).await;
+        assert!(matches!(result, Err(SyncError::AuthFailed)), "{result:?}");
+        assert!(events.is_empty());
+        assert_nothing_written(from_acceptor).await;
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_wrong_proof_from_the_acceptor() {
+        let (mut to_dialer, mut from_dialer, dialer) = session_with_hand_peer(Role::Dialer, (A, B));
+        let first = read_hello_frame(&mut from_dialer).await;
+        assert!(matches!(Message::decode(&first), Ok(Message::Hello { .. })));
+        let wrong = Message::Hello {
+            version: PROTOCOL_VERSION,
+            proof: proof(&OTHER_SECRET, &B, &A),
+        };
+        write_frame(&mut to_dialer, &wrong.encode()).await.unwrap();
+        let (result, events) = finish(dialer).await;
+        assert!(matches!(result, Err(SyncError::AuthFailed)), "{result:?}");
+        assert!(events.is_empty(), "{events:?}");
     }
 }
