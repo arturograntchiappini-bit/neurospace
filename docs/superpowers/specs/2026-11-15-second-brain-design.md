@@ -139,7 +139,7 @@ A note path is valid when all of the following hold. The same validation runs on
 4. No component starts with `.` (hidden files and directories are never notes).
 5. No component contains `< > : " | ? *` or a control character (U+0000–U+001F, U+007F).
 6. No component ends with a space or a dot.
-7. No component's stem (the part before the first dot) is a Windows device name, compared case-insensitively: `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`.
+7. No component's stem (the part before the first dot, with trailing spaces removed) is a Windows device name, compared case-insensitively: `CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM0`–`COM9`, `LPT0`–`LPT9`, and `COM` or `LPT` followed by one of the superscript digits `¹`, `²`, `³`. (Widened in M2, before paths arrive from peers: a Linux peer may legally hold `CON .md`, which older Windows versions treat as the device.)
 8. The last component ends with `.md`, compared ASCII case-insensitively, and has a non-empty stem.
 
 Rules 5–7 make every synced path valid on both operating systems.
@@ -164,7 +164,8 @@ Ignored files are never indexed and never synced, and the sync engine never modi
 
 - Content is UTF-8 text. Bytes are preserved exactly: no line-ending normalisation, no trailing-newline fixing.
 - **Replacing a note is atomic:** write a hidden temporary file `.sb-<random>.tmp` in the destination directory, then rename it over the target. The new file keeps the permissions of the one it replaces. A symbolic link standing where the note should be is never replaced: the write fails with `SymlinkInPath`.
-- **Creating a note never replaces anything.** If something already exists at the location, including a file the scan ignores or a file the file system considers the same name, creation fails with `AlreadyExists`. Parent directories are created as needed.
+- **Creating a note never replaces anything.** If something already exists at the location, including a file the scan ignores or a file the file system considers the same name, creation fails with `AlreadyExists`. Parent directories are created as needed. From M2 on, the content is written to a temporary file first and then linked into place, so a crash never leaves a half-written note under its real name; on file systems without hard links (FAT, exFAT) the file is created directly.
+- **A read-only note is never replaced** (from M2 on): writing or appending to a note whose permissions forbid writing fails, on Windows and Linux alike. Without this rule the atomic replace would overwrite it on Linux, where only the folder's permissions count.
 - **A new note adopts the spelling of existing folders.** Each folder of its path that already exists under another letter case keeps the spelling on disk; only folders that do not exist yet, and the file name, are spelled as given. So `projects/new.md` next to an existing `Projects/` becomes `Projects/new.md`, and a vault never grows two folders that differ only in case.
 - **Confinement:** before any write, delete or rename, every existing ancestor directory between the vault root and the target must be a real directory. A symbolic link there fails the operation with `SymlinkInPath`; anything else that is not a directory, with `NotADirectory`.
 - **Rename never replaces anything.** It fails with `AlreadyExists` if the destination key is already taken by a different note, and also when the file system finds anything at the destination under another name for it (a Windows 8.3 short name such as `NOTEBO~1.md`, a folder, a file the scan ignores). Only a change of letter case of the note itself is allowed onto its own location. It does not rewrite links.

@@ -546,7 +546,7 @@ Ultimo aggiornamento: 2026-11-16
 
 - Richiesta dell'utente (V.1).
 - **[Proposto — applicato su delega]** Spec di design: `docs/superpowers/specs/2026-11-15-second-brain-design.md`. Letta da un revisore indipendente (builder check) il 2026-11-15; le sue 7 domande sono state risolte come rulings (V.8) e la spec aggiornata.
-- **[Proposto — applicato su delega]** Piano M1: `docs/superpowers/plans/2026-11-15-m1-core-cli-mcp.md`. I piani di M2, M3 e M4 si scrivono all'inizio di ciascuna milestone — **[Aperto]**.
+- **[Proposto — applicato su delega]** Piano M1: `docs/superpowers/plans/2026-11-15-m1-core-cli-mcp.md`. Piano M2: `docs/superpowers/plans/2026-11-16-m2-sync.md` (12 task, da 0 a 11), riletto contro il codice di M1 il 2026-11-16. I piani di M3 e M4 si scrivono all'inizio di ciascuna milestone — **[Aperto]**.
 - Spike di verifica API del 2026-11-15 (codice usa-e-getta, fuori dal repo): iroh 1.4, eframe 0.37 + egui_commonmark 0.26, rmcp 3.10, loro 1.17 + notify 8.2. Conclusi; i fatti verificati sono nell'appendice A della spec, con accanto ciò che non è stato verificato.
 
 ### V.3 Vincoli non negoziabili
@@ -570,7 +570,7 @@ Da copiare in ogni dispatch a un implementer (§11.4).
 Per §11.5: se un task tocca questi moduli, l'orchestratore legge anche il diff.
 
 - **[Proposto — applicato su delega]** In `crates/sb-core/src/`: `path.rs` (validazione dei percorsi), `vault.rs` (operazioni sul disco, confinamento, cestino), `index.rs` (risoluzione dei link), `graph.rs`, `ops.rs` (confine con CLI, MCP e GUI).
-- **[Proposto — applicato su delega]** In `crates/sb-sync/src/` (da M2): documento di sync e regola «viva/lapide», risoluzione delle rivendicazioni di percorso, riconciliazione disco ↔ documento, protocollo e autenticazione tra peer. I nomi esatti dei file si fissano nel piano M2.
+- **[Proposto — applicato su delega]** In `crates/sb-sync/src/` (da M2): documento di sync e regola «viva/lapide», risoluzione delle rivendicazioni di percorso, riconciliazione disco ↔ documento, protocollo e autenticazione tra peer. File (piano M2): `doc.rs` (documento, lapidi, rivendicazioni di percorso), `plan.rs` (pianificatore della riconciliazione), `local.rs` (esecuzione su disco), `store.rs` (persistenza di documento e base), `auth.rs`, `protocol.rs`, `session.rs`, `replica.rs`.
 
 ### V.5 Decisioni
 
@@ -602,6 +602,8 @@ Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nel
   - Validazione dell'orchestratore: su Windows `cargo fmt --check`, `cargo clippy -D warnings` e 125 test puliti; nel container Linux `rust:1-bullseye` 129 test passati, e i test su permessi e link simbolici passano anche da utente non privilegiato; ogni comando della CLI provato a mano con e senza `--json`; rifiuto di `..`, lettera di unità, `.secondbrain/`, backslash, nomi riservati; `sb mcp` provato via pipe con `initialize`, `tools/list` e una chiamata per strumento: lo stdout contiene solo messaggi di protocollo.
   - Non verificato: il server MCP con i client reali Claude Code e Claude Desktop (provato solo con richieste JSON-RPC scritte a mano e con il client di test di `rmcp`); il comportamento dei nomi riservati su Windows 10 (provato solo Windows 11).
   - Rinviato, annotato nel ledger di M1: a M2 la regola più ampia sui nomi riservati (`CON .md`, `COM0`, `CONIN$`), la creazione di file a prova di crash, il rifiuto uniforme di sovrascrivere una nota in sola lettura; a M3 `ops::create_note`, la regola per gli allegati (`![[image.png]]` oggi è un nodo «mancante» nel grafo), il costo dei backlink a ogni cambio di nota.
+- 2026-11-16 — M1 unita a `main` con un commit di merge (`3b49441`); l'albero di `main` è identico a quello del branch. Il worktree `.claude/worktrees/m1-core-cli-mcp` resta sul disco; il ledger di M1 è copiato anche in `.superpowers/sdd/2026-11-15-m1-core-cli-mcp/` nella radice (ignorato da git).
+- 2026-11-16 — **M2 avviata.** Piano riletto e corretto: nuovo Task 0 (regola più ampia sui nomi riservati, creazione dei file a prova di crash, nessuna sostituzione di una nota in sola lettura); il pianificatore tratta come «bloccati» i file illeggibili e le cartelle non elencabili; i file delle note remote nascono con la grafia delle cartelle esistenti. Worktree `.claude/worktrees/m2-sync`, branch `feat/m2-sync`; ledger in `.superpowers/sdd/2026-11-16-m2-sync/progress.md` del worktree.
 - Rischio aperto, non verificato: sulla macchina di sviluppo il preset di rete predefinito di iroh non è mai risultato «online» (le sonde HTTPS verso i relay falliscono con «network unreachable»). Causa non accertata. Da riprovare in M2; se resta così, la modalità `internet` va dichiarata «non verificata su questa macchina».
 - Non verificabile in questo progetto: uso interattivo della GUI da parte di una persona. La GUI si verifica con test headless e con l'avvio del binario.
 
