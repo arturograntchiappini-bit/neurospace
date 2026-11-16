@@ -24,9 +24,11 @@ Status: under construction.
 
 Exit code 0 means success, 1 an operation error (one line on stderr), 2 a usage error.
 
+Deleted notes go to `.secondbrain/trash/` inside the vault, named `<UTC timestamp>-<path with / turned into __>`, and can be moved back by hand. Renaming a note does not rewrite the links that point to it. A note holds at most 4 MiB; larger files are left alone and not listed.
+
 ## Use with AI agents
 
-`sb mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio. It lets an AI agent such as Claude Code or Claude Desktop read, search, write and navigate a vault with the same operations as the command line. Stdout carries protocol messages only; a failed operation (bad path, missing note) comes back as a tool result with `isError: true`.
+`sb mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio. It lets an AI agent such as Claude Code or Claude Desktop read, search, write and navigate a vault with the same operations as the command line; `list_notes` reports the number of ignored files in `ignored`, while `sb list` names them on stderr. Stdout carries protocol messages only; a failed operation (bad path, missing note) comes back as a tool result with `isError: true`.
 
 | Tool | Arguments | Result |
 | --- | --- | --- |

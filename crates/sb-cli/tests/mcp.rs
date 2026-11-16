@@ -80,6 +80,20 @@ async fn should_list_exactly_the_ten_tools() {
 }
 
 #[tokio::test]
+async fn should_mark_read_only_and_destructive_tools() {
+    let tmp = seeded();
+    let client = connect(tmp.path()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let hint = |name: &str, key: &str| {
+        let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+        serde_json::to_value(tool).unwrap()["annotations"][key].clone()
+    };
+    assert_eq!(hint("read_note", "readOnlyHint"), json!(true));
+    assert_eq!(hint("delete_note", "destructiveHint"), json!(true));
+    assert_eq!(hint("write_note", "readOnlyHint"), Value::Null);
+}
+
+#[tokio::test]
 async fn should_report_server_info_and_instructions() {
     let tmp = seeded();
     let client = connect(tmp.path()).await;

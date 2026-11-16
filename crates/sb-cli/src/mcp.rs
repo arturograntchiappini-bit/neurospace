@@ -48,7 +48,7 @@ pub struct RenameParams {
 pub struct SearchParams {
     /// Words that must all appear in a note for it to match.
     pub query: String,
-    /// Most hits to return; omit for the default.
+    /// Most hits to return: default 20, at most 100.
     pub limit: Option<usize>,
 }
 
@@ -57,7 +57,7 @@ pub struct SearchParams {
 pub struct GraphParams {
     /// Note path to centre the graph on; omit for the whole vault graph.
     pub around: Option<String>,
-    /// How many link steps around the note to include; omit for 1.
+    /// How many link steps around the note to include: default 1, at most 5; larger values are treated as 5.
     pub depth: Option<u8>,
 }
 
@@ -111,7 +111,8 @@ impl NotesServer {
 #[tool_router]
 impl NotesServer {
     #[tool(
-        description = "Lists the notes of the vault, or of one folder, as {notes:[{path,title}],ignored}. `ignored` counts files that are not valid notes."
+        description = "Lists the notes of the vault, or of one folder, as {notes:[{path,title}],ignored}. `ignored` counts files that are not valid notes.",
+        annotations(read_only_hint = true)
     )]
     async fn list_notes(
         &self,
@@ -122,7 +123,8 @@ impl NotesServer {
     }
 
     #[tool(
-        description = "Returns the raw Markdown text of a note. Fails when the note does not exist."
+        description = "Returns the raw Markdown text of a note. Fails when the note does not exist.",
+        annotations(read_only_hint = true)
     )]
     async fn read_note(
         &self,
@@ -133,7 +135,7 @@ impl NotesServer {
     }
 
     #[tool(
-        description = "Creates a note, or replaces the whole text of an existing one, and returns {path,created}. Missing folders are created."
+        description = "Creates a note, or replaces the whole text of an existing one, and returns {path,created}. Missing folders are created. A note holds at most 4 MiB."
     )]
     async fn write_note(
         &self,
@@ -144,7 +146,7 @@ impl NotesServer {
     }
 
     #[tool(
-        description = "Adds text to the end of a note on a new line, creating the note when missing, and returns {path,created}."
+        description = "Adds text to the end of a note on a new line, creating the note when missing, and returns {path,created}. A note holds at most 4 MiB."
     )]
     async fn append_to_note(
         &self,
@@ -155,7 +157,8 @@ impl NotesServer {
     }
 
     #[tool(
-        description = "Moves a note to the vault's trash, from where it can be restored, and returns {path,trashed:true}."
+        description = "Moves a note to `.secondbrain/trash/` inside the vault and returns {path,trashed:true}. No tool restores it; the user can move the file back.",
+        annotations(destructive_hint = true)
     )]
     async fn delete_note(
         &self,
@@ -166,7 +169,7 @@ impl NotesServer {
     }
 
     #[tool(
-        description = "Moves a note to a new path and returns {from,to}. Fails when the destination is another existing note."
+        description = "Moves a note to a new path and returns {from,to}. Fails when the destination is another existing note. Links in other notes that point to the old path are not rewritten; get_links shows which notes link to it."
     )]
     async fn rename_note(
         &self,
@@ -177,7 +180,8 @@ impl NotesServer {
     }
 
     #[tool(
-        description = "Full-text search over all notes. Returns {hits:[{path,title,score,snippets:[{line,text}]}]}, best match first."
+        description = "Full-text search over all notes. Returns {hits:[{path,title,score,snippets:[{line,text}]}]}, best match first.",
+        annotations(read_only_hint = true)
     )]
     async fn search_notes(
         &self,
@@ -188,7 +192,8 @@ impl NotesServer {
     }
 
     #[tool(
-        description = "Returns the links a note contains (outgoing) and the lines of other notes that link to it (backlinks)."
+        description = "Returns {outgoing:[{target,kind,line,resolved?}],backlinks:[{from,line,context}]}: the links a note contains and the lines of other notes that link to it. `resolved` is missing when no note matches.",
+        annotations(read_only_hint = true)
     )]
     async fn get_links(
         &self,
@@ -199,7 +204,8 @@ impl NotesServer {
     }
 
     #[tool(
-        description = "Returns the link graph as {nodes:[{id,label,exists}],edges:[{from,to}]}: the whole vault, or the part around one note."
+        description = "Returns the link graph as {nodes:[{id,label,exists}],edges:[{from,to}]}: the whole vault, or the part around one note. A node with exists:false is a link target that has no note yet; its id starts with `?`.",
+        annotations(read_only_hint = true)
     )]
     async fn get_graph(
         &self,
@@ -210,7 +216,8 @@ impl NotesServer {
     }
 
     #[tool(
-        description = "Lists every #tag used in the vault with the number of notes carrying it."
+        description = "Lists every #tag used in the vault with the number of notes carrying it.",
+        annotations(read_only_hint = true)
     )]
     async fn list_tags(&self) -> Result<String, String> {
         self.run_json(ops::list_tags).await
