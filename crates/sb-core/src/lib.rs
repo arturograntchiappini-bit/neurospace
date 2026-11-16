@@ -4,6 +4,7 @@ mod error;
 mod graph;
 mod index;
 mod markdown;
+pub mod ops;
 mod path;
 mod search;
 mod time;
