@@ -97,6 +97,15 @@ impl LocalReplica {
         })
     }
 
+    /// Replaces the document with an empty one and clears the base, both on disk (joining
+    /// another group, leaving). `base.version` is left to the next round, which rewrites it
+    /// because the version of the new document differs from the one remembered.
+    pub(crate) fn reset_to_empty(&mut self) -> Result<()> {
+        self.doc = self.store.reset()?;
+        self.base.clear();
+        self.base.save(&self.state)
+    }
+
     /// Makes disk and document agree, repeating until nothing changes or `MAX_PASSES` is
     /// reached (the next call then continues). A file that cannot be handled is reported in
     /// `Outcome::blocked`; only failures of the state directory or the document are errors.

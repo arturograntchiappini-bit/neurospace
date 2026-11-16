@@ -9,9 +9,10 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use sb_core::Vault;
-use sb_sync::{DeviceId, Message, Outgoing, Replica, SessionId, StateDir};
+use sb_sync::{DeviceId, Message, Outgoing, Replica, SessionId, StateDir, Tick};
 
 const DELIVERY_LIMIT: usize = 10_000;
 
@@ -158,6 +159,28 @@ impl Net {
     pub fn reconcile(&mut self, nodes: &mut [Node], i: usize) {
         let outgoing = nodes[i].replica.reconcile().unwrap();
         self.enqueue(i, outgoing);
+    }
+
+    /// One tick of node `i` at engine time `now`: the sessions it closes are closed on both
+    /// ends, what it sends is queued, and the tick is returned.
+    pub fn tick(&mut self, nodes: &mut [Node], i: usize, now: Duration) -> Tick {
+        let tick = nodes[i].replica.tick(now).unwrap();
+        for session in &tick.close_sessions {
+            self.close(nodes, *session);
+        }
+        self.enqueue(i, tick.outgoing.clone());
+        tick
+    }
+
+    fn close(&mut self, nodes: &mut [Node], session: SessionId) {
+        let Some(position) = self.links.iter().position(|link| link.0 == session) else {
+            return;
+        };
+        let (_, a, b) = self.links.remove(position);
+        nodes[a].replica.session_closed(session);
+        nodes[b].replica.session_closed(session);
+        self.queue
+            .retain(|(_, outgoing)| outgoing.session != session);
     }
 
     /// Delivers queued messages, and the replies they cause, until none are left.

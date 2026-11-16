@@ -1,6 +1,7 @@
 //! Peer-to-peer sync for «Second Brain» vaults: per-vault state, pairing tickets and peer authentication.
 
 mod auth;
+pub mod control;
 mod doc;
 mod error;
 mod local;
@@ -22,7 +23,7 @@ pub use plan::{
 pub use protocol::{
     ALPN, FRAME_MAX, HELLO_MAX, Message, PROTOCOL_VERSION, read_frame, write_frame,
 };
-pub use replica::{MAX_PEERS_PER_MESSAGE, Outgoing, Replica, SessionId};
+pub use replica::{FRESH_JOIN_WAIT, MAX_PEERS_PER_MESSAGE, Outgoing, Replica, SessionId, Tick};
 pub use session::{Role, SessionEvent, SessionParams, run_session};
 pub use state::{
     BlockedNote, DeviceId, EngineLock, NetConfig, NetMode, PeerEntry, PeerStatus, PendingCommand,

@@ -2,6 +2,8 @@
 //! document changes and outgoing messages. The caller moves the messages.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sb_core::Vault;
 
@@ -9,10 +11,38 @@ use crate::doc::SyncDoc;
 use crate::error::{Result, SyncError};
 use crate::local::{LocalReplica, Outcome};
 use crate::protocol::Message;
-use crate::state::{DeviceId, PeerEntry, StateDir, from_hex32, to_hex};
+use crate::state::{
+    DeviceId, PeerEntry, PeerStatus, PendingCommand, Secret, StateDir, Status, from_hex32, to_hex,
+};
+use crate::ticket::Ticket;
 
 /// The most device ids taken from one `Peers` message, or put into one.
 pub const MAX_PEERS_PER_MESSAGE: usize = 64;
+
+/// How long a replica that just joined a group waits for the group's state before it
+/// records its own notes (spec section 8.6).
+pub const FRESH_JOIN_WAIT: Duration = Duration::from_secs(20);
+
+/// Seconds since the Unix epoch; 0 when the clock is before it.
+pub(crate) fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// What the host must do after `tick`, `join` or `leave`.
+#[derive(Debug, Default)]
+pub struct Tick {
+    /// Messages to send.
+    pub outgoing: Vec<Outgoing>,
+    /// Sessions the replica dropped; the host closes their connections.
+    pub close_sessions: Vec<SessionId>,
+    /// The replica left its group: sync is off and the engine should stop.
+    pub left: bool,
+    /// The group secret changed: connections and the tickets issued so far are void.
+    pub secret_changed: bool,
+}
 
 /// Identifies one open session; chosen by the host.
 pub type SessionId = u64;
@@ -38,6 +68,12 @@ pub struct Replica {
     device_id: DeviceId,
     sessions: BTreeMap<SessionId, Session>,
     outcome: Outcome,
+    addresses: Vec<SocketAddr>,
+    /// Mirrors the `fresh-join` marker: no reconciliation until a first state was imported.
+    waiting: bool,
+    /// Engine time at which the wait ends; set at the first tick when opened with the marker.
+    wait_deadline: Option<Duration>,
+    last_error: Option<String>,
 }
 
 impl Replica {
@@ -46,11 +82,16 @@ impl Replica {
     /// # Errors
     /// Whatever `LocalReplica::open` reports.
     pub fn open(vault: Vault, state: StateDir, device_id: DeviceId) -> Result<Replica> {
+        let waiting = state.fresh_join();
         Ok(Replica {
             local: LocalReplica::open(vault, state)?,
             device_id,
             sessions: BTreeMap::new(),
             outcome: Outcome::default(),
+            addresses: Vec::new(),
+            waiting,
+            wait_deadline: None,
+            last_error: None,
         })
     }
 
@@ -69,11 +110,15 @@ impl Replica {
         &self.outcome
     }
 
-    /// One local round, then updates for every session that lacks something.
+    /// One local round, then updates for every session that lacks something. While the
+    /// replica waits for the group's first state it does nothing.
     ///
     /// # Errors
     /// Failures of the vault's state, e.g. `VaultMarkerMissing`.
     pub fn reconcile(&mut self) -> Result<Vec<Outgoing>> {
+        if self.waiting {
+            return Ok(Vec::new());
+        }
         self.reconcile_local()?;
         self.updates_for_sessions()
     }
@@ -120,7 +165,178 @@ impl Replica {
         peers.into_iter().collect()
     }
 
+    /// Whether the replica joined a group and still waits for that group's first state.
+    pub fn is_waiting_for_first_state(&self) -> bool {
+        self.waiting
+    }
+
+    /// Sets the addresses this device listens on, for tickets and status.
+    pub fn set_addresses(&mut self, addresses: Vec<SocketAddr>) {
+        self.addresses = addresses;
+    }
+
+    /// A ticket for this device and the group.
+    ///
+    /// # Errors
+    /// `NotConfigured` without a group secret.
+    pub fn invite(&self) -> Result<Ticket> {
+        let secret = self.local.state.secret()?.ok_or(SyncError::NotConfigured)?;
+        Ok(Ticket {
+            device_id: self.device_id,
+            secret,
+            addrs: self.addresses.clone(),
+        })
+    }
+
+    /// What `status.json` shows now.
+    pub fn status(&self) -> Status {
+        let connected = self.connected_peers();
+        // shortcut: an unreadable peers.json shows no peers; the engine meets the same error elsewhere.
+        let known = self.local.state.peers().unwrap_or_default();
+        Status {
+            pid: std::process::id(),
+            device_id: to_hex(&self.device_id),
+            addresses: self.addresses.iter().map(ToString::to_string).collect(),
+            peers: known
+                .into_iter()
+                .map(|entry| peer_status(entry, &connected))
+                .collect(),
+            notes: self.local.doc.alive_notes().len(),
+            blocked: self.outcome.blocked.clone(),
+            last_error: self.last_error.clone(),
+            updated_unix: unix_now(),
+        }
+    }
+
+    /// `now` is the time since the engine started. Carries out a pending command, ends an
+    /// expired fresh-join wait and writes `status.json`. A bad pending command is dropped and
+    /// reported in the status; only failures of the state directory or the document are errors.
+    ///
+    /// # Errors
+    /// Failures of the state directory, the document or the vault's state.
+    pub fn tick(&mut self, now: Duration) -> Result<Tick> {
+        let mut tick = self.run_pending_command(now)?;
+        if tick.left {
+            return Ok(tick);
+        }
+        tick.outgoing.extend(self.end_expired_wait(now)?);
+        self.local.state.write_status(&self.status())?;
+        Ok(tick)
+    }
+
+    /// Joins the group of a ticket. Its own group only adds the inviting peer. Another group
+    /// replaces the sync state, in an order a crash survives: the marker first, then the
+    /// document and base of the old group, then the peers, and the secret last, because the
+    /// secret is what makes the device a member. Local notes are never touched.
+    ///
+    /// # Errors
+    /// Failures of the state directory.
+    pub fn join(&mut self, ticket: &Ticket, now: Duration) -> Result<Tick> {
+        let inviter = PeerEntry {
+            id: to_hex(&ticket.device_id),
+            addrs: ticket.addrs.iter().map(ToString::to_string).collect(),
+        };
+        if self.local.state.secret()? == Some(ticket.secret) {
+            self.local.state.add_peer(inviter)?;
+            return Ok(Tick::default());
+        }
+        self.replace_group(ticket.secret, inviter, now)
+    }
+
+    /// Turns sync off: the document, base, secret, peers and markers go, the sessions close.
+    /// The vault's files and the device key stay.
+    ///
+    /// # Errors
+    /// Failures of the state directory.
+    pub fn leave(&mut self) -> Result<Tick> {
+        self.local.reset_to_empty()?;
+        self.local.state.clear_group()?;
+        self.end_wait_in_memory();
+        Ok(Tick {
+            close_sessions: self.drop_sessions(),
+            left: true,
+            ..Tick::default()
+        })
+    }
+
+    fn replace_group(&mut self, secret: Secret, inviter: PeerEntry, now: Duration) -> Result<Tick> {
+        self.local.state.set_fresh_join(true)?;
+        self.local.reset_to_empty()?;
+        self.local.state.save_peers(&[inviter])?;
+        self.local.state.save_secret(&secret)?;
+        self.waiting = true;
+        self.wait_deadline = Some(now + FRESH_JOIN_WAIT);
+        Ok(Tick {
+            close_sessions: self.drop_sessions(),
+            secret_changed: true,
+            ..Tick::default()
+        })
+    }
+
+    fn drop_sessions(&mut self) -> Vec<SessionId> {
+        std::mem::take(&mut self.sessions).into_keys().collect()
+    }
+
+    fn run_pending_command(&mut self, now: Duration) -> Result<Tick> {
+        let command = match self.local.state.take_pending() {
+            Ok(Some(command)) => command,
+            Ok(None) => return Ok(Tick::default()),
+            Err(SyncError::CorruptState { .. }) => {
+                return Ok(self.drop_command("a corrupt command.pending was dropped"));
+            }
+            Err(error) => return Err(error),
+        };
+        match command {
+            PendingCommand::Join(text) => match text.parse::<Ticket>() {
+                Ok(ticket) => self.join(&ticket, now),
+                Err(_) => {
+                    Ok(self.drop_command("a pending join with an invalid ticket was dropped"))
+                }
+            },
+            PendingCommand::Leave(true) => self.leave(),
+            PendingCommand::Leave(false) => Ok(Tick::default()),
+        }
+    }
+
+    /// The text never quotes the command: a ticket holds the group secret.
+    fn drop_command(&mut self, why: &str) -> Tick {
+        self.last_error = Some(why.to_string());
+        Tick::default()
+    }
+
+    /// Starts the wait of a replica opened with the marker at its first tick, and ends it
+    /// once the deadline is reached.
+    fn end_expired_wait(&mut self, now: Duration) -> Result<Vec<Outgoing>> {
+        if !self.waiting {
+            return Ok(Vec::new());
+        }
+        let deadline = *self.wait_deadline.get_or_insert(now + FRESH_JOIN_WAIT);
+        if now < deadline {
+            return Ok(Vec::new());
+        }
+        self.end_wait()?;
+        self.reconcile()
+    }
+
+    /// Clears the marker; the caller reconciles.
+    fn end_wait(&mut self) -> Result<()> {
+        if !self.waiting {
+            return Ok(());
+        }
+        self.local.state.set_fresh_join(false)?;
+        self.end_wait_in_memory();
+        Ok(())
+    }
+
+    fn end_wait_in_memory(&mut self) {
+        self.waiting = false;
+        self.wait_deadline = None;
+    }
+
     fn reconcile_local(&mut self) -> Result<()> {
+        if self.waiting {
+            return Ok(());
+        }
         self.outcome = self.local.reconcile()?;
         Ok(())
     }
@@ -137,7 +353,8 @@ impl Replica {
         Ok(vec![Outgoing { session, message }])
     }
 
-    /// Local first, so pending local edits enter the document before the remote ones merge.
+    /// Local first, so pending local edits enter the document before the remote ones merge;
+    /// the first state of a group is imported without it, then the wait is over.
     fn on_updates(
         &mut self,
         session: SessionId,
@@ -147,6 +364,7 @@ impl Replica {
         self.learn_version(session, peer_version)?;
         self.reconcile_local()?;
         let pending = self.import_updates(updates)?;
+        self.end_wait()?;
         self.reconcile_local()?;
         let mut outgoing = Vec::new();
         if pending {
@@ -210,5 +428,13 @@ impl Replica {
             outgoing.push(Outgoing { session, message });
         }
         Ok(outgoing)
+    }
+}
+
+fn peer_status(entry: PeerEntry, connected: &[DeviceId]) -> PeerStatus {
+    let is_connected = from_hex32(&entry.id).is_some_and(|id| connected.contains(&id));
+    PeerStatus {
+        id: entry.id,
+        connected: is_connected,
     }
 }
