@@ -245,6 +245,10 @@ impl Vault {
             return Err(CoreError::AlreadyExists(to.to_string()));
         }
         let destination = self.prepare_target(to)?;
+        // `fs::rename` replaces its target; `locate` misses aliases such as Windows 8.3 names.
+        if to.key() != from.key() && lstat(&destination)?.is_some() {
+            return Err(CoreError::AlreadyExists(to.to_string()));
+        }
         fs::rename(&source, &destination).map_err(io_error(&destination))
     }
 
@@ -902,6 +906,48 @@ mod tests {
         ));
         assert_eq!(vault.read(&p("a.md")).unwrap(), "1");
         assert_eq!(vault.read(&p("A.md")).unwrap(), "2");
+    }
+
+    #[test]
+    fn should_refuse_rename_onto_anything_the_file_system_finds() {
+        let (dir, vault) = vault();
+        vault.write(&p("a.md"), "a").unwrap();
+        fs::create_dir(dir.path().join("b.md")).unwrap();
+        assert!(matches!(
+            vault.rename(&p("a.md"), &p("b.md")),
+            Err(CoreError::AlreadyExists(_))
+        ));
+        assert_eq!(vault.read(&p("a.md")).unwrap(), "a");
+    }
+
+    #[cfg(windows)]
+    fn short_name_of(folder: &Path, long_name: &str) -> Option<String> {
+        let listing = std::process::Command::new("cmd")
+            .args(["/c", "dir", "/x"])
+            .current_dir(folder)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&listing.stdout).into_owned();
+        let line = text.lines().find(|line| line.contains(long_name))?;
+        line.split_whitespace()
+            .find(|token| token.to_uppercase().ends_with("~1.MD"))
+            .map(str::to_owned)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn should_refuse_rename_onto_a_short_name_alias() {
+        let (dir, vault) = vault();
+        put(&dir, "Notebook long name.md", b"precious");
+        put(&dir, "other.md", b"other");
+        let Some(alias) = short_name_of(dir.path(), "Notebook long name.md") else {
+            eprintln!("volume has no 8.3 short names; skipping");
+            return;
+        };
+        let result = vault.rename(&p("other.md"), &p(&alias));
+        assert!(matches!(result, Err(CoreError::AlreadyExists(_))));
+        assert_eq!(vault.read(&p("Notebook long name.md")).unwrap(), "precious");
+        assert_eq!(vault.read(&p("other.md")).unwrap(), "other");
     }
 
     #[cfg(unix)]
