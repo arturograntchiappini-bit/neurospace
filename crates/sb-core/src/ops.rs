@@ -105,16 +105,30 @@ fn locate_existing(vault: &Vault, raw: &str) -> Result<NotePath> {
         .ok_or_else(|| CoreError::NotFound(raw.to_owned()))
 }
 
-/// Lists the notes, optionally only those inside `folder` (a folder, not a text prefix).
+/// The lowercase key prefix (`projects/`) that selects a folder; `None` selects the whole vault.
+fn folder_prefix(folder: Option<&str>) -> Result<Option<String>> {
+    let raw = folder.unwrap_or_default();
+    let trimmed = raw.strip_suffix('/').unwrap_or(raw);
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let probe =
+        NotePath::parse(&format!("{trimmed}/x.md")).map_err(|source| CoreError::InvalidPath {
+            path: raw.to_owned(),
+            source,
+        })?;
+    Ok(probe.key().as_str().strip_suffix("x.md").map(str::to_owned))
+}
+
+/// Lists the notes, optionally only those inside `folder` (a folder, not a text prefix;
+/// matched ignoring case, one trailing `/` allowed, empty means the whole vault).
 ///
 /// # Errors
-/// Whatever loading the vault returns.
+/// `InvalidPath` when `folder` could not be a folder of notes (`..`, a backslash, a hidden
+/// folder), or whatever loading the vault returns.
 pub fn list_notes(vault: &Vault, folder: Option<&str>) -> Result<NoteList> {
+    let prefix = folder_prefix(folder)?;
     let index = Index::build(vault)?;
-    let prefix = folder
-        .map(|folder| folder.trim_end_matches('/').to_lowercase())
-        .filter(|folder| !folder.is_empty())
-        .map(|folder| format!("{folder}/"));
     let notes = index
         .notes()
         .filter(|entry| {
@@ -328,6 +342,32 @@ mod tests {
             assert_eq!(paths(&list), ["Projects/Idea.md"]);
         }
         assert!(list_notes(&vault, Some("proj")).unwrap().notes.is_empty());
+    }
+
+    #[test]
+    fn should_reject_an_invalid_folder_filter() {
+        let (_tmp, vault) = seeded();
+        for folder in ["Projects\\Sub", "../x", "./projects", ".secondbrain"] {
+            let result = list_notes(&vault, Some(folder));
+            assert!(
+                matches!(&result, Err(CoreError::InvalidPath { path, .. }) if path == folder),
+                "{folder}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_accept_a_trailing_slash_in_the_folder_filter() {
+        let (_tmp, vault) = seeded();
+        for folder in ["Projects/", "projects/", ""] {
+            let list = list_notes(&vault, Some(folder)).unwrap();
+            let expected: &[&str] = if folder.is_empty() {
+                &["Home.md", "Projects/Idea.md"]
+            } else {
+                &["Projects/Idea.md"]
+            };
+            assert_eq!(paths(&list), expected, "{folder}");
+        }
     }
 
     #[test]
