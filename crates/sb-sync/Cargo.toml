@@ -1,0 +1,19 @@
+[package]
+name = "sb-sync"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sb-core = { path = "../sb-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
