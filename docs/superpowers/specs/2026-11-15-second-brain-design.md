@@ -154,7 +154,8 @@ Scanning walks the vault and returns the notes plus a list of ignored files with
 - When several files share one note key (possible on Linux only), the path that sorts first bytewise is the note; the others are ignored with reason `CaseCollision`.
 - A `.md` file that is not valid UTF-8 is ignored with reason `NotUtf8`.
 - A `.md` file that cannot be read (in use by another program, no permission) is ignored with reason `Unreadable`; the scan goes on.
-- A `.md` file larger than 4 MiB is ignored with reason `TooLarge`. Writing a note larger than that through the CLI, MCP or the GUI is refused.
+- A folder below the vault root that cannot be listed (no permission, for example `System Volume Information` or `lost+found`) is ignored with reason `Unreadable`, its path written with a trailing `/`; the scan goes on. For the sync engine every note key under such a folder is *blocked*, never absent. Only a vault root that cannot be listed fails the scan.
+- A `.md` file larger than 4 MiB is ignored with reason `TooLarge`. Writing a note larger than that through the CLI, MCP or the GUI is refused, and so is reading one: a file over the limit is not treated as a note by any operation.
 - Files without the `.md` extension are not notes and are not reported.
 
 Ignored files are never indexed and never synced, and the sync engine never modifies or replaces them. The GUI and `sb list` show how many were ignored and why.
@@ -162,11 +163,11 @@ Ignored files are never indexed and never synced, and the sync engine never modi
 ### 5.4 Reading and writing
 
 - Content is UTF-8 text. Bytes are preserved exactly: no line-ending normalisation, no trailing-newline fixing.
-- **Replacing a note is atomic:** write a hidden temporary file `.sb-<random>.tmp` in the destination directory, then rename it over the target.
+- **Replacing a note is atomic:** write a hidden temporary file `.sb-<random>.tmp` in the destination directory, then rename it over the target. The new file keeps the permissions of the one it replaces. A symbolic link standing where the note should be is never replaced: the write fails with `SymlinkInPath`.
 - **Creating a note never replaces anything.** If something already exists at the location, including a file the scan ignores or a file the file system considers the same name, creation fails with `AlreadyExists`. Parent directories are created as needed.
 - **A new note adopts the spelling of existing folders.** Each folder of its path that already exists under another letter case keeps the spelling on disk; only folders that do not exist yet, and the file name, are spelled as given. So `projects/new.md` next to an existing `Projects/` becomes `Projects/new.md`, and a vault never grows two folders that differ only in case.
 - **Confinement:** before any write, delete or rename, every existing ancestor directory between the vault root and the target must be a real directory. A symbolic link there fails the operation with `SymlinkInPath`; anything else that is not a directory, with `NotADirectory`.
-- **Rename** fails with `AlreadyExists` if the destination key is already taken by a different note. It does not rewrite links.
+- **Rename never replaces anything.** It fails with `AlreadyExists` if the destination key is already taken by a different note, and also when the file system finds anything at the destination under another name for it (a Windows 8.3 short name such as `NOTEBO~1.md`, a folder, a file the scan ignores). Only a change of letter case of the note itself is allowed onto its own location. It does not rewrite links.
 - **Append** adds text at the end; if the note is non-empty and does not end with a newline, one `\n` is inserted first. It creates the note if missing.
 
 ### 5.5 Trash
