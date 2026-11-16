@@ -164,6 +164,7 @@ Ignored files are never indexed and never synced, and the sync engine never modi
 - Content is UTF-8 text. Bytes are preserved exactly: no line-ending normalisation, no trailing-newline fixing.
 - **Replacing a note is atomic:** write a hidden temporary file `.sb-<random>.tmp` in the destination directory, then rename it over the target.
 - **Creating a note never replaces anything.** If something already exists at the location, including a file the scan ignores or a file the file system considers the same name, creation fails with `AlreadyExists`. Parent directories are created as needed.
+- **A new note adopts the spelling of existing folders.** Each folder of its path that already exists under another letter case keeps the spelling on disk; only folders that do not exist yet, and the file name, are spelled as given. So `projects/new.md` next to an existing `Projects/` becomes `Projects/new.md`, and a vault never grows two folders that differ only in case.
 - **Confinement:** before any write, delete or rename, every existing ancestor directory between the vault root and the target must be a real directory. A symbolic link there fails the operation with `SymlinkInPath`; anything else that is not a directory, with `NotADirectory`.
 - **Rename** fails with `AlreadyExists` if the destination key is already taken by a different note. It does not rewrite links.
 - **Append** adds text at the end; if the note is non-empty and does not end with a newline, one `\n` is inserted first. It creates the note if missing.
