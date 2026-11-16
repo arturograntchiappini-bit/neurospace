@@ -171,6 +171,32 @@ mod tests {
     }
 
     #[test]
+    fn should_cap_hits_at_the_maximum_limit() {
+        let notes = (0..=MAX_SEARCH_LIMIT)
+            .map(|i| (NotePath::parse(&format!("n{i}.md")).unwrap(), "rust".into()))
+            .collect();
+        let ix = Index::from_notes(notes);
+        assert_eq!(
+            ix.search("rust", MAX_SEARCH_LIMIT + 1).len(),
+            MAX_SEARCH_LIMIT
+        );
+        assert_eq!(ix.search("rust", usize::MAX).len(), MAX_SEARCH_LIMIT);
+    }
+
+    #[test]
+    fn should_score_the_title_for_each_term() {
+        // "Rust Notes": both terms are in the title, 2 x 10. Content "rust" occurs 7 times,
+        // counted up to 5; "notes" never occurs in the content. 10 + 5 + 10 + 0 = 25.
+        let hits = fixture().search("rust notes", 20);
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.path.as_str(), h.score))
+                .collect::<Vec<_>>(),
+            [("Rust Notes.md", 25)]
+        );
+    }
+
+    #[test]
     fn should_cap_snippets_at_three_lines_of_200_chars() {
         let body = format!("{}\nx\nñ rust\nrust 2\nrust 3\nrust 4", "rust ".repeat(100));
         let ix = Index::from_notes(vec![(NotePath::parse("a.md").unwrap(), body)]);

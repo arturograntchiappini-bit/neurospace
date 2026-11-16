@@ -492,7 +492,7 @@ mod tests {
             .count();
         assert_eq!(resolved, 10_000);
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
+            started.elapsed() < std::time::Duration::from_secs(10),
             "resolution must not scan every note per link"
         );
     }

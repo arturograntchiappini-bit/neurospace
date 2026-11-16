@@ -371,6 +371,18 @@ mod tests {
     }
 
     #[test]
+    fn should_rename_case_only_inside_a_folder() {
+        let (_tmp, vault) = seeded();
+        rename_note(&vault, "Projects/Idea.md", "projects/idea.md").unwrap();
+        let list = list_notes(&vault, None).unwrap();
+        assert_eq!(paths(&list), ["Home.md", "Projects/idea.md"]);
+        assert_eq!(
+            read_note(&vault, "Projects/idea.md").unwrap(),
+            "Idea body [[Home]]"
+        );
+    }
+
+    #[test]
     fn should_read_note_ignoring_case() {
         let (_tmp, vault) = seeded();
         assert_eq!(

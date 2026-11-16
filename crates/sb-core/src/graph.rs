@@ -245,4 +245,20 @@ mod tests {
         assert_eq!(ids(alone), ["archive/deep/Idea.md"]);
         assert!(ix.graph_around(&p("nope.md").key(), 1).is_none());
     }
+
+    #[test]
+    fn should_clamp_depth_to_the_documented_range() {
+        let chain = (0..=MAX_GRAPH_DEPTH + 2)
+            .map(|i| (p(&format!("n{i}.md")), format!("[[n{}]]", i + 1)))
+            .collect();
+        let ix = Index::from_notes(chain);
+        let ids = |depth: u8| {
+            let graph = ix.graph_around(&p("n0.md").key(), depth).unwrap();
+            graph.nodes.into_iter().map(|n| n.id).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(0), ids(1));
+        assert_eq!(ids(1), ["n0.md", "n1.md"]);
+        assert_eq!(ids(u8::MAX), ids(MAX_GRAPH_DEPTH));
+        assert_eq!(ids(MAX_GRAPH_DEPTH).len(), usize::from(MAX_GRAPH_DEPTH) + 1);
+    }
 }

@@ -1127,6 +1127,38 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn should_refuse_paths_through_a_junction() {
+        let (dir, vault) = vault();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.md"), "secret").unwrap();
+        let link = dir.path().join("link");
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(outside.path())
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        vault.write(&p("a.md"), "a").unwrap();
+        let through = p("link/secret.md");
+        let refused = |result: Result<()>| matches!(result, Err(CoreError::SymlinkInPath(_)));
+        assert!(refused(vault.read(&through).map(drop)));
+        assert!(refused(vault.write(&through, "x").map(drop)));
+        assert!(refused(vault.append(&through, "x").map(drop)));
+        assert!(refused(vault.delete(&through)));
+        assert!(refused(vault.rename(&through, &p("b.md"))));
+        assert!(refused(vault.rename(&p("a.md"), &p("link/x.md"))));
+        assert_eq!(entry_count(outside.path()), 1);
+        assert_eq!(
+            fs::read_to_string(outside.path().join("secret.md")).unwrap(),
+            "secret"
+        );
+        assert_eq!(vault.read(&p("a.md")).unwrap(), "a");
+        fs::remove_dir(&link).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn should_not_follow_symlinks() {

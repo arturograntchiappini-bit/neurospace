@@ -233,6 +233,23 @@ mod tests {
     }
 
     #[test]
+    fn should_accept_paths_at_the_length_limits() {
+        let ascii = format!("{}.md", "a".repeat(252));
+        let accented = format!("{}.md", "é".repeat(126));
+        let path = format!("{}x.md", "ab/".repeat(340));
+        assert_eq!((ascii.len(), accented.len(), path.len()), (255, 255, 1024));
+        for exact in [&ascii, &accented, &path] {
+            assert!(NotePath::parse(exact).is_ok(), "{exact}");
+        }
+        let over_ascii = format!("a{ascii}");
+        let over_accented = format!("{}a.md", "é".repeat(126));
+        let over_path = format!("{}xy.md", "ab/".repeat(340));
+        for over in [&over_ascii, &over_accented, &over_path] {
+            assert_eq!(NotePath::parse(over).unwrap_err(), PathError::TooLong);
+        }
+    }
+
+    #[test]
     fn should_expose_key_stem_and_folder() {
         let p = NotePath::parse("Projects/ÀB Idea.md").unwrap();
         assert_eq!(p.key().as_str(), "projects/àb idea.md");

@@ -224,3 +224,71 @@ fn should_handle_empty_stdin() {
     assert_eq!(sb(tmp.path(), &["write", "empty.md"], Some("")).0, 0);
     assert_eq!(fs::metadata(tmp.path().join("empty.md")).unwrap().len(), 0);
 }
+
+fn nested() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    for (path, text) in [
+        ("Home.md", "hello [[Idea]] #start"),
+        ("Projects/Idea.md", "hello idea #work"),
+        ("Projects/Sub/Deep.md", "deep [[Home]]"),
+    ] {
+        let file = tmp.path().join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, text).unwrap();
+    }
+    tmp
+}
+
+#[test]
+fn should_list_only_the_notes_of_the_folder_filter() {
+    let tmp = nested();
+    let vault = tmp.path();
+    let text = sb(vault, &["list", "--folder", "Projects"], None).1;
+    assert_eq!(text, "Projects/Idea.md\nProjects/Sub/Deep.md\n");
+    let json = sb_json(vault, &["--json", "list", "--folder", "Projects"]);
+    let paths: Vec<&str> = json["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|note| note["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["Projects/Idea.md", "Projects/Sub/Deep.md"]);
+    let (code, _, stderr) = sb(vault, &["list", "--folder", "../x"], None);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("invalid note path"), "{stderr}");
+}
+
+#[test]
+fn should_print_exactly_one_hit_when_search_limit_is_one() {
+    let tmp = nested();
+    let vault = tmp.path();
+    let all = sb_json(vault, &["--json", "search", "hello"]);
+    assert_eq!(all["hits"].as_array().unwrap().len(), 2);
+    let one = sb_json(vault, &["--json", "search", "hello", "--limit", "1"]);
+    assert_eq!(one["hits"].as_array().unwrap().len(), 1);
+    let text = sb(vault, &["search", "hello", "--limit", "1"], None).1;
+    assert_eq!(text.lines().filter(|l| !l.starts_with("  ")).count(), 1);
+}
+
+#[test]
+fn should_prefer_the_vault_flag_over_sb_vault() {
+    let flagged = seeded();
+    let from_env = nested();
+    let mut cmd = command();
+    cmd.env("SB_VAULT", from_env.path())
+        .arg("--vault")
+        .arg(flagged.path())
+        .arg("list");
+    assert_eq!(finish(cmd, None).1, "a.md\nb.md\n");
+}
+
+#[test]
+fn should_print_the_core_result_as_json_for_tags_and_graph() {
+    let tmp = nested();
+    let vault = tmp.path();
+    let core = sb_core::Vault::open(vault).unwrap();
+    let tags = serde_json::to_value(sb_core::ops::list_tags(&core).unwrap()).unwrap();
+    assert_eq!(sb_json(vault, &["--json", "tags"]), tags);
+    let graph = serde_json::to_value(sb_core::ops::get_graph(&core, None, None).unwrap()).unwrap();
+    assert_eq!(sb_json(vault, &["--json", "graph"]), graph);
+}

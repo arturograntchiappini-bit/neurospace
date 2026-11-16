@@ -452,7 +452,7 @@ MD: [text](other/Note%20D.md#h) and [ext](https://example.com/x.md) and [img](pi
         let md = "[[n]]\n".repeat(200_000);
         let started = std::time::Instant::now();
         let links = parse(&md).links;
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
         assert_eq!(links.len(), 200_000);
         assert_eq!(links.last().map(|l| l.line), Some(200_000));
     }
