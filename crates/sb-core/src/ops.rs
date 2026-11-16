@@ -90,6 +90,14 @@ fn parse_path(raw: &str) -> Result<NotePath> {
     })
 }
 
+/// Makes a `NotFound` from the vault carry the path as the caller wrote it.
+fn as_written(raw: &str) -> impl FnOnce(CoreError) -> CoreError + '_ {
+    move |error| match error {
+        CoreError::NotFound(_) => CoreError::NotFound(raw.to_owned()),
+        other => other,
+    }
+}
+
 /// Parses `raw` and returns the stored spelling of that note.
 fn locate_existing(vault: &Vault, raw: &str) -> Result<NotePath> {
     vault
@@ -130,7 +138,8 @@ pub fn list_notes(vault: &Vault, folder: Option<&str>) -> Result<NoteList> {
 /// # Errors
 /// `InvalidPath`, `NotFound`, or a read error from the vault.
 pub fn read_note(vault: &Vault, path: &str) -> Result<String> {
-    vault.read(&locate_existing(vault, path)?)
+    let stored = locate_existing(vault, path)?;
+    vault.read(&stored).map_err(as_written(path))
 }
 
 /// Replaces the note at `path`, or creates it when no spelling of it exists.
@@ -140,9 +149,10 @@ pub fn read_note(vault: &Vault, path: &str) -> Result<String> {
 pub fn write_note(vault: &Vault, path: &str, content: &str) -> Result<WriteOutcome> {
     let parsed = parse_path(path)?;
     let Some(stored) = vault.locate(&parsed)? else {
-        vault.create(&parsed, content)?;
+        let adopted = vault.adopt_folders(&parsed)?;
+        vault.create(&adopted, content)?;
         return Ok(WriteOutcome {
-            path: parsed,
+            path: adopted,
             created: true,
         });
     };
@@ -160,7 +170,10 @@ pub fn write_note(vault: &Vault, path: &str, content: &str) -> Result<WriteOutco
 pub fn append_to_note(vault: &Vault, path: &str, content: &str) -> Result<WriteOutcome> {
     let parsed = parse_path(path)?;
     // A missing note is created by `Vault::append`, which never replaces anything.
-    let target = vault.locate(&parsed)?.unwrap_or(parsed);
+    let target = match vault.locate(&parsed)? {
+        Some(stored) => stored,
+        None => vault.adopt_folders(&parsed)?,
+    };
     let created = vault.append(&target, content)?;
     Ok(WriteOutcome {
         path: target,
@@ -174,7 +187,7 @@ pub fn append_to_note(vault: &Vault, path: &str, content: &str) -> Result<WriteO
 /// `InvalidPath`, `NotFound`, or a file system error.
 pub fn delete_note(vault: &Vault, path: &str) -> Result<DeleteOutcome> {
     let stored = locate_existing(vault, path)?;
-    vault.delete(&stored)?;
+    vault.delete(&stored).map_err(as_written(path))?;
     Ok(DeleteOutcome {
         path: stored,
         trashed: true,
@@ -187,9 +200,12 @@ pub fn delete_note(vault: &Vault, path: &str) -> Result<DeleteOutcome> {
 /// `InvalidPath` for either path, `NotFound` for the source, `AlreadyExists` when the
 /// destination is held by a different note.
 pub fn rename_note(vault: &Vault, from: &str, to: &str) -> Result<RenameOutcome> {
-    let destination = parse_path(to)?;
+    let requested = parse_path(to)?;
     let source = locate_existing(vault, from)?;
-    vault.rename(&source, &destination)?;
+    let destination = vault.adopt_folders(&requested)?;
+    vault
+        .rename(&source, &destination)
+        .map_err(as_written(from))?;
     Ok(RenameOutcome {
         from: source,
         to: destination,
@@ -472,6 +488,45 @@ mod tests {
             }
         }
         assert_eq!(snapshot(tmp.path()), before);
+    }
+
+    fn dirs_named_projects(vault: &Vault) -> usize {
+        fs::read_dir(vault.root())
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.path().is_dir())
+            .filter(|entry| entry.file_name().to_string_lossy().to_lowercase() == "projects")
+            .count()
+    }
+
+    #[test]
+    fn should_adopt_existing_folder_spelling_when_creating() {
+        let (_tmp, vault) = seeded();
+        let written = write_note(&vault, "projects/new.md", "x").unwrap();
+        assert_eq!(written.path, p("Projects/new.md"));
+        assert!(written.created);
+        let appended = append_to_note(&vault, "PROJECTS/log.md", "x").unwrap();
+        assert_eq!(appended.path, p("Projects/log.md"));
+        assert!(appended.created);
+        let renamed = rename_note(&vault, "Home.md", "projects/Home2.md").unwrap();
+        assert_eq!(renamed.to, p("Projects/Home2.md"));
+        assert_eq!(dirs_named_projects(&vault), 1);
+    }
+
+    #[test]
+    fn should_report_not_found_when_a_directory_has_a_note_name() {
+        let (_tmp, vault) = seeded();
+        fs::create_dir(vault.root().join("x.md")).unwrap();
+        for result in [
+            read_note(&vault, "X.md").map(drop),
+            delete_note(&vault, "X.md").map(drop),
+        ] {
+            assert!(matches!(result, Err(CoreError::NotFound(p)) if p == "X.md"));
+        }
+        assert!(matches!(
+            rename_note(&vault, "X.md", "y.md"),
+            Err(CoreError::NotFound(p)) if p == "X.md"
+        ));
     }
 
     #[test]

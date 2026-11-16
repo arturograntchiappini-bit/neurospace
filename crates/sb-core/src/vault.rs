@@ -122,6 +122,40 @@ impl Vault {
             })
     }
 
+    /// Rewrites each folder of `path` to the spelling of an existing folder that matches it
+    /// ignoring case, so creating a note never makes a second folder differing only in case.
+    /// Folders that do not exist yet, and the file name, keep the given spelling.
+    ///
+    /// # Errors
+    /// `SymlinkInPath` when a symbolic link stands in for a folder, `NotADirectory` when a
+    /// file does.
+    pub fn adopt_folders(&self, path: &NotePath) -> Result<NotePath> {
+        let mut dir = self.root.clone();
+        let mut spelled: Vec<String> = Vec::new();
+        let mut folders = path.folder().split('/').filter(|folder| !folder.is_empty());
+        for folder in folders.by_ref() {
+            let Some((name, kind)) = find_entry(&dir, folder)? else {
+                spelled.push(folder.to_owned());
+                break;
+            };
+            if kind.is_symlink() {
+                return Err(CoreError::SymlinkInPath(path.to_string()));
+            }
+            dir.push(&name);
+            if !kind.is_dir() {
+                return Err(CoreError::NotADirectory(dir));
+            }
+            spelled.push(name);
+        }
+        spelled.extend(folders.map(str::to_owned));
+        spelled.extend(path.components().last().map(str::to_owned));
+        let joined = spelled.join("/");
+        NotePath::parse(&joined).map_err(|source| CoreError::InvalidPath {
+            path: joined,
+            source,
+        })
+    }
+
     /// Reads the note stored under exactly this spelling.
     ///
     /// # Errors
@@ -522,6 +556,27 @@ mod tests {
 
     fn note_names(loaded: &Loaded) -> Vec<&str> {
         loaded.notes.iter().map(|(path, _)| path.as_str()).collect()
+    }
+
+    #[test]
+    fn should_adopt_spelling_of_existing_folders() {
+        let (dir, vault) = vault();
+        fs::create_dir_all(dir.path().join("Projects/Sub")).unwrap();
+        let adopt = |raw: &str| vault.adopt_folders(&p(raw)).unwrap();
+        assert_eq!(adopt("projects/sub/new.md"), p("Projects/Sub/new.md"));
+        assert_eq!(adopt("projects/other/New.md"), p("Projects/other/New.md"));
+        assert_eq!(adopt("fresh/Deep/n.md"), p("fresh/Deep/n.md"));
+        assert_eq!(adopt("Root.md"), p("Root.md"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_refuse_to_adopt_through_a_symlinked_folder() {
+        let (dir, vault) = vault();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("Link")).unwrap();
+        let result = vault.adopt_folders(&p("link/n.md"));
+        assert!(matches!(result, Err(CoreError::SymlinkInPath(_))));
     }
 
     #[test]
