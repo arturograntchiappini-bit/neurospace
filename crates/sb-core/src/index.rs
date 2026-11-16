@@ -144,16 +144,35 @@ impl Index {
 
     /// The note that `target`, written in note `from`, points to (spec 6.2).
     pub fn resolve(&self, target: &str, from: &NotePath) -> Option<&NotePath> {
-        let target = normalize_target(target);
+        let key = self.resolve_key(target, from.key().as_str())?;
+        self.notes.get(key).map(|entry| &entry.path)
+    }
+
+    /// A leading `/` anchors the target at the vault root and a leading `./` at the source
+    /// folder; both match exactly or not at all. Other targets follow rules 1 and 2 of spec 6.2.
+    fn resolve_key(&self, target: &str, from_key: &str) -> Option<&NoteKey> {
+        let slashed = target.trim().replace('\\', "/");
+        if let Some(rest) = slashed.strip_prefix('/') {
+            return self.find_exact(&strip_extension_lowercase(rest));
+        }
+        if let Some(rest) = slashed.strip_prefix("./") {
+            let relative = join_relative(folder_of(from_key), &strip_extension_lowercase(rest))?;
+            return self.find_exact(&relative);
+        }
+        let target = normalize_target(&slashed);
         let stem = target.rsplit('/').next().unwrap_or_default();
         let candidates = self.by_stem.get(stem)?;
-        let from_key = from.key();
-        let chosen = if target.contains('/') {
-            pick_by_path(&target, from_key.as_str(), candidates)
+        if target.contains('/') {
+            pick_by_path(&target, from_key, candidates)
         } else {
-            best_candidate(candidates.iter(), from_key.as_str())
-        };
-        chosen.and_then(|key| self.notes.get(key)).map(|e| &e.path)
+            best_candidate(candidates.iter(), from_key)
+        }
+    }
+
+    /// The note whose key is `path` plus `.md`.
+    fn find_exact(&self, path: &str) -> Option<&NoteKey> {
+        let stem = path.rsplit('/').next().unwrap_or_default();
+        find_key(self.by_stem.get(stem)?, &format!("{path}{MARKDOWN_SUFFIX}"))
     }
 
     /// Links of a note in document order, each with its resolution; empty if the note is unknown.
@@ -223,12 +242,20 @@ pub(crate) fn normalize_target(target: &str) -> String {
     let slashed = target.trim().replace('\\', "/");
     let without_dot = slashed.strip_prefix("./").unwrap_or(&slashed);
     let without_dot = without_dot.strip_prefix('/').unwrap_or(without_dot);
-    let split = without_dot.len().saturating_sub(MARKDOWN_SUFFIX.len());
-    let without_extension = match without_dot.get(split..) {
-        Some(tail) if tail.eq_ignore_ascii_case(MARKDOWN_SUFFIX) => &without_dot[..split],
-        _ => without_dot,
+    strip_extension_lowercase(without_dot)
+}
+
+fn strip_extension_lowercase(text: &str) -> String {
+    let split = text.len().saturating_sub(MARKDOWN_SUFFIX.len());
+    let without_extension = match text.get(split..) {
+        Some(tail) if tail.eq_ignore_ascii_case(MARKDOWN_SUFFIX) => &text[..split],
+        _ => text,
     };
     without_extension.to_lowercase()
+}
+
+fn find_key<'a>(candidates: &'a BTreeSet<NoteKey>, wanted: &str) -> Option<&'a NoteKey> {
+    candidates.iter().find(|key| key.as_str() == wanted)
 }
 
 fn stem_of_key(key: &NoteKey) -> &str {
@@ -246,7 +273,7 @@ fn pick_by_path<'a>(
     from_key: &str,
     candidates: &'a BTreeSet<NoteKey>,
 ) -> Option<&'a NoteKey> {
-    let find = |wanted: &str| candidates.iter().find(|key| key.as_str() == wanted);
+    let find = |wanted: &str| find_key(candidates, wanted);
     let exact = format!("{target}{MARKDOWN_SUFFIX}");
     find(&exact)
         .or_else(|| {
@@ -509,6 +536,48 @@ mod tests {
         );
         assert_eq!(normalize_target("/A/B.md"), "a/b");
         assert_eq!(normalize_target("./x"), normalize_target("/x"));
+    }
+
+    #[test]
+    fn should_anchor_slash_and_dot_slash_targets_without_fallback() {
+        let ix = index_of(&[
+            ("Home.md", ""),
+            ("projects/Home.md", ""),
+            ("projects/Plan.md", ""),
+            ("archive/x.md", ""),
+        ]);
+        let r = |t: &str, from: &str| resolved(&ix, t, from);
+        assert_eq!(r("/Home", "projects/Plan.md").as_deref(), Some("Home.md"));
+        assert_eq!(
+            r("Home", "projects/Plan.md").as_deref(),
+            Some("projects/Home.md")
+        );
+        assert_eq!(
+            r("./Home", "projects/Plan.md").as_deref(),
+            Some("projects/Home.md")
+        );
+        assert_eq!(r("./Home", "archive/x.md"), None);
+        assert_eq!(r("/Plan", "Home.md"), None);
+        assert_eq!(r("./Plan", "archive/x.md"), None);
+    }
+
+    #[test]
+    fn should_resolve_anchored_paths_exactly() {
+        let ix = index_of(&[("a/x/n.md", ""), ("b/x/n.md", ""), ("b/s.md", "")]);
+        let r = |t: &str| resolved(&ix, t, "b/s.md");
+        assert_eq!(r("/x/n"), None);
+        assert_eq!(r("/a/x/n").as_deref(), Some("a/x/n.md"));
+        assert_eq!(r("./x/n").as_deref(), Some("b/x/n.md"));
+        assert_eq!(r("./../a/x/n").as_deref(), Some("a/x/n.md"));
+        assert_eq!(r("./../../x/n"), None);
+    }
+
+    #[test]
+    fn should_resolve_nothing_for_degenerate_anchors() {
+        let ix = index_of(&[("x.md", ""), ("s.md", "")]);
+        for target in ["/", "./", "//x", ".//x"] {
+            assert_eq!(resolved(&ix, target, "s.md"), None, "target: {target:?}");
+        }
     }
 
     #[test]
