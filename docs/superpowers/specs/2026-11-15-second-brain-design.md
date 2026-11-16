@@ -320,12 +320,15 @@ All sync state lives **outside** the vault, so copying or sharing the vault fold
 | `config.json` | `{ "mode": "internet" \| "lan", "bind_port": <u16 or null>, "mdns": <bool> }`, defaults `internet`, `null`, `true` |
 | `doc.snap`, `doc.log` | the sync document: snapshot plus append-only update log |
 | `base.json` | per note key, the content hash at the last point disk and document agreed |
+| `base.version` | the document version the base was last saved against, hex. Written after `base.json`. |
 | `engine.lock` | exclusive lock held by the running engine |
 | `status.json` | written by the engine every tick: process id, device id, addresses, peers and their connection state, note count, blocked notes, last error, timestamp |
 | `fresh-join` | marker: this replica joined a group and has not reconciled since (section 8.6) |
 | `command.pending` | a command for the running engine: `{"join": "<ticket>"}` or `{"leave": true}` |
 
 Moving the vault folder changes the hash, so the replica looks unconfigured and must join again. That is safe (section 8.6) and visible.
+
+**The base never outlives the document it was saved against.** A base entry says «disk and document agreed on this content»; with the note missing from the document, the engine reads that as «the note was deleted elsewhere» and moves the file to the trash. If the document on disk ever loses history while the base survives (a damaged or deleted `doc.log`, a partly restored state directory), that reading would trash every note. So when the engine opens its state it checks that the loaded document includes the version in `base.version`; if the base is not empty and the file is missing, unreadable or names history the document does not have, the base is cleared. With an empty base nothing can be trashed: files become notes again, and a file that differs from a note becomes a conflict copy.
 
 The files `secret`, `peers.json`, `config.json` and `command.pending` are the engine's **control plane**: the engine re-reads them on every tick. The CLI configures sync by editing them, whether or not an engine is running.
 
