@@ -533,7 +533,7 @@ Ogni prompt di dispatch a un implementer contiene, oltre al template della skill
 
 ## Verità assoluta
 
-Ultimo aggiornamento: 2026-11-15
+Ultimo aggiornamento: 2026-11-16
 
 **Legenda stati.** **[Confermato]** = detto o approvato dall'utente. **[Proposto — applicato su delega]** = deciso dall'orchestratore in base alla delega totale del 2026-11-15, non approvato voce per voce dall'utente: vale finché l'utente non lo cambia. **[Aperto]** = non deciso. Ciò che non è verificato è scritto come «non verificato».
 
@@ -545,9 +545,9 @@ Ultimo aggiornamento: 2026-11-15
 ### V.2 Fonti
 
 - Richiesta dell'utente (V.1).
-- Spec di design: `docs/superpowers/specs/2026-11-15-second-brain-design.md` — **[Aperto]** in scrittura.
-- Piani di implementazione: `docs/superpowers/plans/` — **[Aperto]** uno per milestone.
-- Spike di verifica API (usa-e-getta, fuori dal repo): iroh 1.4, eframe 0.37 + egui_commonmark 0.26, rmcp 3.10, loro 1.17 + notify — **[Aperto]** in corso; gli esiti verificati confluiscono nella spec.
+- **[Proposto — applicato su delega]** Spec di design: `docs/superpowers/specs/2026-11-15-second-brain-design.md`. Letta da un revisore indipendente (builder check) il 2026-11-15; le sue 7 domande sono state risolte come rulings (V.8) e la spec aggiornata.
+- **[Proposto — applicato su delega]** Piano M1: `docs/superpowers/plans/2026-11-15-m1-core-cli-mcp.md`. I piani di M2, M3 e M4 si scrivono all'inizio di ciascuna milestone — **[Aperto]**.
+- Spike di verifica API del 2026-11-15 (codice usa-e-getta, fuori dal repo): iroh 1.4, eframe 0.37 + egui_commonmark 0.26, rmcp 3.10, loro 1.17 + notify 8.2. Conclusi; i fatti verificati sono nell'appendice A della spec, con accanto ciò che non è stato verificato.
 
 ### V.3 Vincoli non negoziabili
 
@@ -561,32 +561,72 @@ Da copiare in ogni dispatch a un implementer (§11.4).
 6. **[Proposto — applicato su delega]** I file `.md` sul disco sono la fonte di verità. Indice, grafo e stato di sync sono derivati e ricostruibili.
 7. **[Proposto — applicato su delega]** Un solo processo per vault esegue il motore di sync (file di lock). CLI e MCP scrivono solo file, mai lo stato di sync.
 8. **[Proposto — applicato su delega]** Ogni percorso che arriva da CLI, MCP o da un peer è validato e confinato nella radice del vault prima di toccare il disco.
-9. **[Proposto — applicato su delega]** Nessuna perdita silenziosa di dati: ciò che il sync rimuove o sovrascrive finisce nel cestino del vault o in una copia di conflitto.
+9. **[Proposto — applicato su delega]** Nessuna perdita silenziosa di dati: ciò che il sync rimuove finisce nel cestino del vault; una divergenza diventa una copia di conflitto; un file illeggibile è «bloccato», mai «assente»; creare una nota non sostituisce mai un file esistente.
 10. **[Proposto — applicato su delega]** Lo stdout del server MCP porta solo messaggi di protocollo; i log vanno su stderr.
-11. **[Proposto — applicato su delega]** Standard di codice del CLAUDE.md §1, §5, §9: `cargo fmt`, `cargo clippy -D warnings`, doc-comment sulle API pubbliche, niente `unsafe`, niente `unwrap()`/`expect()` fuori dai test, Conventional Commits.
+11. **[Proposto — applicato su delega]** Standard di codice del CLAUDE.md §1, §5, §9: `cargo fmt`, `cargo clippy -D warnings`, doc-comment sulle API pubbliche, niente `unsafe`, niente `unwrap()`/`expect()` fuori dai test, funzioni entro 30 righe e 4 parametri, Conventional Commits.
 
 ### V.4 Nucleo di dominio
 
 Per §11.5: se un task tocca questi moduli, l'orchestratore legge anche il diff.
 
-- **[Proposto — applicato su delega]** Validazione dei percorsi delle note; risoluzione dei link e costruzione del grafo; riconciliazione disco ↔ stato di sync; protocollo e autenticazione tra peer. I percorsi esatti dei moduli sono fissati nella spec.
+- **[Proposto — applicato su delega]** In `crates/sb-core/src/`: `path.rs` (validazione dei percorsi), `vault.rs` (operazioni sul disco, confinamento, cestino), `index.rs` (risoluzione dei link), `graph.rs`, `ops.rs` (confine con CLI, MCP e GUI).
+- **[Proposto — applicato su delega]** In `crates/sb-sync/src/` (da M2): documento di sync e regola «viva/lapide», risoluzione delle rivendicazioni di percorso, riconciliazione disco ↔ documento, protocollo e autenticazione tra peer. I nomi esatti dei file si fissano nel piano M2.
 
 ### V.5 Decisioni
 
-- **[Proposto — applicato su delega]** Nome prodotto: «Second Brain». Due binari: `secondbrain` (GUI) e `sb` (console: CLI, server MCP stdio, sync headless). Un solo eseguibile non può essere pulitamente GUI e console su Windows.
-- **[Aperto]** Stack (toolkit GUI, trasporto P2P, formato di sync, SDK MCP): si fissa quando tornano gli spike.
+Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nella spec.
+
+- Nome prodotto «Second Brain». Due binari: `secondbrain` (GUI) e `sb` (console: CLI, server MCP stdio, sync headless).
+- Workspace Cargo con quattro crate: `sb-core`, `sb-sync`, `sb-cli`, `sb-app`.
+- Stack: GUI `eframe`/`egui` 0.37 con renderer OpenGL; anteprima `egui_commonmark` 0.26; parser `pulldown-cmark` 0.13; documento di sync `loro` 1.17 (CRDT, fusione per righe); trasporto `iroh` 1.4 con scoperta in LAN via `iroh-mdns-address-lookup`; osservazione cartella `notify` 8.2; server MCP `rmcp` 3.10; CLI `clap` 4.
+- Identità delle note nel sync: id casuale per nota, il percorso è una proprietà. Due note sullo stesso percorso si separano con una regola deterministica (duplicato eliminato oppure copia di conflitto).
+- Fiducia: gruppo di sync = conoscenza di un segreto a 32 byte consegnato in un ticket; prova reciproca a ogni connessione.
+- Stato di sync fuori dal vault, in una cartella dati per utente; nel vault resta solo `.secondbrain/trash/`.
+- Modalità di rete: `internet` (predefinita: DNS e relay pubblici del progetto iroh, che vedono id e indirizzi ma non il contenuto) e `lan` (nessun contatto esterno).
+- Milestone: M1 core + CLI + MCP; M2 sync headless; M3 GUI; M4 Linux, prova Windows↔Linux, documentazione.
 
 ### V.6 Esclusioni dal grafo graphify
 
-- `target/`, `.git/`, `.superpowers/`, `.worktrees/`, `graphify-out/`, `dist/`, vault di prova e fixture binarie.
+- `target/`, `.git/`, `.superpowers/`, `.claude/`, `.worktrees/`, `graphify-out/`, `dist/`, vault di prova e fixture binarie.
 
 ### V.7 Stato e avanzamento
 
-- 2026-11-15 — Repo git inizializzato (branch `main`, identità locale al repo). Toolchain Rust 1.99 MSVC verificata con un build di prova. Docker Desktop avviato: engine Linux disponibile per build, test e prova di sync Windows↔Linux.
-- 2026-11-15 — Lanciati 4 spike di verifica API (Sonnet). Spec e piani non ancora scritti. Nessun codice di prodotto.
+- 2026-11-15 — Repo git inizializzato (branch `main`, identità locale al repo). Toolchain Rust 1.99 MSVC verificata. Docker Desktop avviato: engine Linux disponibile.
+- 2026-11-15 — Conclusi i 4 spike API. Scritta la spec, passata al builder check, aggiornata con le rulings. Scritto il piano M1.
+- 2026-11-15 — **M1 in corso** nel worktree `.claude/worktrees/m1-core-cli-mcp`, branch `feat/m1-core-cli-mcp`. Avanzamento per task nel ledger `.superpowers/sdd/2026-11-15-m1-core-cli-mcp/progress.md` del worktree.
+- 2026-11-16 — M1: task 1–7 completati e revisionati (percorsi, vault, Markdown, indice, grafo e ricerca, operazioni, CLI `sb`). Task 8 (server MCP) in lavorazione. Suite: 97 test su Windows al Task 7; 90 passati nel container Linux al Task 6 (`rust:1-bullseye`). Restano per chiudere M1: review del Task 8, ondata finale di piccole correzioni annotate nel ledger, validazione dell'orchestratore, revisione finale `opus`, `graphify --update`, merge in `main`.
+- 2026-11-16 — Bozza del piano M2 scritta: `docs/superpowers/plans/2026-11-16-m2-sync.md` (11 task). **[Aperto]**: va riletta contro il codice reale di M1 prima di eseguirla (in particolare `Vault::adopt_folders`, `IgnoreReason::Unreadable`, la firma di `Replica::open`).
+- 2026-11-16 — **M1 completata** (core, CLI `sb`, server MCP `sb mcp`), branch `feat/m1-core-cli-mcp`, testa `c272876` più i commit di documentazione; unita a `main` in locale, nessun push.
+  - Task 8 (server MCP, 10 strumenti) revisionato. Revisione finale dell'intero branch su `opus` (sola lettura): «pronto al merge con correzioni» — 1 critico, 2 importanti, 10 minori.
+  - Difetti corretti nell'unica ondata finale (9 commit, ri-revisione pulita): `rename` poteva sovrascrivere una nota esistente indicata con il nome corto 8.3 di Windows (riprodotto, ora rifiutato); una sottocartella non elencabile faceva fallire l'intera scansione (ora è «ignorata» e la scansione prosegue); chiamate MCP parallele potevano perdere un `append` (ora le operazioni del server sono serializzate); backslash nel titolo di `[[Nota#Titolo\|Alias]]`; fine riga CRLF in `vault.rs` (aggiunto `.gitattributes`); `read` rifiuta i file oltre 4 MiB; `write` non sostituisce un link simbolico e conserva i permessi; filtro `--folder` validato; descrizioni e annotazioni degli strumenti MCP.
+  - Validazione dell'orchestratore: su Windows `cargo fmt --check`, `cargo clippy -D warnings` e 125 test puliti; nel container Linux `rust:1-bullseye` 129 test passati, e i test su permessi e link simbolici passano anche da utente non privilegiato; ogni comando della CLI provato a mano con e senza `--json`; rifiuto di `..`, lettera di unità, `.secondbrain/`, backslash, nomi riservati; `sb mcp` provato via pipe con `initialize`, `tools/list` e una chiamata per strumento: lo stdout contiene solo messaggi di protocollo.
+  - Non verificato: il server MCP con i client reali Claude Code e Claude Desktop (provato solo con richieste JSON-RPC scritte a mano e con il client di test di `rmcp`); il comportamento dei nomi riservati su Windows 10 (provato solo Windows 11).
+  - Rinviato, annotato nel ledger di M1: a M2 la regola più ampia sui nomi riservati (`CON .md`, `COM0`, `CONIN$`), la creazione di file a prova di crash, il rifiuto uniforme di sovrascrivere una nota in sola lettura; a M3 `ops::create_note`, la regola per gli allegati (`![[image.png]]` oggi è un nodo «mancante» nel grafo), il costo dei backlink a ogni cambio di nota.
+- Rischio aperto, non verificato: sulla macchina di sviluppo il preset di rete predefinito di iroh non è mai risultato «online» (le sonde HTTPS verso i relay falliscono con «network unreachable»). Causa non accertata. Da riprovare in M2; se resta così, la modalità `internet` va dichiarata «non verificata su questa macchina».
+- Non verificabile in questo progetto: uso interattivo della GUI da parte di una persona. La GUI si verifica con test headless e con l'avvio del binario.
 
 ### V.8 Rulings dell'orchestratore
 
-- 2026-11-15 — **Sessione principale non Opus.** La sessione gira su Fable 5.2. §11.2 dice di non pianificare e avvisare l'utente. Avviso dato in chat; si procede comunque perché l'utente ha ordinato autonomia totale senza soste e Fable è il tier sopra Opus. Restano: esecutori Sonnet/Haiku, `model` esplicito in ogni dispatch, revisione finale di milestone a `opus`, nessuna riga di codice, test o config scritta dall'orchestratore. Costo se sbagliato: l'utente può far rifare la pianificazione su Opus; spec e piani sono documenti rivedibili.
-- 2026-11-15 — **Approvazione di spec e piani.** §11.4 vuole l'approvazione dell'utente prima di implementare. L'utente ha delegato ogni decisione: spec e piani si considerano approvati su delega dopo il controllo di un lettore indipendente (builder check) e restano marcati «applicato su delega». Costo se sbagliato: rilavorazione delle parti che l'utente non condivide.
-- 2026-11-15 — **Merge locali.** A fine milestone il branch viene unito a `main` in locale senza chiedere. Nessun remote, nessun push. Costo se sbagliato: un `git revert` del merge.
+Formato: decisione — perché — costo se sbagliata.
+
+- 2026-11-15 — **Sessione principale non Opus.** La sessione gira su Fable 5.2. §11.2 dice di non pianificare e avvisare l'utente. Avviso dato in chat; si procede perché l'utente ha ordinato autonomia totale senza soste e Fable è il tier sopra Opus. Restano: esecutori Sonnet/Haiku, `model` esplicito in ogni dispatch, revisione finale di milestone a `opus`, nessuna riga di codice, test o config scritta dall'orchestratore. Costo: l'utente può far rifare la pianificazione su Opus; spec e piani sono documenti rivedibili.
+- 2026-11-15 — **Approvazione di spec e piani.** §11.4 vuole l'approvazione dell'utente prima di implementare. L'utente ha delegato ogni decisione: spec e piani valgono come approvati su delega dopo il builder check. Costo: rilavorazione delle parti che l'utente non condivide.
+- 2026-11-15 — **Merge locali.** A fine milestone il branch viene unito a `main` in locale senza chiedere. Nessun remote, nessun push. Costo: un `git revert` del merge.
+- 2026-11-15 — **`.git/info/exclude`.** L'orchestratore vi ha aggiunto `.claude/worktrees/` e `.superpowers/` per poter creare il worktree prima che esista un `.gitignore` (che è config e lo scrive un implementer). È metadato locale di git, non un file del progetto. Costo: nessuno; si toglie con un editor.
+- 2026-11-15 — **Builder check, domanda 1 (file ignorati nella riconciliazione).** Terzo stato «bloccato»: un file illeggibile o ignorato non è mai trattato come assente e non viene mai sovrascritto; la creazione di un file non sostituisce mai nulla. — Senza, un file diventato non UTF-8 avrebbe propagato una cancellazione. — Costo: una nota bloccata resta non sincronizzata finché l'utente non sistema il file; è segnalata nello stato.
+- 2026-11-15 — **Domanda 2 (testo raddoppiato, peer non pronto).** Il testo raddoppiato non è accettabile. Si passa a id casuali per nota con risoluzione deterministica delle rivendicazioni di percorso; sparisce lo stato «in attesa del primo sync» come condizione di correttezza, resta solo come attesa di 20 secondi che evita di memorizzare due volte le note. — Elimina raddoppi e stalli. — Costo: più logica nel documento di sync; due creazioni concorrenti con contenuto diverso diventano due note (una «conflict») invece di una nota fusa.
+- 2026-11-15 — **Domanda 3 (lapidi e rename).** Le lapidi sono un insieme di coppie (id, hash) mai rimosse; una nota morta non rinasce, un file che riappare è una nota nuova; il rename è un'operazione vera (cambio del percorso della nota) riconosciuta dal confronto degli hash. — Chiude i casi di resurrezione e di copie doppie. — Costo: un rename fatto insieme a una modifica nello stesso giro vale come cancella + crea.
+- 2026-11-15 — **Domanda 4 (dimensioni e crescita).** Obiettivo dichiarato: fino a circa 10 000 note e 100 MB di testo; nota massima 4 MiB (oltre è ignorata); frame fino a 1 GiB dopo l'autenticazione e 64 byte prima; nessuna compattazione della storia. — Limiti espliciti invece di un blocco silenzioso. — Costo: vault più grandi non sono supportati in v1; la storia cresce sempre e il testo cancellato vi resta.
+- 2026-11-15 — **Domanda 5 (sovrascritture concorrenti).** Si accetta la finestra residua di poche system call tra il ricontrollo e la rinomina; le copie di conflitto nascono dalla stessa regola delle rivendicazioni, quindi rifarle dopo un crash non crea doppioni. — Non esiste un compare-and-swap atomico sui file. — Costo: una scrittura esterna che cade esattamente in quella finestra può andare persa.
+- 2026-11-15 — **Domanda 6 (uscire dal gruppo).** Aggiunto `sb sync leave` e «Disattiva sync» nella GUI; rientrare in un gruppo non cancella mai note locali, quindi una nota cancellata dal gruppo durante l'assenza ritorna come nota nuova. — Nessuno stato senza via d'uscita. — Costo: possibili note «resuscitate» dopo un rientro.
+- 2026-11-15/16 — **Rulings nate durante M1** (dettaglio e costo nel ledger di M1; la spec è già allineata): nome nel cestino mai oltre 255 byte, accorciato da sinistra; un file illeggibile è «ignorato» (`Unreadable`) e non fa fallire la scansione; il nome nel cestino si prenota in modo atomico; una nota non è mai tra i propri backlink; un link che inizia con `/` vale solo come percorso esatto dalla radice e uno con `./` solo relativo alla cartella della nota; una nota nuova adotta la grafia delle cartelle esistenti; `sb --json read` stampa la nota come stringa JSON mentre lo strumento MCP `read_note` restituisce testo grezzo; l'helper di test a 5 parametri resta con un `allow` locale; un giro di correzioni può partire anche a review pulita quando l'orchestratore, leggendo il nucleo di dominio, trova una lacuna rispetto alla spec.
+- 2026-11-16 — **Rulings della chiusura di M1** (dettaglio nel ledger di M1 e in `final-review.md`; la spec 5.3 e 5.4 è allineata):
+  - `rename` non sostituisce mai nulla: rifiuta qualunque destinazione che il file system trovi, anche sotto un altro nome (alias 8.3); è ammesso solo il cambio di maiuscole della nota stessa. Resta una finestra di poche system call tra il controllo e lo spostamento, accettata come per la sostituzione (spec 8.5). Costo: una scrittura esterna che cade in quella finestra può andare persa.
+  - Una sottocartella che non si può elencare è «ignorata» (percorso con `/` finale) e per il sync ogni nota sotto di essa sarà «bloccata», mai «assente». Solo la radice del vault non elencabile fa fallire la scansione. Costo: le note in quella cartella non compaiono e non si sincronizzano finché i permessi non cambiano; è segnalato.
+  - Il server MCP esegue un'operazione alla volta. Tra processi diversi (CLI, MCP, poi GUI e motore) resta la finestra già accettata. Costo: una ricerca lenta fa attendere le altre chiamate dello stesso server.
+  - `write_note` su un file che la scansione ignora (non UTF-8, troppo grande) lo sostituisce, perché «scrivi» vuol dire sostituire; leggere un file oltre 4 MiB è rifiutato. Costo: un agente può sovrascrivere un `.md` non testuale su cui gli è stato chiesto di scrivere.
+  - Il giro di correzioni del Task 8 è confluito nell'ondata finale invece di girare da solo. Costo: una ri-revisione unica su un diff più grande.
+  - graphify gira sulla radice del repository dopo il merge locale, non nel worktree prima: il grafo vive nella radice e non esiste ancora. Costo: due passi di §11.4 invertiti.
+  - Le voci che la revisione finale ha giudicato «da fare dopo» o «accettate» sono state adottate come scritte; l'elenco è nel ledger.
+- 2026-11-16 — **Parallelismo.** Il revisore (sola lettura, lavora su un file di diff) gira in parallelo all'implementer del task successivo; due implementer non scrivono mai insieme: un giro di correzioni aspetta il commit dell'implementer in corso. Costo: nessuno osservato; se due scritture si sovrapponessero, un conflitto di indice git da ripetere.
+- 2026-11-15 — **Domanda 7 (chi fa le prove a mano, connettività in M4).** Le prove «a mano» le esegue l'orchestratore con comandi; la GUI non è verificata da una persona e lo si dichiara; la prova Windows↔Linux usa un ticket con indirizzi e porta fissa; `internet` resta la modalità predefinita e il suo stato reale si registra in M2. — Docker è disponibile; mDNS non attraversa la rete di Docker. — Costo: se `internet` non funziona sulle reti dell'utente, il sync tra reti diverse non va finché non si indaga.
