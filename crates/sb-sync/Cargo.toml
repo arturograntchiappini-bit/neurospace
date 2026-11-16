@@ -15,7 +15,9 @@ thiserror.workspace = true
 blake3.workspace = true
 getrandom.workspace = true
 loro.workspace = true
-tokio = { version = "1", features = ["io-util", "sync", "macros", "rt", "time"] }
+tokio = { version = "1", features = ["io-util", "sync", "macros", "rt", "rt-multi-thread", "time"] }
+iroh = "1.4"
+iroh-mdns-address-lookup = "0.6"
 
 [dev-dependencies]
 tempfile.workspace = true

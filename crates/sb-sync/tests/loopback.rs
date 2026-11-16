@@ -1,0 +1,208 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
+
+use std::fs;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use iroh::endpoint::presets;
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use sb_sync::{ALPN, EngineHandle, PeerEntry, StateDir, Ticket, start_engine, to_hex};
+use tempfile::TempDir;
+
+const CONNECT_LIMIT: Duration = Duration::from_secs(30);
+const FILE_LIMIT: Duration = Duration::from_secs(10);
+const POLL: Duration = Duration::from_millis(50);
+
+struct Rig {
+    vault: TempDir,
+    state: TempDir,
+    engine: EngineHandle,
+}
+
+impl Rig {
+    fn start() -> Rig {
+        Self::start_in(tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap())
+    }
+
+    fn start_in(vault: TempDir, state: TempDir) -> Rig {
+        let config = state.path().join("config.json");
+        fs::write(config, r#"{"mode":"lan","mdns":false}"#).unwrap();
+        let engine = start_engine(vault.path(), StateDir::at(state.path()).unwrap(), None).unwrap();
+        Rig {
+            vault,
+            state,
+            engine,
+        }
+    }
+
+    /// Shuts the engine down and hands back the vault and state directories.
+    fn stop(self) -> (TempDir, TempDir) {
+        self.engine.shutdown().unwrap();
+        (self.vault, self.state)
+    }
+
+    fn write(&self, name: &str, content: &str) {
+        fs::write(self.vault.path().join(name), content).unwrap();
+    }
+
+    fn connected_to(&self, device_id: &str) -> bool {
+        let status = self.engine.status().unwrap();
+        status
+            .peers
+            .iter()
+            .any(|peer| peer.id == device_id && peer.connected)
+    }
+
+    fn any_peer_connected(&self) -> bool {
+        let status = self.engine.status().unwrap();
+        status.peers.iter().any(|peer| peer.connected)
+    }
+
+    /// A ticket whose only address is the loopback address on the engine's IPv4 port.
+    fn loopback_ticket(&self) -> Ticket {
+        let mut ticket: Ticket = self.engine.invite().unwrap().parse().unwrap();
+        assert!(!ticket.addrs.is_empty(), "the ticket has no address");
+        let port = ticket
+            .addrs
+            .iter()
+            .find(|addr| addr.is_ipv4())
+            .unwrap_or(&ticket.addrs[0])
+            .port();
+        ticket.addrs = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)];
+        ticket
+    }
+}
+
+fn wait_until(limit: Duration, what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + limit;
+    while !condition() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(POLL);
+    }
+}
+
+fn has_content(vault: &Path, name: &str, content: &str) -> bool {
+    fs::read_to_string(vault.join(name)).is_ok_and(|found| found == content)
+}
+
+fn join_pair() -> (Rig, Rig, Ticket) {
+    let a = Rig::start();
+    let ticket = a.loopback_ticket();
+    let b = Rig::start();
+    b.engine.join(&ticket.to_string()).unwrap();
+    let a_id = to_hex(&ticket.device_id);
+    wait_until(CONNECT_LIMIT, "B to show A connected", || {
+        b.connected_to(&a_id)
+    });
+    (a, b, ticket)
+}
+
+#[test]
+fn should_sync_two_engines_over_loopback() {
+    let (a, b, _) = join_pair();
+    a.write("from-a.md", "written in a\n");
+    wait_until(FILE_LIMIT, "from-a.md in B", || {
+        has_content(b.vault.path(), "from-a.md", "written in a\n")
+    });
+    b.write("from-b.md", "written in b\n");
+    wait_until(FILE_LIMIT, "from-b.md in A", || {
+        has_content(a.vault.path(), "from-b.md", "written in b\n")
+    });
+    b.write("from-a.md", "edited in b\n");
+    wait_until(FILE_LIMIT, "the edit in A", || {
+        has_content(a.vault.path(), "from-a.md", "edited in b\n")
+    });
+    for (_, state_dir) in [a.stop(), b.stop()] {
+        let state = StateDir::at(state_dir.path()).unwrap();
+        assert!(state.lock().is_ok(), "the lock is still held");
+    }
+}
+
+#[test]
+fn should_refuse_a_peer_with_another_secret() {
+    let a = Rig::start();
+    let ticket = a.loopback_ticket();
+    let c = Rig::start();
+    let entry = PeerEntry {
+        id: to_hex(&ticket.device_id),
+        addrs: ticket.addrs.iter().map(ToString::to_string).collect(),
+    };
+    StateDir::at(c.state.path())
+        .unwrap()
+        .add_peer(entry)
+        .unwrap();
+    a.write("only-a.md", "a\n");
+    c.write("only-c.md", "c\n");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        assert!(!a.any_peer_connected(), "A shows a peer connected");
+        assert!(!c.any_peer_connected(), "C shows a peer connected");
+        assert!(!a.vault.path().join("only-c.md").exists());
+        assert!(!c.vault.path().join("only-a.md").exists());
+        std::thread::sleep(POLL);
+    }
+}
+
+#[test]
+fn should_keep_the_same_device_id_across_restarts() {
+    let rig = Rig::start();
+    let first = rig.engine.status().unwrap().device_id;
+    let (vault, state) = rig.stop();
+    let again = Rig::start_in(vault, state);
+    assert_eq!(again.engine.status().unwrap().device_id, first);
+}
+
+#[test]
+fn should_drop_a_silent_connection_and_keep_serving() {
+    let a = Rig::start();
+    let ticket = a.loopback_ticket();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (endpoint, connection) = runtime.block_on(connect_silently(&ticket));
+    let started = Instant::now();
+    let b = Rig::start();
+    b.engine.join(&ticket.to_string()).unwrap();
+    a.write("served.md", "still served\n");
+    wait_until(
+        CONNECT_LIMIT,
+        "A to serve B while the silent peer hangs",
+        || has_content(b.vault.path(), "served.md", "still served\n"),
+    );
+    let left = Duration::from_secs(12).saturating_sub(started.elapsed());
+    let closed = runtime.block_on(async { tokio::time::timeout(left, connection.closed()).await });
+    assert!(
+        closed.is_ok(),
+        "the silent connection was not dropped within 12 s"
+    );
+    runtime.block_on(endpoint.close());
+}
+
+async fn connect_silently(ticket: &Ticket) -> (Endpoint, iroh::endpoint::Connection) {
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+        .secret_key(SecretKey::generate())
+        .bind()
+        .await
+        .unwrap();
+    let id = EndpointId::from_bytes(&ticket.device_id).unwrap();
+    let mut target = EndpointAddr::new(id);
+    for addr in &ticket.addrs {
+        target = target.with_ip_addr(*addr);
+    }
+    let connection = endpoint.connect(target, ALPN).await.unwrap();
+    (endpoint, connection)
+}
+
+#[test]
+#[ignore = "needs the public internet; run with --ignored to record the real status"]
+fn should_come_online_in_internet_mode() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let endpoint = Endpoint::builder(presets::N0).bind().await.unwrap();
+        let online = tokio::time::timeout(Duration::from_secs(30), endpoint.online()).await;
+        assert!(
+            online.is_ok(),
+            "the N0 endpoint did not come online in 30 s"
+        );
+    });
+}
