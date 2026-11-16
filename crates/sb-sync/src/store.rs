@@ -1,7 +1,7 @@
 //! Durable storage of the sync document (snapshot plus update log) and of the reconciliation base.
 
 use std::collections::BTreeMap;
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use sb_core::{NoteKey, NotePath};
@@ -24,12 +24,20 @@ pub struct DocStore {
     snap: PathBuf,
     log: PathBuf,
     persisted: Vec<u8>,
+    /// Length of the log up to the end of the last good frame; anything after it is garbage.
+    log_good_len: u64,
 }
 
 /// Splits one complete frame (4-byte big-endian length, then the payload) off the front.
+/// An incomplete frame, or one with a zero length (`persist` never writes one; a zero-filled
+/// tail is what an operating-system crash can leave), is a torn tail: `None`.
 fn split_frame(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     let (header, body) = bytes.split_first_chunk::<FRAME_HEADER_BYTES>()?;
-    body.split_at_checked(usize::try_from(u32::from_be_bytes(*header)).ok()?)
+    let length = usize::try_from(u32::from_be_bytes(*header)).ok()?;
+    if length == 0 {
+        return None;
+    }
+    body.split_at_checked(length)
 }
 
 fn truncate_log(log: &Path, len: u64) -> Result<()> {
@@ -44,39 +52,51 @@ fn truncate_log(log: &Path, len: u64) -> Result<()> {
         .map_err(io_error(log))
 }
 
-/// Imports every complete frame; a torn tail is ignored and cut off so later appends stay readable.
-fn replay_log(log: &Path, doc: &mut SyncDoc) -> Result<()> {
+/// Imports every complete frame and returns the length of the good part of the log. A torn
+/// tail is ignored and cut off. A frame that waits for missing history cannot come from this
+/// store, so it is corruption.
+fn replay_log(log: &Path, doc: &mut SyncDoc) -> Result<u64> {
     let Some(bytes) = read_optional(log)? else {
-        return Ok(());
+        return Ok(0);
     };
     let mut rest = bytes.as_slice();
     while let Some((frame, tail)) = split_frame(rest) {
-        doc.import(frame).map_err(|error| corrupt(log, error))?;
+        let pending = doc.import(frame).map_err(|error| corrupt(log, error))?;
+        if pending {
+            return Err(corrupt(
+                log,
+                "a frame waits for history the log does not hold",
+            ));
+        }
         rest = tail;
     }
-    if rest.is_empty() {
-        return Ok(());
+    let good_len = (bytes.len() - rest.len()) as u64;
+    if !rest.is_empty() {
+        truncate_log(log, good_len)?;
     }
-    truncate_log(log, (bytes.len() - rest.len()) as u64)
+    Ok(good_len)
 }
 
-/// Appends one frame with a single write and makes it durable; a failed write is rolled back.
-fn append_frame(log: &Path, updates: &[u8]) -> Result<()> {
+/// Writes one frame at `offset`, cutting off whatever follows it first, in a single write,
+/// and makes it durable. The file is not opened for appending: Windows refuses to resize such
+/// a handle. Returns the frame's length.
+fn write_frame_at(log: &Path, offset: u64, updates: &[u8]) -> Result<u64> {
     let length = u32::try_from(updates.len())
         .map_err(|_| SyncError::Doc("update larger than 4 GiB".to_string()))?;
     let mut frame = length.to_be_bytes().to_vec();
     frame.extend_from_slice(updates);
     let mut file = private_options()
-        .append(true)
+        .write(true)
         .create(true)
+        .truncate(false)
         .open(log)
         .map_err(io_error(log))?;
-    let before = file.metadata().map_err(io_error(log))?.len();
-    let written = file.write_all(&frame).and_then(|()| file.sync_data());
-    written.map_err(|source| {
-        let _ = file.set_len(before);
-        io_error(log)(source)
-    })
+    file.set_len(offset)
+        .and_then(|()| file.seek(SeekFrom::Start(offset)))
+        .and_then(|_| file.write_all(&frame))
+        .and_then(|()| file.sync_data())
+        .map_err(io_error(log))?;
+    Ok(frame.len() as u64)
 }
 
 impl DocStore {
@@ -88,24 +108,25 @@ impl DocStore {
             Some(bytes) => SyncDoc::from_snapshot(&bytes).map_err(|error| corrupt(&snap, error))?,
             None => SyncDoc::new(),
         };
-        replay_log(&log, &mut doc)?;
+        let log_good_len = replay_log(&log, &mut doc)?;
         let persisted = doc.version();
-        Ok((
-            DocStore {
-                snap,
-                log,
-                persisted,
-            },
-            doc,
-        ))
+        let store = DocStore {
+            snap,
+            log,
+            persisted,
+            log_good_len,
+        };
+        Ok((store, doc))
     }
 
-    /// Appends what changed since the last persist and syncs it to disk; writes nothing when unchanged.
+    /// Appends what changed since the last persist and syncs it to disk; writes nothing when
+    /// unchanged. The frame goes right after the last good one, so garbage left by an earlier
+    /// failed append is cut off first.
     pub fn persist(&mut self, doc: &SyncDoc) -> Result<()> {
         let Some(updates) = doc.updates_for(&self.persisted)? else {
             return Ok(());
         };
-        append_frame(&self.log, &updates)?;
+        self.log_good_len += write_frame_at(&self.log, self.log_good_len, &updates)?;
         self.persisted = doc.version();
         Ok(())
     }
@@ -115,6 +136,7 @@ impl DocStore {
     pub fn compact(&mut self, doc: &SyncDoc) -> Result<()> {
         write_atomic(&self.snap, &doc.snapshot()?)?;
         truncate_log(&self.log, 0)?;
+        self.log_good_len = 0;
         self.persisted = doc.version();
         Ok(())
     }
@@ -134,6 +156,7 @@ impl DocStore {
         remove_if_exists(&self.log)?;
         remove_if_exists(&self.snap)?;
         let doc = SyncDoc::new();
+        self.log_good_len = 0;
         self.persisted = doc.version();
         Ok(doc)
     }
@@ -224,6 +247,15 @@ mod tests {
         (store, doc.alive_notes())
     }
 
+    fn append_to_log(state: &StateDir, bytes: &[u8]) {
+        use std::io::Write;
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(state.file("doc.log"))
+            .unwrap();
+        log.write_all(bytes).unwrap();
+    }
+
     fn file_names(state: &StateDir) -> Vec<String> {
         std::fs::read_dir(state.path())
             .unwrap()
@@ -276,16 +308,78 @@ mod tests {
         doc.update_note(&id, "one and two").unwrap();
         store.persist(&doc).unwrap();
         let log = std::fs::read(state.file("doc.log")).unwrap();
-        std::fs::write(state.file("doc.log"), &log[..log.len() - 3]).unwrap();
+        let cut_in_payload = log.len() - 3;
+        let cut_in_header = usize::try_from(first_frame_len).unwrap() + 2;
+        for cut in [cut_in_payload, cut_in_header] {
+            std::fs::write(state.file("doc.log"), &log[..cut]).unwrap();
+            let (mut store, mut doc) = DocStore::open(&state).unwrap();
+            assert_eq!(doc.alive_notes(), after_first, "cut at {cut}");
+            assert_eq!(store.log_len().unwrap(), first_frame_len, "cut at {cut}");
+            doc.update_note(&id, "one and three").unwrap();
+            store.persist(&doc).unwrap();
+            let (_store, reloaded) = reopen(&state);
+            assert_eq!(reloaded, doc.alive_notes(), "cut at {cut}");
+            assert_eq!(reloaded[0].text, "one and three", "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn should_treat_a_zero_filled_tail_as_torn() {
+        let (_tmp, state) = fresh();
+        let (mut store, mut doc) = DocStore::open(&state).unwrap();
+        let id = doc.create_note(&path("a.md"), "one").unwrap();
+        store.persist(&doc).unwrap();
+        let after_first = doc.alive_notes();
+        let first_frame_len = store.log_len().unwrap();
+        append_to_log(&state, &[0; 16]);
 
         let (mut store, mut doc) = DocStore::open(&state).unwrap();
         assert_eq!(doc.alive_notes(), after_first);
         assert_eq!(store.log_len().unwrap(), first_frame_len);
-        doc.update_note(&id, "one and three").unwrap();
+        doc.update_note(&id, "one and two").unwrap();
         store.persist(&doc).unwrap();
         let (_store, reloaded) = reopen(&state);
         assert_eq!(reloaded, doc.alive_notes());
-        assert_eq!(reloaded[0].text, "one and three");
+        assert_eq!(reloaded[0].text, "one and two");
+    }
+
+    #[test]
+    fn should_heal_a_partial_frame_left_by_a_failed_append() {
+        let (_tmp, state) = fresh();
+        let (mut store, mut doc) = DocStore::open(&state).unwrap();
+        let id = doc.create_note(&path("a.md"), "one").unwrap();
+        store.persist(&doc).unwrap();
+        let mut partial = 100u32.to_be_bytes().to_vec();
+        partial.extend_from_slice(&[7; 10]);
+        append_to_log(&state, &partial);
+        doc.update_note(&id, "one and two").unwrap();
+        store.persist(&doc).unwrap();
+        let (_store, reloaded) = reopen(&state);
+        assert_eq!(reloaded, doc.alive_notes());
+        assert_eq!(reloaded[0].text, "one and two");
+    }
+
+    #[test]
+    fn should_report_corrupt_state_when_a_frame_waits_for_missing_history() {
+        let (_tmp, source) = fresh();
+        let (mut store, mut doc) = DocStore::open(&source).unwrap();
+        let id = doc.create_note(&path("a.md"), "one").unwrap();
+        store.persist(&doc).unwrap();
+        let earlier = doc.version();
+        doc.update_note(&id, "one and two").unwrap();
+        let later_only = doc.updates_since(&earlier).unwrap();
+
+        let (_tmp, state) = fresh();
+        let mut log = u32::try_from(later_only.len())
+            .unwrap()
+            .to_be_bytes()
+            .to_vec();
+        log.extend_from_slice(&later_only);
+        std::fs::write(state.file("doc.log"), log).unwrap();
+        let error = DocStore::open(&state).err().unwrap();
+        assert!(
+            matches!(&error, SyncError::CorruptState { path, .. } if path.ends_with("doc.log"))
+        );
     }
 
     #[test]
@@ -305,6 +399,11 @@ mod tests {
                 .iter()
                 .all(|name| !name.ends_with(".tmp"))
         );
+        doc.create_note(&path("c.md"), "three").unwrap();
+        store.persist(&doc).unwrap();
+        let (_store, after_more) = reopen(&state);
+        assert_eq!(after_more, doc.alive_notes());
+        assert_eq!(after_more.len(), 3);
     }
 
     #[test]
@@ -344,6 +443,7 @@ mod tests {
         let (_store, reloaded) = reopen(&state);
         assert_eq!(reloaded, empty.alive_notes());
         assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].text, "three");
     }
 
     #[test]
