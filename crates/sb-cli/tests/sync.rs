@@ -240,9 +240,10 @@ fn should_queue_a_join_for_the_running_engine() {
     };
     let joined = ok(&a, &["--json", "sync", "join", &ticket.to_string()]);
     assert_eq!(joined, "{\"applied\":\"queued\"}\n");
-    // The engine takes the file on its next tick; by then the join must have taken effect.
-    let taken = a.state.join("command.pending").exists() || a_secret(&a) == [8; 32];
-    assert!(taken);
+    // The engine removes the file before it saves the secret, so wait for the effect, not the file.
+    wait_until(SYNC, "the engine to carry out the join", || {
+        (a_secret(&a) == [8; 32]).then_some(())
+    });
 }
 
 #[test]

@@ -1,13 +1,14 @@
 //! The `sb sync` commands: thin wrappers over `sb_sync::control` and the engine.
 
 use std::io;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::time::{Duration, Instant};
 
 use sb_core::Vault;
 use sb_sync::control::{self, Applied};
 use sb_sync::{
-    EngineEvent, StateDir, Status, SyncError, Ticket, ensure_identity, start_engine, to_hex,
-    unix_now,
+    EngineEvent, EngineHandle, StateDir, Status, SyncError, Ticket, ensure_identity, start_engine,
+    to_hex, unix_now,
 };
 use serde_json::json;
 
@@ -101,30 +102,102 @@ fn status_text(status: &Status) -> String {
     text
 }
 
+/// How long a start retries while another command (`sb sync invite`) briefly holds the engine lock.
+const LOCK_RETRY: Duration = Duration::from_secs(1);
+const LOCK_RETRY_STEP: Duration = Duration::from_millis(50);
+/// How long the first status is awaited before the log says that the engine is still scanning.
+const FIRST_STATUS_WAIT: Duration = Duration::from_secs(10);
+const EVENT_POLL: Duration = Duration::from_millis(100);
+
 /// Runs the engine in the foreground and logs its events to stderr (stdout stays empty).
 fn run_engine(vault: &Vault, state: StateDir) -> Result<(), CliError> {
     let (events, inbox) = mpsc::channel();
     watch_for_interrupt(events.clone())?;
     // The network builds its own runtime, so the engine starts here, on a plain thread.
-    let engine = start_engine(vault.root(), state.clone(), Some(events))?;
-    if let Some(id) = state.device_id()? {
-        eprintln!("device {}", to_hex(&id));
+    let engine = start_when_free(vault, &state, &events)?;
+    // Not fatal: the engine is already running, and a stop must still reach it.
+    match state.device_id() {
+        Ok(Some(id)) => eprintln!("device {}", to_hex(&id)),
+        Ok(None) => {}
+        Err(error) => eprintln!("cannot read the device id: {error}"),
     }
-    // The engine answers only after its first round, which can take long on a big vault: never fatal.
-    eprintln!("{}", listening_line(engine.status()));
-    while let Ok(event) = inbox.recv() {
-        eprintln!("{}", describe(&event));
-        if event == EngineEvent::Stopped {
-            break;
-        }
-    }
+    // The engine answers only after its first round, which can take long on a big vault: never fatal,
+    // and never in the way of a stop request.
+    let first = engine.request_status()?;
+    follow(&inbox, &first, FIRST_STATUS_WAIT, &mut |line| {
+        eprintln!("{line}")
+    });
     Ok(engine.shutdown()?)
 }
 
-fn listening_line(status: Result<Status, SyncError>) -> String {
+fn start_when_free(
+    vault: &Vault,
+    state: &StateDir,
+    events: &Sender<EngineEvent>,
+) -> Result<EngineHandle, SyncError> {
+    retry_while_locked(LOCK_RETRY, LOCK_RETRY_STEP, || {
+        start_engine(vault.root(), state.clone(), Some(events.clone()))
+    })
+}
+
+/// Retries `attempt` while it reports `AlreadyRunning`, for at most `budget`.
+fn retry_while_locked<T>(
+    budget: Duration,
+    step: Duration,
+    mut attempt: impl FnMut() -> Result<T, SyncError>,
+) -> Result<T, SyncError> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match attempt() {
+            Err(SyncError::AlreadyRunning) if Instant::now() < deadline => {
+                std::thread::sleep(step);
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Logs the events until `Stopped`, and the listening line when the first status arrives. A stop is
+/// seen within `EVENT_POLL` whether or not the first status has come.
+fn follow(
+    inbox: &Receiver<EngineEvent>,
+    first: &Receiver<Status>,
+    wait: Duration,
+    log: &mut impl FnMut(&str),
+) {
+    let started = Instant::now();
+    let mut waiting = true;
+    loop {
+        match inbox.recv_timeout(EVENT_POLL) {
+            Ok(event) => {
+                log(&describe(&event));
+                if event == EngineEvent::Stopped {
+                    return;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+        if waiting {
+            match first.try_recv() {
+                Ok(status) => {
+                    log(&listening_line(Ok(status)));
+                    waiting = false;
+                }
+                Err(TryRecvError::Empty) if started.elapsed() < wait => {}
+                Err(_) => {
+                    log(&listening_line(Err(())));
+                    waiting = false;
+                }
+            }
+        }
+    }
+}
+
+fn listening_line(status: Result<Status, ()>) -> String {
     match status {
         Ok(status) => format!("listening on {}", status.addresses.join(", ")),
-        Err(_) => {
+        Err(()) => {
             "starting: the engine is still scanning the vault; see `sb sync status`".to_owned()
         }
     }
@@ -137,6 +210,7 @@ fn describe(event: &EngineEvent) -> String {
         EngineEvent::Synced => "synced".to_owned(),
         EngineEvent::Blocked(count) => format!("blocked notes: {count}"),
         EngineEvent::Error(message) => format!("error: {message}"),
+        EngineEvent::Notice(message) => format!("note: {message}"),
         EngineEvent::Stopped => "stopping".to_owned(),
     }
 }
@@ -182,8 +256,7 @@ mod tests {
 
     #[test]
     fn should_print_a_starting_line_when_the_first_status_is_not_available() {
-        let timeout = SyncError::Net("the engine did not answer in time".into());
-        let line = listening_line(Err(timeout));
+        let line = listening_line(Err(()));
         assert!(line.starts_with("starting: the engine is still scanning the vault"));
         assert!(line.contains("sb sync status"), "{line}");
     }
@@ -196,6 +269,76 @@ mod tests {
         };
         let line = listening_line(Ok(status));
         assert_eq!(line, "listening on 1.2.3.4:5, 6.7.8.9:10");
+    }
+
+    #[test]
+    fn should_retry_while_the_lock_is_held_and_then_succeed() {
+        let mut calls = 0;
+        let result = retry_while_locked(Duration::from_secs(5), Duration::from_millis(1), || {
+            calls += 1;
+            if calls < 3 {
+                Err(SyncError::AlreadyRunning)
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(result.unwrap(), 3);
+    }
+
+    #[test]
+    fn should_give_up_when_the_lock_stays_held() {
+        let started = Instant::now();
+        let result: Result<(), SyncError> = retry_while_locked(
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+            || Err(SyncError::AlreadyRunning),
+        );
+        assert!(matches!(result, Err(SyncError::AlreadyRunning)));
+        assert!(started.elapsed() >= Duration::from_millis(100));
+    }
+
+    #[test]
+    fn should_not_retry_other_errors() {
+        let mut calls = 0;
+        let result: Result<(), SyncError> =
+            retry_while_locked(Duration::from_secs(5), Duration::from_millis(1), || {
+                calls += 1;
+                Err(SyncError::NotConfigured)
+            });
+        assert!(matches!(result, Err(SyncError::NotConfigured)));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn should_see_a_stop_while_the_first_status_is_still_pending() {
+        let (events, inbox) = mpsc::channel();
+        let (_never_answers, first) = mpsc::channel();
+        events.send(EngineEvent::Stopped).unwrap();
+        let started = Instant::now();
+        let mut lines = Vec::new();
+        follow(&inbox, &first, Duration::from_secs(30), &mut |line| {
+            lines.push(line.to_owned());
+        });
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(lines, ["stopping"]);
+    }
+
+    #[test]
+    fn should_log_the_listening_line_when_the_first_status_arrives() {
+        let (events, inbox) = mpsc::channel();
+        let (answer, first) = mpsc::channel();
+        let status = Status {
+            addresses: vec!["1.2.3.4:5".into()],
+            ..Status::default()
+        };
+        answer.send(status).unwrap();
+        events.send(EngineEvent::Notice("hello".into())).unwrap();
+        events.send(EngineEvent::Stopped).unwrap();
+        let mut lines = Vec::new();
+        follow(&inbox, &first, Duration::from_secs(30), &mut |line| {
+            lines.push(line.to_owned());
+        });
+        assert_eq!(lines, ["note: hello", "listening on 1.2.3.4:5", "stopping"]);
     }
 
     #[test]

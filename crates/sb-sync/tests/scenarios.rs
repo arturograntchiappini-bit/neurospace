@@ -387,7 +387,7 @@ fn should_refuse_a_hello_after_the_handshake_and_ignore_unknown_sessions() {
 }
 
 #[test]
-fn should_store_at_most_sixty_four_foreign_peers_and_never_its_own_id() {
+fn should_store_at_most_sixty_four_peers_of_a_message_plus_the_opener_and_never_its_own_id() {
     let mut nodes = vec![node(1), node(2)];
     let mut net = Net::new();
     let session = net.connect(&mut nodes, 0, 1);

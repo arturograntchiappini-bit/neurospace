@@ -32,6 +32,8 @@ pub enum EngineEvent {
     Blocked(usize),
     /// A round, a tick or a session failed; the engine keeps running.
     Error(String),
+    /// Something the person should know that is not a failure.
+    Notice(String),
     /// The engine thread is over and the lock is released.
     Stopped,
 }
@@ -132,6 +134,7 @@ impl EngineHandle {
         let (commands, inbox) = mpsc::channel();
         let mut network = make_network(commands.clone(), &state)?;
         let id = network.device_id();
+        let new_group = state.secret().is_ok_and(|secret| secret.is_none());
         let replica = match open_replica(vault_root, &state, id) {
             Ok(replica) => replica,
             Err(error) => {
@@ -140,7 +143,8 @@ impl EngineHandle {
             }
         };
         let watching = Watching::start(vault_root, commands.clone(), folder.make_watcher);
-        let actor = Actor::new(replica, network, events, watching);
+        let mut actor = Actor::new(replica, network, events, watching);
+        actor.new_group = new_group;
         let thread = std::thread::Builder::new()
             .name("sb-sync-engine".into())
             .spawn(move || actor.run_until_stopped(lock, &inbox))
@@ -182,6 +186,19 @@ impl EngineHandle {
     /// `Net` when the engine is gone.
     pub fn status(&self) -> Result<Status> {
         self.ask(Command::Status)
+    }
+
+    /// Asks for the status without waiting: the answer arrives on the receiver once the engine has
+    /// finished the round it is in, which on a big vault can take long.
+    ///
+    /// # Errors
+    /// `Net` when the engine is gone.
+    pub fn request_status(&self) -> Result<Receiver<Status>> {
+        let (reply, answer) = mpsc::channel();
+        self.commands
+            .send(Command::Status(reply))
+            .map_err(|_| SyncError::Net("engine stopped".into()))?;
+        Ok(answer)
     }
 
     /// Whether the actor thread still runs.
@@ -369,6 +386,8 @@ struct Actor {
     /// The vault lost its marker folder; the watcher is replaced after the next good round.
     rewatch: bool,
     frame_limit: usize,
+    /// The engine created the group secret at start: this vault was not in a group.
+    new_group: bool,
 }
 
 impl Actor {
@@ -392,6 +411,7 @@ impl Actor {
             watching,
             rewatch: false,
             frame_limit: FRAME_MAX,
+            new_group: false,
         };
         actor.group = actor.read_group();
         actor
@@ -418,6 +438,10 @@ impl Actor {
     }
 
     fn run(mut self, inbox: &Receiver<Command>) {
+        if self.new_group {
+            let text = "this vault was not in a group: a new group was created";
+            self.emit(EngineEvent::Notice(text.into()));
+        }
         if let Some(notice) = self.watching.notice.take() {
             self.report(&SyncError::Net(notice));
         }
@@ -1189,6 +1213,37 @@ mod tests {
         };
         bare.actor.on_session(2, tag, opened);
         assert!(bare.actor.sessions.contains_key(&2));
+    }
+
+    fn said_new_group(rig: &Rig, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            let event = rig.events.recv_timeout(Duration::from_millis(50));
+            if matches!(&event, Ok(EngineEvent::Notice(text)) if text.contains("a new group was created"))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn should_say_when_it_creates_the_group_secret_at_start() {
+        let rig = start_rig([1; 32], &[]);
+        assert!(said_new_group(&rig, LIMIT));
+        rig.handle.shutdown().unwrap();
+    }
+
+    #[test]
+    fn should_stay_quiet_when_the_vault_already_has_a_group() {
+        let (vault, state_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        StateDir::at(state_dir.path())
+            .unwrap()
+            .save_secret(&[3; 32])
+            .unwrap();
+        let rig = start_in(vault, state_dir, [1; 32]).unwrap();
+        assert!(!said_new_group(&rig, Duration::from_secs(1)));
+        rig.handle.shutdown().unwrap();
     }
 
     #[test]
