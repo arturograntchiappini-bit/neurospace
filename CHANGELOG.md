@@ -15,8 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sb sync run`, `invite`, `join <TICKET>`, `leave` and `status`: pair devices with a ticket, run the engine in the foreground (log on stderr, clean stop on Ctrl+C or SIGTERM) and inspect it, with `--json` output.
 - `sb sync status` shows the relay the device reached (`relay: <url>`, or a hint to check the firewall in `internet` mode when there is none yet), and `status.json` and `sb sync status --json` carry the number of rejected entries of the sync document.
 
+- `sb_core::ops::create_note` (never replaces a note, adopts existing folder spelling), `new_note_path` (the path a click on an unresolved link creates, spec 6.6), `ATTACHMENT_EXTENSIONS` with `Link::is_attachment`, and `StateDir::save_config` in `sb-sync`.
+
 ### Changed
 
+- Attachment links (`![[image.png]]`, `[[report.pdf]]`) are no longer ghost notes in the graph: they produce no node and no edge.
+- The ghost of a `./` or `/` link is named by the note a click would create, so `[[./new]]` in two folders gives two ghosts; ghosts of plain names are unchanged. A link for which no valid note path exists produces no ghost.
 - Reading a note larger than 4 MiB is refused instead of loading it; writing over a note that is a symbolic link is refused; replacing a note keeps its file permissions.
 - The folder filter of `list` and `list_notes` is validated like a note path (`Projects\Sub`, `../x`, `./projects` and hidden folders are errors) and accepts one trailing `/`.
 - Note paths reject more Windows device names (`CON .md` with trailing spaces, `COM0`, `LPT0`, `COM¹`–`COM³`, `LPT¹`–`LPT³`, `CONIN$`, `CONOUT$`), because a Linux peer may legally hold such names.

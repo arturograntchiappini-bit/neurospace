@@ -462,6 +462,11 @@ impl StateDir {
         Ok(read_json(&self.file("config.json"))?.unwrap_or_default())
     }
 
+    /// Replaces the network settings.
+    pub fn save_config(&self, config: &NetConfig) -> Result<()> {
+        write_json(&self.file("config.json"), config)
+    }
+
     /// Whether this replica joined a group and has not reconciled since.
     pub fn fresh_join(&self) -> bool {
         self.file("fresh-join").exists()
@@ -796,6 +801,18 @@ mod tests {
             config_from("{nope"),
             Err(SyncError::CorruptState { .. })
         ));
+    }
+
+    #[test]
+    fn should_round_trip_config_when_saved() {
+        let (_tmp, state) = fresh();
+        let lan = NetConfig {
+            mode: NetMode::Lan,
+            bind_port: Some(4500),
+            mdns: false,
+        };
+        state.save_config(&lan).unwrap();
+        assert_eq!(state.config().unwrap(), lan);
     }
 
     #[test]

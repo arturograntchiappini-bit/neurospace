@@ -35,6 +35,30 @@ pub struct Link {
     pub line: u32,
 }
 
+/// File extensions (without the dot) whose links point to attachments, not notes (spec 6.1).
+pub const ATTACHMENT_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "ico", "tif", "tiff", "pdf", "mp3",
+    "wav", "ogg", "m4a", "flac", "mp4", "webm", "mov", "mkv", "avi",
+];
+
+impl Link {
+    /// True when the target's last component ends in `.` plus an attachment extension, ignoring case.
+    pub fn is_attachment(&self) -> bool {
+        is_attachment_target(&self.target)
+    }
+}
+
+pub(crate) fn is_attachment_target(target: &str) -> bool {
+    let slashed = target.trim().replace('\\', "/");
+    let last = slashed.rsplit('/').next().unwrap_or_default();
+    let Some((_, extension)) = last.rsplit_once('.') else {
+        return false;
+    };
+    ATTACHMENT_EXTENSIONS
+        .iter()
+        .any(|known| extension.eq_ignore_ascii_case(known))
+}
+
 /// Links and tags of one note.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Parsed {
@@ -510,5 +534,13 @@ MD: [text](other/Note%20D.md#h) and [ext](https://example.com/x.md) and [img](pi
     #[test]
     fn should_not_find_tags_inside_wiki_link_text() {
         assert!(parse("[[#Only heading]] [[Note #x]]").tags.is_empty());
+    }
+
+    #[test]
+    fn should_mark_attachment_when_extension_is_listed() {
+        let md =
+            "![[photo.PNG]] [[docs/report.pdf]] [[Idea]] [[v1.2 notes]] [[Meeting 2026.11.17]]";
+        let flags: Vec<bool> = parse(md).links.iter().map(Link::is_attachment).collect();
+        assert_eq!(flags, [true, true, false, false, false]);
     }
 }

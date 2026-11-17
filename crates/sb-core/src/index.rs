@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
 
-use crate::error::Result;
-use crate::markdown::{self, Link};
+use crate::error::{CoreError, Result};
+use crate::markdown::{self, Link, is_attachment_target};
 use crate::path::{NoteKey, NotePath};
 use crate::vault::{Ignored, Vault};
 
@@ -235,6 +235,31 @@ impl Index {
 /// The longest prefix of `s` with at most `max` characters.
 pub(crate) fn truncate_chars(s: &str, max: usize) -> &str {
     s.char_indices().nth(max).map_or(s, |(end, _)| &s[..end])
+}
+
+/// The note that clicking an unresolved link `target`, written in note `from`, creates (spec 6.6).
+///
+/// # Errors
+/// `InvalidInput` when the target is an attachment or a `./` path leaving the vault,
+/// `InvalidPath` when the result is not a valid note path.
+pub fn new_note_path(target: &str, from: &NotePath) -> Result<NotePath> {
+    if is_attachment_target(target) {
+        return Err(CoreError::InvalidInput("attachments are not notes".into()));
+    }
+    let slashed = target.trim().replace('\\', "/");
+    let mut path = match slashed.strip_prefix("./") {
+        Some("") => String::new(),
+        Some(rest) => join_relative(folder_of(from.as_str()), rest)
+            .ok_or_else(|| CoreError::InvalidInput("the link leaves the vault".into()))?,
+        None => slashed.strip_prefix('/').unwrap_or(&slashed).to_owned(),
+    };
+    if !path.to_ascii_lowercase().ends_with(MARKDOWN_SUFFIX) {
+        path.push_str(MARKDOWN_SUFFIX);
+    }
+    NotePath::parse(&path).map_err(|source| CoreError::InvalidPath {
+        path: target.to_owned(),
+        source,
+    })
 }
 
 /// Spec 6.2 normalisation: trim, `\` to `/`, drop a leading `./` or `/` and a trailing `.md`, lowercase.
@@ -605,6 +630,33 @@ mod tests {
         let ix = fixture();
         assert_eq!(resolved(&ix, "", "Home.md"), None);
         assert_eq!(resolved(&ix, ".md", "Home.md"), None);
+    }
+
+    #[test]
+    fn should_place_new_note_by_spec_6_6_rules() {
+        let from = p("a/b/src.md");
+        let at = |t: &str| new_note_path(t, &from).unwrap().as_str().to_owned();
+        assert_eq!(at("Idea"), "Idea.md");
+        assert_eq!(at("sub/Idea"), "sub/Idea.md");
+        assert_eq!(at("/top"), "top.md");
+        assert_eq!(at("./near"), "a/b/near.md");
+        assert_eq!(at("./../up"), "a/up.md");
+        assert_eq!(at(" Idea.MD "), "Idea.MD");
+        assert_eq!(at("x\\y"), "x/y.md");
+    }
+
+    #[test]
+    fn should_refuse_new_note_when_target_leaves_vault_or_is_invalid() {
+        let from = p("a/src.md");
+        let refused = |t: &str| new_note_path(t, &from).unwrap_err();
+        assert!(matches!(refused("./../../x"), CoreError::InvalidInput(_)));
+        assert!(matches!(refused("photo.png"), CoreError::InvalidInput(_)));
+        for target in ["a:b", "CON", ""] {
+            assert!(
+                matches!(refused(target), CoreError::InvalidPath { .. }),
+                "target: {target:?}"
+            );
+        }
     }
 
     #[test]
