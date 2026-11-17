@@ -67,6 +67,7 @@ pub struct Workspace {
     tree: Folder,
     open: Option<OpenNote>,
     write_generation: u64,
+    index_swaps: u64,
 }
 
 impl Workspace {
@@ -84,6 +85,7 @@ impl Workspace {
             tree,
             open: None,
             write_generation: 0,
+            index_swaps: 0,
         })
     }
 
@@ -112,6 +114,13 @@ impl Workspace {
     /// them is stale.
     pub fn write_generation(&self) -> u64 {
         self.write_generation
+    }
+
+    /// Changes whenever the index content may have changed: every local write and every swapped-in
+    /// rebuild. Both parts only grow, so the sum differs from any earlier value. Panels that
+    /// derive data from the index key their caches on it.
+    pub fn index_revision(&self) -> u64 {
+        self.write_generation + self.index_swaps
     }
 
     /// Opens a note, saving a dirty open one first; a failed save keeps the current note open.
@@ -329,6 +338,7 @@ impl Workspace {
             return ApplyOutcome::Stale;
         }
         self.index = index;
+        self.index_swaps += 1;
         self.refresh_tree();
         ApplyOutcome::Applied(self.reconcile_open_note().into_iter().collect())
     }
@@ -535,6 +545,22 @@ mod tests {
         assert_eq!(ws.tree().folders[0].name, "d");
         assert!(ws.open_note().is_none());
         assert_eq!(ws.write_generation(), 0);
+    }
+
+    #[test]
+    fn should_change_index_revision_on_every_index_change() {
+        let (_dir, mut ws) = workspace(&[("a.md", "x")]);
+        let start = ws.index_revision();
+        ws.create("b", None).unwrap();
+        let after_create = ws.index_revision();
+        assert_ne!(after_create, start);
+        let rebuilt = Index::from_notes(vec![(p("a.md"), "x".into())]);
+        let generation = ws.write_generation();
+        assert!(matches!(
+            ws.apply_index(rebuilt, generation),
+            ApplyOutcome::Applied(_)
+        ));
+        assert_ne!(ws.index_revision(), after_create);
     }
 
     #[test]

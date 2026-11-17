@@ -2,6 +2,7 @@
 
 pub mod jobs;
 pub mod notice;
+pub mod panels;
 pub mod reload;
 pub mod settings;
 pub mod tree;
@@ -9,6 +10,10 @@ pub mod workspace;
 
 pub use jobs::{Job, Poll};
 pub use notice::{INFO_NOTICE_TTL, Notice, NoticeBoard, NoticeKind};
+pub use panels::{
+    DialogKind, InspectorCache, InspectorData, NoteAction, NoteDialog, SEARCH_DEBOUNCE, SearchBox,
+    counted, ignore_reason_text,
+};
 pub use reload::{RELOAD_DEBOUNCE, Reloader};
 pub use settings::{Settings, ThemeChoice};
 pub use tree::{Folder, build_tree};

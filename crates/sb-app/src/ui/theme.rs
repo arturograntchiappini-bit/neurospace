@@ -5,7 +5,7 @@
 use eframe::egui::epaint::Shadow;
 use eframe::egui::{
     Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Frame, LayerId,
-    Mesh, Painter, Rect, Stroke, Style, TextStyle, Theme,
+    Margin, Mesh, Painter, Rect, RichText, Stroke, Style, TextStyle, Theme, Ui,
 };
 use std::sync::Arc;
 
@@ -13,6 +13,9 @@ use std::sync::Arc;
 pub const GUTTER: f32 = 8.0;
 /// Corner radius of panels and the document surface, in points.
 pub const RADIUS: u8 = 12;
+const CHIP_RADIUS: u8 = 8;
+const SECTION_LABEL_SIZE: f32 = 11.0;
+const SECTION_LABEL_SPACING: f32 = 1.1;
 
 /// A colour with straight (not premultiplied) alpha.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,7 +201,8 @@ fn set_text_styles(style: &mut Style) {
 fn set_visuals(style: &mut Style, p: &Palette) {
     let v = &mut style.visuals;
     v.panel_fill = Color32::TRANSPARENT;
-    v.window_fill = Color32::TRANSPARENT;
+    // Menus, context menus and dialogs draw on this: solid like the document surface.
+    v.window_fill = p.document.to_color32();
     v.hyperlink_color = p.accent.to_color32();
     v.selection.bg_fill = p.selection.to_color32();
     // Also the text colour of a selected label and the focus ring of text fields (appendix A.5).
@@ -243,6 +247,23 @@ pub fn glass_frame(p: &Palette) -> Frame {
         .fill(p.glass.to_color32())
         .stroke(Stroke::new(1.0, p.hairline.to_color32()))
         .corner_radius(CornerRadius::same(RADIUS))
+}
+
+/// Draws a section label such as «FILES»: 11 px, letter-spaced, in the secondary colour.
+pub fn section_label(ui: &mut Ui, p: &Palette, text: &str) {
+    let label = RichText::new(text)
+        .size(SECTION_LABEL_SIZE)
+        .extra_letter_spacing(SECTION_LABEL_SPACING)
+        .color(p.text_secondary.to_color32());
+    ui.label(label);
+}
+
+/// Frame of a tag chip: a hover-coloured pill.
+pub fn chip_frame(p: &Palette) -> Frame {
+    Frame::NONE
+        .fill(p.hover.to_color32())
+        .corner_radius(CornerRadius::same(CHIP_RADIUS))
+        .inner_margin(Margin::symmetric(8, 2))
 }
 
 /// Frame of the slim status strip: the glass fill, no border, no radius, no shadow.
@@ -382,6 +403,17 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn should_fill_popups_and_dialogs_with_the_opaque_document_colour() {
+        let ctx = Context::default();
+        for theme in THEMES {
+            let p = palette(theme, Material::Mica);
+            apply(&ctx, theme, &p);
+            let fill = ctx.style_of(theme).visuals.window_fill;
+            assert_eq!(fill, p.document.to_color32(), "{theme:?}");
         }
     }
 

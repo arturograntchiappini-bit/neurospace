@@ -3,15 +3,21 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use eframe::egui::{CentralPanel, Context, Theme, ThemePreference, Ui, Visuals};
+use eframe::egui::{
+    CentralPanel, Context, Key, KeyboardShortcut, Modifiers, Theme, ThemePreference, Ui, Visuals,
+};
 use sb_core::Result as CoreResult;
 
 use crate::platform;
-use crate::state::{Job, Notice, NoticeBoard, Poll, Settings, ThemeChoice, Workspace};
+use crate::state::{
+    InspectorCache, Job, NoteAction, NoteDialog, Notice, NoticeBoard, Poll, SearchBox, Settings,
+    ThemeChoice, Workspace,
+};
 use crate::ui::menu::{self, MenuOutcome};
 use crate::ui::shell::{self, Sidebars, TopBar};
 use crate::ui::theme::{self, Material, Palette};
 use crate::ui::welcome::{self, WelcomeForm};
+use crate::ui::{dialogs, inspector, sidebar};
 
 /// How the application starts.
 #[derive(Clone, Debug)]
@@ -33,6 +39,15 @@ enum Screen {
     Vault(Box<Workspace>),
 }
 
+/// What the open vault's panels remember between frames.
+#[derive(Default)]
+struct VaultView {
+    sidebars: Sidebars,
+    search: SearchBox,
+    inspector: InspectorCache,
+    dialog: Option<NoteDialog>,
+}
+
 /// The whole application state behind the window.
 pub struct SecondBrainApp {
     ctx: Context,
@@ -41,7 +56,7 @@ pub struct SecondBrainApp {
     screen: Screen,
     welcome: WelcomeForm,
     notices: NoticeBoard,
-    sidebars: Sidebars,
+    view: VaultView,
     mica_available: bool,
     mica_key: Option<(bool, bool)>,
 }
@@ -59,7 +74,7 @@ impl SecondBrainApp {
             screen: Screen::Welcome,
             welcome: WelcomeForm::default(),
             notices: NoticeBoard::default(),
-            sidebars: Sidebars::default(),
+            view: VaultView::default(),
             mica_available: false,
             mica_key: None,
         };
@@ -134,6 +149,9 @@ impl SecondBrainApp {
             self.save_settings();
         }
         self.poll_opening();
+        if matches!(self.screen, Screen::Vault(_)) {
+            self.handle_note_keys(&ctx);
+        }
         match &self.screen {
             Screen::Welcome => self.show_welcome(ui, &palette),
             Screen::Opening { .. } => show_opening(ui),
@@ -185,6 +203,10 @@ impl SecondBrainApp {
 
     fn finish_opening(&mut self, path: PathBuf, workspace: Workspace) {
         self.welcome = WelcomeForm::default();
+        self.view = VaultView {
+            sidebars: self.view.sidebars,
+            ..VaultView::default()
+        };
         self.settings.last_vault = Some(path);
         self.save_settings();
         self.screen = Screen::Vault(Box::new(workspace));
@@ -203,16 +225,39 @@ impl SecondBrainApp {
 
     fn show_vault(&mut self, ui: &mut Ui, palette: &Palette) {
         let name = self.vault_name();
+        let Screen::Vault(workspace) = &mut self.screen else {
+            return;
+        };
         let bar = TopBar {
             vault_name: &name,
-            sidebars: &mut self.sidebars,
+            sidebars: &mut self.view.sidebars,
             settings: &mut self.settings,
         };
         let outcome = shell::top_bar(ui, palette, bar);
-        shell::status_strip(ui, palette, &mut self.notices);
-        shell::side_panels(ui, palette, &mut self.sidebars);
+        shell::status_strip(ui, palette, &mut self.notices, workspace);
+        let action = show_panels(ui, palette, workspace, &mut self.view);
         shell::document_area(ui, palette);
+        dialogs::show(ui.ctx(), palette, &mut self.view.dialog, workspace);
+        let notice = action.and_then(|action| action.run(workspace, &mut self.view.dialog));
+        if let Some(notice) = notice {
+            self.notices.post(notice, Instant::now());
+        }
         self.apply_menu(outcome);
+    }
+
+    /// Ctrl+N opens the «New note» dialog; Ctrl+F focuses the search field.
+    fn handle_note_keys(&mut self, ctx: &Context) {
+        let pressed = |key| {
+            let shortcut = KeyboardShortcut::new(Modifiers::COMMAND, key);
+            ctx.input_mut(|input| input.consume_shortcut(&shortcut))
+        };
+        if pressed(Key::N) && self.view.dialog.is_none() {
+            self.view.dialog = Some(NoteDialog::new_note(None));
+        }
+        if pressed(Key::F) {
+            self.view.sidebars.left = true;
+            ctx.memory_mut(|memory| memory.request_focus(sidebar::search_field_id()));
+        }
     }
 
     fn vault_name(&self) -> String {
@@ -243,6 +288,28 @@ impl SecondBrainApp {
             }
         }
     }
+}
+
+/// Draws both side panels; returns what the user asked for in either.
+fn show_panels(
+    ui: &mut Ui,
+    palette: &Palette,
+    workspace: &Workspace,
+    view: &mut VaultView,
+) -> Option<NoteAction> {
+    let VaultView {
+        sidebars,
+        search,
+        inspector: links,
+        ..
+    } = view;
+    let left = shell::left_panel(ui, palette, &mut sidebars.left, |ui| {
+        sidebar::show(ui, palette, workspace, search)
+    });
+    let right = shell::right_panel(ui, palette, &mut sidebars.right, |ui| {
+        inspector::show(ui, palette, workspace, links)
+    });
+    left.flatten().or(right.flatten())
 }
 
 fn show_opening(ui: &mut Ui) {

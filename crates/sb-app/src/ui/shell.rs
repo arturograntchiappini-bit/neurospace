@@ -9,6 +9,7 @@ use eframe::egui::{
 
 use crate::state::notice::{Notice, NoticeBoard, NoticeKind};
 use crate::state::settings::Settings;
+use crate::state::{Workspace, panels};
 use crate::ui::menu::{self, MenuOutcome};
 use crate::ui::theme::{self, GUTTER, Palette};
 
@@ -122,8 +123,8 @@ fn top_bar_row(ui: &mut Ui, bar: TopBar<'_>) -> MenuOutcome {
     .inner
 }
 
-/// The slim glass strip at the bottom with the latest notice.
-pub fn status_strip(ui: &mut Ui, p: &Palette, notices: &mut NoticeBoard) {
+/// The slim glass strip at the bottom: word count, ignored files, the notice, sync summary.
+pub fn status_strip(ui: &mut Ui, p: &Palette, notices: &mut NoticeBoard, workspace: &Workspace) {
     let now = Instant::now();
     let outer = Margin {
         left: GAP,
@@ -134,7 +135,6 @@ pub fn status_strip(ui: &mut Ui, p: &Palette, notices: &mut NoticeBoard) {
     let frame = theme::strip_frame(p)
         .inner_margin(Margin::symmetric(PADDING_X, 4))
         .outer_margin(outer);
-    let notice = notices.current(now).cloned();
     if let Some(left) = notices.time_left(now) {
         ui.ctx().request_repaint_after(left);
     }
@@ -143,41 +143,87 @@ pub fn status_strip(ui: &mut Ui, p: &Palette, notices: &mut NoticeBoard) {
         .frame(frame)
         .show(ui, |ui| {
             ui.set_min_height(ui.spacing().interact_size.y);
-            if let Some(notice) = notice {
-                notice_row(ui, p, &notice, notices);
-            }
+            ui.horizontal(|ui| strip_row(ui, p, workspace, notices));
         });
 }
 
+fn strip_row(ui: &mut Ui, p: &Palette, workspace: &Workspace, notices: &mut NoticeBoard) {
+    if workspace.open_note().is_some() {
+        ui.label(panels::counted(workspace.word_count(), "word", "words"));
+    }
+    ignored_label(ui, workspace);
+    if let Some(notice) = notices.current(Instant::now()).cloned() {
+        notice_row(ui, p, &notice, notices);
+    }
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        // The sync engine (a later task) replaces this with its summary.
+        ui.label(RichText::new("Sync off").color(p.text_secondary.to_color32()));
+    });
+}
+
+fn ignored_label(ui: &mut Ui, workspace: &Workspace) {
+    let ignored = workspace.index().ignored();
+    if ignored.is_empty() {
+        return;
+    }
+    let text = panels::counted(ignored.len(), "file ignored", "files ignored");
+    ui.label(text).on_hover_ui(|ui| {
+        for file in ignored {
+            ui.label(format!(
+                "{}: {}",
+                file.path,
+                panels::ignore_reason_text(file.reason)
+            ));
+        }
+    });
+}
+
 fn notice_row(ui: &mut Ui, p: &Palette, notice: &Notice, notices: &mut NoticeBoard) {
-    ui.horizontal(|ui| match notice.kind {
+    match notice.kind {
         NoticeKind::Info => {
             ui.label(RichText::new(&notice.text).color(p.text_secondary.to_color32()));
         }
         NoticeKind::Error => {
             ui.label(format!("Error: {}", notice.text));
-            let layout = Layout::right_to_left(Align::Center);
-            ui.with_layout(layout, |ui| {
-                if flat_button(ui, "×").accessible_name("Dismiss").clicked() {
-                    notices.dismiss();
-                }
-            });
+            if flat_button(ui, "×").accessible_name("Dismiss").clicked() {
+                notices.dismiss();
+            }
         }
-    });
+    }
 }
 
-/// The two glass side panels; empty until later tasks fill them.
-pub fn side_panels(ui: &mut Ui, p: &Palette, sidebars: &mut Sidebars) {
-    let left = Panel::left("left_panel")
+/// The left glass panel; `content` draws inside it. `None` while it is collapsed.
+pub fn left_panel<R>(
+    ui: &mut Ui,
+    p: &Palette,
+    open: &mut bool,
+    content: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    let panel = Panel::left("left_panel")
         .default_size(LEFT_PANEL_WIDTH)
         .min_size(LEFT_PANEL_MIN)
         .frame(glass_panel_frame(p, side_margin(true)));
-    show_side_panel(ui, p, left, &mut sidebars.left);
-    let right = Panel::right("right_panel")
+    show_side_panel(ui, panel, open, |ui| {
+        paint_panel_highlight(ui, p);
+        content(ui)
+    })
+}
+
+/// The right glass panel; `content` draws inside it. `None` while it is collapsed.
+pub fn right_panel<R>(
+    ui: &mut Ui,
+    p: &Palette,
+    open: &mut bool,
+    content: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    let panel = Panel::right("right_panel")
         .default_size(RIGHT_PANEL_WIDTH)
         .min_size(RIGHT_PANEL_MIN)
         .frame(glass_panel_frame(p, side_margin(false)));
-    show_side_panel(ui, p, right, &mut sidebars.right);
+    show_side_panel(ui, panel, open, |ui| {
+        paint_panel_highlight(ui, p);
+        content(ui)
+    })
 }
 
 /// Outer margin of a side panel: the window-edge gutter on its outer side only.
@@ -191,10 +237,16 @@ fn side_margin(on_left: bool) -> Margin {
     }
 }
 
-fn show_side_panel(ui: &mut Ui, p: &Palette, panel: Panel, open: &mut bool) {
-    panel
+fn show_side_panel<R>(
+    ui: &mut Ui,
+    panel: Panel,
+    open: &mut bool,
+    content: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    let shown = panel
         .show_separator_line(false)
-        .show_collapsible(ui, open, |ui| paint_panel_highlight(ui, p));
+        .show_collapsible(ui, open, content);
+    shown.map(|shown| shown.inner)
 }
 
 /// The solid document surface; empty until later tasks fill it.
