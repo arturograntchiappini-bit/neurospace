@@ -330,7 +330,7 @@ Moving the vault folder changes the hash, so the replica looks unconfigured and 
 
 **The base never outlives the document it was saved against.** A base entry says «disk and document agreed on this content»; with the note missing from the document, the engine reads that as «the note was deleted elsewhere» and moves the file to the trash. If the document on disk ever loses history while the base survives (a damaged or deleted `doc.log`, a partly restored state directory), that reading would trash every note. So when the engine opens its state it checks that the loaded document includes the version in `base.version`; if the base is not empty and the file is missing, unreadable or names history the document does not have, the base is cleared. With an empty base nothing can be trashed: files become notes again, and a file that differs from a note becomes a conflict copy.
 
-The files `secret`, `peers.json`, `config.json` and `command.pending` are the engine's **control plane**: the engine re-reads them on every tick. The CLI configures sync by editing them, whether or not an engine is running.
+The files `secret`, `peers.json` and `command.pending` are the engine's **control plane**: the engine re-reads them on every tick. The CLI configures sync by editing them, whether or not an engine is running. `config.json` is read once, when the engine starts: a change to the network mode, port or mDNS takes effect at the next start (ruling of the M2 final review, 2026-11-17).
 
 ### 8.4 Sync document (call)
 
