@@ -703,7 +703,11 @@ mod tests {
         }
         let scanned = scan(&Vault::open(tmp.path()).unwrap());
         set_modes(0o644, 0o755);
-        let scanned = scanned.unwrap();
+        assert_locked_entries_blocked(&scanned.unwrap());
+    }
+
+    #[cfg(unix)]
+    fn assert_locked_entries_blocked(scanned: &DiskScan) {
         assert_eq!(
             scanned.disk.get(&key("ok.md")),
             Some(&present("ok.md", "ok"))

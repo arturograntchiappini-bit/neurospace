@@ -28,11 +28,16 @@ use crate::state::{DeviceId, NetConfig, NetMode, PeerEntry, Secret, StateDir, fr
 /// How long a dial may take before it is given up.
 pub const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long after a connection is accepted or dialled its session may take to report `Opened`.
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How many accepted connections may be in the handshake at once; one more is closed unread.
-pub const MAX_PENDING_HANDSHAKES: usize = 16;
+// shortcut: one global counter of pending handshakes, a single LAN host can hold all slots; upgrade to a
+// per-remote-address limit with a short ban if that is seen.
+pub(crate) const MAX_PENDING_HANDSHAKES: usize = 16;
 
-/// How long a finished session waits for the peer to close first, so its last bytes are not cut off.
+/// How long a cleanly ended session waits for the peer to close first, so its last bytes are not cut off.
+/// The task, and with it its map entry, lives up to this long after `Closed`, so a tick inside that second
+/// skips the re-dial until the next tick. The brief's "wait only when this side wrote last" is not
+/// implemented: `run_session` does not report who ended the stream, so the wait is always taken.
 const CLOSE_GRACE: Duration = Duration::from_secs(1);
 /// The router gets this long to stop; then the runtime gets `RUNTIME_GRACE`.
 const ROUTER_GRACE: Duration = Duration::from_secs(2);
@@ -240,12 +245,11 @@ impl SessionTask {
         let Some(conn) = connect.await else { return };
         let opened = Arc::new(AtomicBool::new(false));
         let relay = self.relay(&conn, opened.clone());
-        if until_handshake_deadline(&opened, HANDSHAKE_TIMEOUT, relay)
-            .await
-            .is_some()
-        {
-            let _ = tokio::time::timeout(CLOSE_GRACE, conn.closed()).await;
+        let ended = until_handshake_deadline(&opened, HANDSHAKE_TIMEOUT, relay).await;
+        if ended.is_none() || !opened.load(Ordering::SeqCst) {
+            return conn.close(CLOSE_REFUSED, b"handshake refused");
         }
+        let _ = tokio::time::timeout(CLOSE_GRACE, conn.closed()).await;
         conn.close(CLOSE_DONE, b"done");
     }
 
@@ -322,7 +326,18 @@ pub fn ensure_identity(state: &StateDir) -> Result<DeviceId> {
     Ok(id)
 }
 
+/// Binds the endpoint. Local discovery is an optimisation: when binding with mDNS fails (no multicast), it is
+/// retried once without it, because address hints and, in `internet` mode, discovery still work.
 async fn bind_endpoint(key: SecretKey, config: &NetConfig) -> Result<Endpoint> {
+    if config.mdns
+        && let Ok(endpoint) = bind_with(key.clone(), config, true).await
+    {
+        return Ok(endpoint);
+    }
+    bind_with(key, config, false).await
+}
+
+async fn bind_with(key: SecretKey, config: &NetConfig, mdns: bool) -> Result<Endpoint> {
     let builder = match config.mode {
         NetMode::Lan => {
             Endpoint::builder(presets::Minimal).portmapper_config(PortmapperConfig::Disabled)
@@ -330,7 +345,7 @@ async fn bind_endpoint(key: SecretKey, config: &NetConfig) -> Result<Endpoint> {
         NetMode::Internet => Endpoint::builder(presets::N0),
     };
     let mut builder = builder.secret_key(key).alpns(vec![ALPN.to_vec()]);
-    if config.mdns {
+    if mdns {
         builder = builder.address_lookup(MdnsAddressLookup::builder());
     }
     if let Some(port) = config.bind_port {
@@ -394,7 +409,14 @@ impl IrohNetwork {
             .build()
             .map_err(net_error)?;
         let shared = Shared::new(*key.public().as_bytes(), commands);
-        let (endpoint, router) = runtime.block_on(serve(key, &config, shared.clone()))?;
+        let served = runtime.block_on(serve(key, &config, shared.clone()));
+        let (endpoint, router) = match served {
+            Ok(parts) => parts,
+            Err(error) => {
+                runtime.shutdown_timeout(RUNTIME_GRACE);
+                return Err(error);
+            }
+        };
         Ok(IrohNetwork {
             runtime: Some(runtime),
             endpoint,
@@ -532,8 +554,34 @@ mod tests {
         );
         assert!(shared.install_secret([5; 32]).is_empty());
         assert!(shared.install_secret([5; 32]).is_empty());
-        assert_eq!(shared.install_secret([6; 32]).len(), 1);
+        let stale = shared.install_secret([6; 32]);
+        assert_eq!(stale.len(), 1);
+        stale[0].abort();
+        assert!(task.await.unwrap_err().is_cancelled());
         assert!(shared.install_secret([7; 32]).is_empty());
+    }
+
+    #[test]
+    fn should_abort_the_stale_tasks_when_refresh_gets_another_secret() {
+        let (_dir, state) = lan_state(r#"{"mode":"lan","mdns":false}"#);
+        let (commands, _inbox) = mpsc::channel();
+        let mut network = IrohNetwork::start(commands, &state).unwrap();
+        network.refresh([1; 32], &[], &[]);
+        let runtime = network.runtime.as_ref().unwrap();
+        let task = runtime.spawn(std::future::pending::<()>());
+        let task_entry = Task {
+            dialing: None,
+            abort: task.abort_handle(),
+        };
+        network
+            .shared
+            .lock()
+            .tasks
+            .insert(network.shared.next_id(), task_entry);
+        network.refresh([2; 32], &[], &[]);
+        let runtime = network.runtime.as_ref().unwrap();
+        assert!(runtime.block_on(task).unwrap_err().is_cancelled());
+        assert!(network.shared.lock().tasks.is_empty());
     }
 
     #[test]
@@ -595,5 +643,33 @@ mod tests {
         let addresses = network.addresses();
         assert!(!addresses.is_empty());
         assert!(addresses.iter().all(|address| address.port() == port));
+    }
+
+    fn default_state() -> (tempfile::TempDir, StateDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::at(dir.path()).unwrap();
+        (dir, state)
+    }
+
+    /// Starts the network, checks that it listens somewhere, and that `shutdown` is bounded.
+    fn assert_starts_and_stops_within_the_bound(state: &StateDir) {
+        let (commands, _inbox) = mpsc::channel();
+        let mut network = IrohNetwork::start(commands, state).unwrap();
+        assert!(!network.addresses().is_empty());
+        let begun = std::time::Instant::now();
+        network.shutdown();
+        assert!(begun.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn should_start_with_the_default_configuration() {
+        let (_dir, state) = default_state();
+        assert_starts_and_stops_within_the_bound(&state);
+    }
+
+    #[test]
+    fn should_start_in_lan_mode_with_local_discovery() {
+        let (_dir, state) = lan_state(r#"{"mode":"lan"}"#);
+        assert_starts_and_stops_within_the_bound(&state);
     }
 }

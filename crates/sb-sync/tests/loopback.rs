@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use iroh::endpoint::presets;
+use iroh::endpoint::{ConnectionError, VarInt, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use sb_sync::{ALPN, EngineHandle, PeerEntry, StateDir, Ticket, start_engine, to_hex};
 use tempfile::TempDir;
@@ -13,6 +13,10 @@ use tempfile::TempDir;
 const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 const FILE_LIMIT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(50);
+/// Mirrors `HANDSHAKE_TIMEOUT` (10 s) of the network adapter, which the crate keeps private.
+const HANDSHAKE_SECS: u64 = 10;
+/// The close code the adapter uses for a handshake it refuses.
+const CLOSE_REFUSED: u32 = 1;
 
 struct Rig {
     vault: TempDir,
@@ -123,9 +127,10 @@ fn should_sync_two_engines_over_loopback() {
 fn should_refuse_a_peer_with_another_secret() {
     let a = Rig::start();
     let ticket = a.loopback_ticket();
+    let a_id = to_hex(&ticket.device_id);
     let c = Rig::start();
     let entry = PeerEntry {
-        id: to_hex(&ticket.device_id),
+        id: a_id.clone(),
         addrs: ticket.addrs.iter().map(ToString::to_string).collect(),
     };
     StateDir::at(c.state.path())
@@ -134,11 +139,25 @@ fn should_refuse_a_peer_with_another_secret() {
         .unwrap();
     a.write("only-a.md", "a\n");
     c.write("only-c.md", "c\n");
+    // Positive control: A accepts a peer of its own group while C, which dials A on its ticks (assumed, not
+    // observed), stays refused.
+    let d = Rig::start();
+    d.engine.join(&ticket.to_string()).unwrap();
+    wait_until(CONNECT_LIMIT, "D to show A connected", || {
+        d.connected_to(&a_id)
+    });
+    assert_group_stays_apart(&a, &c, &d);
+}
+
+/// For 15 s, A never shows C connected, C shows nobody, and C's note and A's note never cross.
+fn assert_group_stays_apart(a: &Rig, c: &Rig, d: &Rig) {
+    let c_id = c.engine.status().unwrap().device_id;
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
-        assert!(!a.any_peer_connected(), "A shows a peer connected");
+        assert!(!a.connected_to(&c_id), "A shows C connected");
         assert!(!c.any_peer_connected(), "C shows a peer connected");
         assert!(!a.vault.path().join("only-c.md").exists());
+        assert!(!d.vault.path().join("only-c.md").exists());
         assert!(!c.vault.path().join("only-a.md").exists());
         std::thread::sleep(POLL);
     }
@@ -160,21 +179,31 @@ fn should_drop_a_silent_connection_and_keep_serving() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let (endpoint, connection) = runtime.block_on(connect_silently(&ticket));
     let started = Instant::now();
+    let closing = runtime.spawn(async move { (connection.closed().await, started.elapsed()) });
     let b = Rig::start();
     b.engine.join(&ticket.to_string()).unwrap();
     a.write("served.md", "still served\n");
-    wait_until(
-        CONNECT_LIMIT,
-        "A to serve B while the silent peer hangs",
-        || has_content(b.vault.path(), "served.md", "still served\n"),
-    );
-    let left = Duration::from_secs(12).saturating_sub(started.elapsed());
-    let closed = runtime.block_on(async { tokio::time::timeout(left, connection.closed()).await });
-    assert!(
-        closed.is_ok(),
-        "the silent connection was not dropped within 12 s"
-    );
+    wait_until(CONNECT_LIMIT, "A to serve B beside the silent peer", || {
+        has_content(b.vault.path(), "served.md", "still served\n")
+    });
+    let latest = Duration::from_secs(HANDSHAKE_SECS + 2).saturating_sub(started.elapsed());
+    let closed = runtime.block_on(async { tokio::time::timeout(latest, closing).await });
+    let (reason, after) = closed
+        .expect("the silent connection was not dropped")
+        .unwrap();
+    assert_dropped_as_refused(&reason, after);
     runtime.block_on(endpoint.close());
+}
+
+/// The silent connection ended by the 10 s deadline, not earlier, with the refusal code.
+fn assert_dropped_as_refused(reason: &ConnectionError, after: Duration) {
+    let earliest = Duration::from_secs(HANDSHAKE_SECS - 1);
+    assert!(after >= earliest, "dropped after {after:?}, too early");
+    let refused = VarInt::from_u32(CLOSE_REFUSED);
+    assert!(
+        matches!(reason, ConnectionError::ApplicationClosed(close) if close.error_code == refused),
+        "closed with {reason:?}"
+    );
 }
 
 async fn connect_silently(ticket: &Ticket) -> (Endpoint, iroh::endpoint::Connection) {
