@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use sb_core::Vault;
 use sb_sync::control::{self, Applied};
 use sb_sync::{
-    EngineEvent, EngineHandle, StateDir, Status, SyncError, Ticket, ensure_identity, start_engine,
-    to_hex, unix_now,
+    EngineEvent, EngineHandle, NetMode, StateDir, Status, SyncError, Ticket, ensure_identity,
+    start_engine, to_hex, unix_now,
 };
 use serde_json::json;
 
@@ -70,19 +70,29 @@ fn report_applied(verb: &str, applied: Applied, json: bool) -> Result<(), CliErr
 
 fn status(state: &StateDir, json: bool) -> Result<(), CliError> {
     match control::status(state, unix_now())? {
-        Some(status) => render::emit(json, &status, status_text),
+        Some(status) => {
+            let mode = state.config()?.mode;
+            render::emit(json, &status, |status| status_text(status, mode))
+        }
         None => render::emit(json, &json!({ "running": false }), |_| {
             "engine not running\n".to_owned()
         }),
     }
 }
 
-fn status_text(status: &Status) -> String {
+const NO_RELAY_YET: &str = "relay: none yet (if this lasts more than a minute, a firewall may be blocking sb; allow it outbound)\n";
+
+fn status_text(status: &Status, mode: NetMode) -> String {
     let mut text = format!("device {}\n", status.device_id);
     if status.addresses.is_empty() {
         text += "listening on: (no address yet)\n";
     } else {
         text += &format!("listening on {}\n", status.addresses.join(", "));
+    }
+    match (&status.relay, mode) {
+        (Some(relay), _) => text += &format!("relay: {relay}\n"),
+        (None, NetMode::Internet) => text += NO_RELAY_YET,
+        (None, NetMode::Lan) => {}
     }
     text += &format!("notes {}\n", status.notes);
     for peer in &status.peers {
@@ -343,7 +353,30 @@ mod tests {
 
     #[test]
     fn should_say_so_in_the_text_status_when_there_is_no_address_yet() {
-        let text = status_text(&Status::default());
+        let text = status_text(&Status::default(), NetMode::Lan);
         assert!(text.contains("listening on: (no address yet)\n"), "{text}");
+    }
+
+    #[test]
+    fn should_show_the_relay_in_internet_mode() {
+        let status = Status {
+            relay: Some("https://relay.example./".into()),
+            ..Status::default()
+        };
+        let text = status_text(&status, NetMode::Internet);
+        assert!(text.contains("relay: https://relay.example./\n"), "{text}");
+    }
+
+    #[test]
+    fn should_warn_about_a_firewall_when_internet_mode_has_no_relay_yet() {
+        let text = status_text(&Status::default(), NetMode::Internet);
+        let line = "relay: none yet (if this lasts more than a minute, a firewall may be blocking sb; allow it outbound)\n";
+        assert!(text.contains(line), "{text}");
+    }
+
+    #[test]
+    fn should_print_nothing_about_the_relay_in_lan_mode() {
+        let text = status_text(&Status::default(), NetMode::Lan);
+        assert!(!text.contains("relay"), "{text}");
     }
 }

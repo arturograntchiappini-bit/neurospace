@@ -29,6 +29,18 @@ impl Rig {
         Self::start_in(tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap())
     }
 
+    fn start_internet() -> Rig {
+        let (vault, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let config = r#"{"mode":"internet","mdns":false}"#;
+        fs::write(state.path().join("config.json"), config).unwrap();
+        let engine = start_engine(vault.path(), StateDir::at(state.path()).unwrap(), None).unwrap();
+        Rig {
+            vault,
+            state,
+            engine,
+        }
+    }
+
     fn start_in(vault: TempDir, state: TempDir) -> Rig {
         let config = state.path().join("config.json");
         fs::write(config, r#"{"mode":"lan","mdns":false}"#).unwrap();
@@ -220,6 +232,20 @@ async fn connect_silently(ticket: &Ticket) -> (Endpoint, iroh::endpoint::Connect
     }
     let connection = endpoint.connect(target, ALPN).await.unwrap();
     (endpoint, connection)
+}
+
+#[test]
+#[ignore = "needs outbound HTTPS and UDP to the public iroh infrastructure"]
+fn should_connect_in_internet_mode_by_device_id_alone() {
+    let a = Rig::start_internet();
+    let mut ticket: Ticket = a.engine.invite().unwrap().parse().unwrap();
+    ticket.addrs.clear();
+    let a_id = to_hex(&ticket.device_id);
+    let b = Rig::start_internet();
+    b.engine.join(&ticket.to_string()).unwrap();
+    wait_until(Duration::from_secs(60), "B to show A connected", || {
+        b.connected_to(&a_id)
+    });
 }
 
 #[test]

@@ -156,6 +156,9 @@ pub struct Status {
     /// Entries of the sync document that a peer made up or garbled, skipped as malformed.
     #[serde(default)]
     pub rejected_entries: usize,
+    /// The relay the network reached, if any: without one, `internet` mode cannot find peers by device id.
+    #[serde(default)]
+    pub relay: Option<String>,
     /// The most recent error, if any.
     pub last_error: Option<String>,
     /// Time of this update, in seconds since the Unix epoch.
@@ -854,11 +857,20 @@ mod tests {
                 reason: "not UTF-8".to_string(),
             }],
             rejected_entries: 2,
+            relay: Some("https://relay.example./".to_string()),
             last_error: Some("boom".to_string()),
             updated_unix: 1_700_000_000,
         };
         state.write_status(&status).unwrap();
         assert_eq!(state.read_status().unwrap(), Some(status));
+    }
+
+    #[test]
+    fn should_read_a_status_written_before_the_relay_field_existed() {
+        let (_tmp, state) = fresh();
+        let old = r#"{"pid":1,"device_id":"","addresses":[],"peers":[],"notes":0,"blocked":[],"last_error":null,"updated_unix":0}"#;
+        std::fs::write(state.file("status.json"), old).unwrap();
+        assert_eq!(state.read_status().unwrap().unwrap().relay, None);
     }
 
     #[test]

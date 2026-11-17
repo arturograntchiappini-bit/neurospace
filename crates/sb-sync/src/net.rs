@@ -456,6 +456,12 @@ impl Network for IrohNetwork {
         self.endpoint.addr().ip_addrs().copied().collect()
     }
 
+    fn relay(&self) -> Option<String> {
+        let addr = self.endpoint.addr();
+        let url = addr.relay_urls().next()?;
+        Some(url.to_string())
+    }
+
     fn refresh(&mut self, secret: Secret, peers: &[PeerEntry], connected: &[DeviceId]) {
         for stale in self.shared.install_secret(secret) {
             stale.abort();

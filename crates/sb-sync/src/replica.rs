@@ -70,6 +70,7 @@ pub struct Replica {
     sessions: BTreeMap<SessionId, Session>,
     outcome: Outcome,
     addresses: Vec<SocketAddr>,
+    relay: Option<String>,
     /// Mirrors the `fresh-join` marker: no reconciliation until a first state was imported.
     waiting: bool,
     /// Engine time at which the wait ends; set at the first tick when opened with the marker.
@@ -92,6 +93,7 @@ impl Replica {
             sessions: BTreeMap::new(),
             outcome: Outcome::default(),
             addresses: Vec::new(),
+            relay: None,
             waiting,
             wait_deadline: None,
             last_error,
@@ -196,6 +198,11 @@ impl Replica {
         self.addresses = addresses;
     }
 
+    /// Sets the relay the network reached, for status.
+    pub fn set_relay(&mut self, relay: Option<String>) {
+        self.relay = relay;
+    }
+
     /// A ticket for this device and the group.
     ///
     /// # Errors
@@ -227,6 +234,7 @@ impl Replica {
             notes: self.outcome.notes,
             blocked: self.outcome.blocked.clone(),
             rejected_entries: self.outcome.rejected_entries,
+            relay: self.relay.clone(),
             last_error: self.last_error.clone(),
             updated_unix: unix_now(),
         }
@@ -650,6 +658,17 @@ mod tests {
         doc.create_note(&NotePath::parse("y.md").unwrap(), "y\n")
             .unwrap();
         assert_eq!(fixture.replica.status().notes, 1);
+    }
+
+    #[test]
+    fn should_show_the_relay_the_host_reported() {
+        let mut fixture = fixture();
+        assert_eq!(fixture.replica.status().relay, None);
+        fixture
+            .replica
+            .set_relay(Some("https://relay.example./".into()));
+        let status = fixture.replica.status();
+        assert_eq!(status.relay.as_deref(), Some("https://relay.example./"));
     }
 
     #[test]

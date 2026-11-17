@@ -44,6 +44,8 @@ pub trait Network: Send + 'static {
     fn device_id(&self) -> DeviceId;
     /// The addresses this device listens on.
     fn addresses(&self) -> Vec<SocketAddr>;
+    /// The relay this device is connected to, once it has one (always `None` without relays).
+    fn relay(&self) -> Option<String>;
     /// Called on every tick with the current secret, the known peers and the peers that already have a session.
     /// When the secret differs from the previous call, abort every open session and every dial in flight.
     /// Session ids are never reused. All events of one session carry the same group tag.
@@ -544,6 +546,7 @@ impl Actor {
     fn tick(&mut self) -> bool {
         self.schedule.tick_done(Instant::now());
         self.replica.set_addresses(self.network.addresses());
+        self.replica.set_relay(self.network.relay());
         let was_waiting = self.replica.is_waiting_for_first_state();
         match self.replica.tick(self.started.elapsed()) {
             Ok(tick) => {
@@ -774,6 +777,9 @@ mod tests {
         fn addresses(&self) -> Vec<SocketAddr> {
             Vec::new()
         }
+        fn relay(&self) -> Option<String> {
+            None
+        }
         fn refresh(&mut self, secret: Secret, peers: &[PeerEntry], connected: &[DeviceId]) {
             let entry = (secret, peers.to_vec(), connected.to_vec());
             self.calls.lock().unwrap().refreshes.push(entry);
@@ -929,6 +935,18 @@ mod tests {
         let rig = start_rig([1; 32], &["a.md", "b.md"]);
         wait_until("two notes", || note_count(&rig) == 2);
         assert_eq!(rig.handle.status().unwrap().device_id, to_hex(&[1; 32]));
+        rig.handle.shutdown().unwrap();
+    }
+
+    #[test]
+    fn should_write_a_null_relay_to_status_json_when_the_network_has_none() {
+        let rig = start_rig([1; 32], &["a.md"]);
+        wait_until("the note", || note_count(&rig) == 1);
+        assert_eq!(rig.handle.status().unwrap().relay, None);
+        wait_until("status.json with a null relay", || {
+            let text = std::fs::read_to_string(rig.state.file("status.json")).unwrap_or_default();
+            text.contains("\"relay\":null")
+        });
         rig.handle.shutdown().unwrap();
     }
 
