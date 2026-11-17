@@ -1,5 +1,6 @@
 //! Follows the vault folder: rebuilds the index in the background after external changes.
 
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -14,7 +15,8 @@ use super::workspace::{ApplyOutcome, Workspace};
 pub const RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
-/// An index built when the workspace had saved this many times, or why it could not be built.
+/// An index built when the workspace's `write_generation` had this value, or why it could not
+/// be built.
 type Reload = (u64, Result<Index>);
 
 /// Watches the vault folder and rebuilds the index off the UI thread after a quiet moment.
@@ -23,6 +25,7 @@ pub struct Reloader {
     wake: Wake,
     last_change: Arc<Mutex<Option<Instant>>>,
     job: Option<Job<Reload>>,
+    last_job_lost: bool,
     _watcher: Option<VaultWatcher>,
 }
 
@@ -48,6 +51,7 @@ impl Reloader {
             wake,
             last_change: Arc::default(),
             job: None,
+            last_job_lost: false,
             _watcher: None,
         }
     }
@@ -83,7 +87,10 @@ impl Reloader {
             Some(Poll::Ready(done)) => done,
             Some(Poll::Lost) => {
                 self.job = None;
-                self.mark_changed(now);
+                // Retry once; a second loss in a row waits for a new change instead of looping.
+                if !mem::replace(&mut self.last_job_lost, true) {
+                    self.mark_changed(now);
+                }
                 return vec![Notice::error(
                     "Could not reload the vault: the reload stopped unexpectedly",
                 )];
@@ -91,6 +98,7 @@ impl Reloader {
             Some(Poll::Running) | None => return Vec::new(),
         };
         self.job = None;
+        self.last_job_lost = false;
         match built {
             Ok(index) => match workspace.apply_index(index, tag) {
                 ApplyOutcome::Applied(notices) => notices,
@@ -178,6 +186,18 @@ mod tests {
         let mut notices = reloader.tick(ws, at);
         notices.extend(finish_job(ws, reloader, at));
         notices
+    }
+
+    /// Moves a folder back when dropped, so a failing assertion never leaks it.
+    struct RenameBack {
+        from: PathBuf,
+        to: PathBuf,
+    }
+
+    impl Drop for RenameBack {
+        fn drop(&mut self) {
+            let _ = fs::rename(&self.from, &self.to);
+        }
     }
 
     fn conflict_files(dir: &TempDir) -> Vec<String> {
@@ -370,33 +390,115 @@ mod tests {
         );
     }
 
-    #[test]
+    /// Replaces the running job with one whose thread panics and ticks (all at `at`) until the
+    /// reloader reports it.
     #[allow(clippy::panic)]
-    fn should_report_error_and_retry_when_reload_thread_dies() {
-        let (_dir, mut ws, mut reloader) = setup(&[("n.md", "x")]);
-        let t0 = Instant::now();
+    fn lose_job(ws: &mut Workspace, reloader: &mut Reloader, at: Instant) -> Vec<Notice> {
         reloader.job = Some(Job::spawn(
             || -> Reload { panic!("worker failed on purpose") },
             || {},
         ));
         let deadline = Instant::now() + Duration::from_secs(10);
-        let mut notices = Vec::new();
-        while notices.is_empty() {
+        loop {
+            let notices = reloader.tick(ws, at);
+            if !notices.is_empty() {
+                return notices;
+            }
             assert!(Instant::now() < deadline, "the lost job was never noticed");
             std::thread::sleep(Duration::from_millis(20));
-            notices = reloader.tick(&mut ws, t0);
         }
-        assert_eq!(
-            notices,
-            [Notice::error(
-                "Could not reload the vault: the reload stopped unexpectedly"
-            )]
-        );
+    }
+
+    #[test]
+    fn should_report_error_and_retry_once_when_reload_thread_dies() {
+        let (_dir, mut ws, mut reloader) = setup(&[("n.md", "x")]);
+        let t0 = Instant::now();
+        let lost = [Notice::error(
+            "Could not reload the vault: the reload stopped unexpectedly",
+        )];
+        assert_eq!(lose_job(&mut ws, &mut reloader, t0), lost);
         assert!(!reloader.is_reloading());
-        reloader.tick(&mut ws, t0 + RELOAD_DEBOUNCE);
+        // The first loss keeps the change pending: one retry after the debounce.
+        let t1 = t0 + RELOAD_DEBOUNCE;
+        reloader.tick(&mut ws, t1);
         assert!(reloader.is_reloading(), "the change must stay pending");
-        finish_job(&mut ws, &mut reloader, t0 + RELOAD_DEBOUNCE);
+        // The retry dies too: no endless respawning without a new change.
+        assert_eq!(lose_job(&mut ws, &mut reloader, t1), lost);
+        let t2 = t1 + RELOAD_DEBOUNCE;
+        reloader.tick(&mut ws, t2);
+        assert!(!reloader.is_reloading(), "a second loss must not retry");
+        reloader.mark_changed(t2);
+        reloader.tick(&mut ws, t2 + RELOAD_DEBOUNCE);
+        assert!(reloader.is_reloading(), "a new change must reload again");
+        finish_job(&mut ws, &mut reloader, t2 + RELOAD_DEBOUNCE);
         assert!(!reloader.is_reloading());
+    }
+
+    #[test]
+    fn should_drop_stale_reload_when_note_selected_meanwhile() {
+        let (dir, mut ws, _reloader) = setup(&[("n.md", "old")]);
+        let tag = ws.write_generation();
+        let built_before_write = sb_core::Index::build(ws.vault()).unwrap();
+        fs::write(dir.path().join("n.md"), "new").unwrap();
+        ws.select(&p("n.md")).unwrap();
+        assert!(matches!(
+            ws.apply_index(built_before_write, tag),
+            ApplyOutcome::Stale
+        ));
+        let open = ws.open_note().unwrap();
+        assert_eq!((open.buffer.as_str(), open.saved.as_str()), ("new", "new"));
+        assert!(conflict_files(&dir).is_empty());
+    }
+
+    #[test]
+    fn should_adopt_without_conflict_when_buffer_equals_disk_text() {
+        let (dir, mut ws, mut reloader) = setup(&[("n.md", "old")]);
+        ws.select(&p("n.md")).unwrap();
+        ws.edit("same".into(), Instant::now());
+        fs::write(dir.path().join("n.md"), "same").unwrap();
+        let notices = reload(&mut ws, &mut reloader, Instant::now());
+        assert!(notices.is_empty(), "{notices:?}");
+        assert!(conflict_files(&dir).is_empty());
+        let open = ws.open_note().unwrap();
+        assert_eq!(
+            (open.buffer.as_str(), open.saved.as_str()),
+            ("same", "same")
+        );
+        assert!(!open.is_dirty() && !open.autosave_paused);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_keep_buffer_dirty_when_conflict_note_cannot_be_written() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, mut ws, _reloader) = setup(&[("n.md", "old")]);
+        ws.select(&p("n.md")).unwrap();
+        ws.edit("mine".into(), Instant::now());
+        fs::write(dir.path().join("n.md"), "theirs").unwrap();
+        let fresh = sb_core::Index::build(ws.vault()).unwrap();
+        let tag = ws.write_generation();
+        let set_mode = |mode| fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode));
+        set_mode(0o555).unwrap();
+        let probe = dir.path().join(".probe");
+        let can_write_anyway = fs::write(&probe, "").is_ok();
+        let outcome = (!can_write_anyway).then(|| ws.apply_index(fresh, tag));
+        set_mode(0o755).unwrap();
+        let Some(outcome) = outcome else {
+            eprintln!("skipped: the folder stays writable (running as root)");
+            fs::remove_file(&probe).unwrap();
+            return;
+        };
+        let ApplyOutcome::Applied(notices) = outcome else {
+            panic!("the index was current, not stale");
+        };
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].kind, NoticeKind::Error);
+        let open = ws.open_note().unwrap();
+        assert_eq!(open.path, p("n.md"));
+        assert_eq!((open.buffer.as_str(), open.saved.as_str()), ("mine", "old"));
+        assert!(open.is_dirty());
+        assert!(conflict_files(&dir).is_empty());
     }
 
     #[test]
@@ -426,8 +528,11 @@ mod tests {
         ws.edit("mine".into(), Instant::now());
         let moved = dir.path().with_extension("moved");
         fs::rename(dir.path(), &moved).unwrap();
+        let _restore = RenameBack {
+            from: moved,
+            to: dir.path().to_path_buf(),
+        };
         let notices = reload(&mut ws, &mut reloader, Instant::now());
-        fs::rename(&moved, dir.path()).unwrap();
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert_eq!(notices[0].kind, NoticeKind::Error);
         assert!(notices[0].text.starts_with("Could not reload the vault: "));

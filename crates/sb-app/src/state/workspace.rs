@@ -107,8 +107,9 @@ impl Workspace {
         self.open.as_ref()
     }
 
-    /// Counts every write the workspace itself makes: saves, creates, renames, deletes and
-    /// conflict notes. An index built before one of them is stale.
+    /// Counts every write the workspace makes (saves, creates, renames, deletes, conflict notes)
+    /// and every read that replaces the open note's saved text. An index built before one of
+    /// them is stale.
     pub fn write_generation(&self) -> u64 {
         self.write_generation
     }
@@ -121,6 +122,8 @@ impl Workspace {
     pub fn select(&mut self, path: &NotePath) -> Result<()> {
         self.save_or_stop()?;
         let text = ops::read_note(&self.vault, path.as_str())?;
+        // This read is newer than any rebuild already running.
+        self.write_generation += 1;
         self.open = Some(clean_note(path.clone(), text));
         Ok(())
     }
@@ -347,8 +350,12 @@ impl Workspace {
     }
 
     /// The note on disk differs from what was last read: the file wins, unsaved edits survive in
-    /// a conflict note.
+    /// a conflict note, unless the buffer already holds exactly what is on disk.
     fn adopt_disk_text(&mut self, path: NotePath, text: String) -> Option<Notice> {
+        if self.open.as_ref().is_some_and(|open| open.buffer == text) {
+            self.open = Some(clean_note(path, text));
+            return None;
+        }
         let kept_in = match self.keep_unsaved_edits() {
             Ok(kept_in) => kept_in,
             Err(notice) => return Some(notice),
@@ -534,6 +541,7 @@ mod tests {
     fn should_save_after_autosave_delay_only() {
         let (dir, mut ws) = workspace(&[("a.md", "old")]);
         ws.select(&p("a.md")).unwrap();
+        let before = ws.write_generation();
         let t0 = Instant::now();
         ws.edit("new text".into(), t0);
         assert!(!ws.autosave_due(t0 + Duration::from_millis(499)));
@@ -542,7 +550,7 @@ mod tests {
         assert_eq!(on_disk(&dir, "a.md"), "new text");
         assert!(!ws.open_note().unwrap().is_dirty());
         assert!(!ws.autosave_due(t0 + Duration::from_secs(60)));
-        assert_eq!(ws.write_generation(), 1);
+        assert_eq!(ws.write_generation(), before + 1);
         assert_eq!(ws.save().unwrap(), Saved::Nothing);
         let indexed = ws.index().get(&p("a.md").key()).unwrap();
         assert_eq!(indexed.content, "new text");
@@ -561,6 +569,7 @@ mod tests {
     #[test]
     fn should_keep_buffer_dirty_when_save_fails() {
         let (dir, mut ws) = open_dirty(&[("a.md", "old")], "a.md", "typed");
+        let before = ws.write_generation();
         let file = dir.path().join("a.md");
         set_readonly(&file, true);
         let failed = ws.save();
@@ -571,7 +580,7 @@ mod tests {
         let open = ws.open_note().unwrap();
         assert_eq!(open.buffer, "typed");
         assert!(open.is_dirty());
-        assert_eq!(ws.write_generation(), 0);
+        assert_eq!(ws.write_generation(), before);
         assert_eq!(ws.save().unwrap(), Saved::Written);
         assert_eq!(on_disk(&dir, "a.md"), "typed");
     }
@@ -579,13 +588,14 @@ mod tests {
     #[test]
     fn should_not_overwrite_external_change_when_saving() {
         let (dir, mut ws) = open_dirty(&[("a.md", "old")], "a.md", "mine");
+        let before = ws.write_generation();
         fs::write(dir.path().join("a.md"), "theirs").unwrap();
         assert_eq!(ws.save().unwrap(), Saved::ChangedOnDisk);
         assert_eq!(on_disk(&dir, "a.md"), "theirs");
         let open = ws.open_note().unwrap();
         assert_eq!(open.buffer, "mine");
         assert!(open.is_dirty());
-        assert_eq!(ws.write_generation(), 0);
+        assert_eq!(ws.write_generation(), before);
     }
 
     #[test]
