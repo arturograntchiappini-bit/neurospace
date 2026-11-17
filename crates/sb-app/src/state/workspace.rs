@@ -7,12 +7,24 @@ use sb_core::{
     CoreError, DEFAULT_SEARCH_LIMIT, Index, NotePath, Result, SearchHit, Vault, new_note_path, ops,
 };
 
+use super::notice::Notice;
 use super::tree::{Folder, build_tree};
 
 /// How long after the last keystroke the open note is saved.
 pub const AUTOSAVE_DELAY: Duration = Duration::from_millis(500);
 /// The most notes `quick_open` returns.
 pub const QUICK_OPEN_LIMIT: usize = 50;
+
+const CONFLICT_NAME_ATTEMPTS: usize = 5;
+
+/// What `Workspace::apply_index` did with a rebuilt index.
+#[derive(Debug)]
+pub enum ApplyOutcome {
+    /// The index was swapped in; the notices describe what happened to the open note.
+    Applied(Vec<Notice>),
+    /// A save happened since the rebuild started: the index was dropped.
+    Stale,
+}
 
 /// The note being edited.
 #[derive(Debug)]
@@ -108,13 +120,7 @@ impl Workspace {
     pub fn select(&mut self, path: &NotePath) -> Result<()> {
         self.save_or_stop()?;
         let text = ops::read_note(&self.vault, path.as_str())?;
-        self.open = Some(OpenNote {
-            path: path.clone(),
-            buffer: text.clone(),
-            saved: text,
-            last_edit: None,
-            autosave_paused: false,
-        });
+        self.open = Some(clean_note(path.clone(), text));
         Ok(())
     }
 
@@ -307,6 +313,88 @@ impl Workspace {
             .map_or(0, |open| open.buffer.split_whitespace().count())
     }
 
+    /// Swaps in an index rebuilt from disk and reconciles the open note with it. `Stale` (nothing
+    /// changed) when a save happened since `started_at_save`: that index may predate our own
+    /// write, so the caller must rebuild again.
+    pub fn apply_index(&mut self, index: Index, started_at_save: u64) -> ApplyOutcome {
+        if self.save_generation != started_at_save {
+            return ApplyOutcome::Stale;
+        }
+        self.index = index;
+        self.refresh_tree();
+        ApplyOutcome::Applied(self.reconcile_open_note().into_iter().collect())
+    }
+
+    fn reconcile_open_note(&mut self) -> Option<Notice> {
+        let open = self.open.as_ref()?;
+        let on_disk = self
+            .index
+            .get(&open.path.key())
+            .map(|entry| (entry.path.clone(), entry.content.clone()));
+        match on_disk {
+            Some((path, text)) if text == open.saved => {
+                self.open.as_mut()?.path = path;
+                None
+            }
+            Some((path, text)) => self.adopt_disk_text(path, text),
+            None => self.handle_note_gone(),
+        }
+    }
+
+    /// The note on disk differs from what was last read: the file wins, unsaved edits survive in
+    /// a conflict note.
+    fn adopt_disk_text(&mut self, path: NotePath, text: String) -> Option<Notice> {
+        let kept_in = match self.keep_unsaved_edits() {
+            Ok(kept_in) => kept_in,
+            Err(notice) => return Some(notice),
+        };
+        self.open = Some(clean_note(path.clone(), text));
+        kept_in.map(|conflict| {
+            Notice::info(format!(
+                "Your unsaved edits to {path} were kept in {conflict}"
+            ))
+        })
+    }
+
+    /// The open note is no longer in the index: close it, or when it has unsaved edits open the
+    /// conflict note that keeps them.
+    fn handle_note_gone(&mut self) -> Option<Notice> {
+        let path = self.open.as_ref()?.path.clone();
+        let kept_in = match self.keep_unsaved_edits() {
+            Ok(kept_in) => kept_in,
+            Err(notice) => return Some(notice),
+        };
+        let Some(conflict) = kept_in else {
+            self.open = None;
+            return Some(Notice::info(format!(
+                "{path} was removed or can no longer be read"
+            )));
+        };
+        let buffer = self.open.take()?.buffer;
+        self.open = Some(clean_note(conflict.clone(), buffer));
+        Some(Notice::info(format!(
+            "{path} was removed or can no longer be read; your unsaved edits are in {conflict}"
+        )))
+    }
+
+    /// Writes a dirty buffer to a conflict note; `None` when the note is clean. On failure the
+    /// buffer stays open and dirty and the error notice says so.
+    fn keep_unsaved_edits(&mut self) -> std::result::Result<Option<NotePath>, Notice> {
+        let Some(open) = self.open.as_ref().filter(|open| open.is_dirty()) else {
+            return Ok(None);
+        };
+        let (path, buffer) = (open.path.clone(), open.buffer.clone());
+        let created = create_conflict_note(&self.vault, &path, &buffer).map_err(|error| {
+            Notice::error(format!(
+                "Could not keep your unsaved edits to {path} in a conflict note ({error}); \
+                 they stay in the editor"
+            ))
+        })?;
+        self.index.upsert(created.clone(), buffer);
+        self.refresh_tree();
+        Ok(Some(created))
+    }
+
     fn is_open(&self, path: &NotePath) -> bool {
         self.open
             .as_ref()
@@ -316,6 +404,39 @@ impl Workspace {
     fn refresh_tree(&mut self) {
         self.tree = build_tree(self.index.notes().map(|entry| &entry.path));
     }
+}
+
+fn clean_note(path: NotePath, text: String) -> OpenNote {
+    OpenNote {
+        path,
+        buffer: text.clone(),
+        saved: text,
+        last_edit: None,
+        autosave_paused: false,
+    }
+}
+
+/// Creates `<stem> (conflict <8 hex>).md` next to `path` holding `text`. A name that exists is
+/// never replaced: new hex is drawn.
+fn create_conflict_note(vault: &Vault, path: &NotePath, text: &str) -> Result<NotePath> {
+    let folder = match path.folder() {
+        "" => String::new(),
+        folder => format!("{folder}/"),
+    };
+    for _ in 0..CONFLICT_NAME_ATTEMPTS {
+        let hex = sb_sync::random_bytes::<4>()
+            .map(|bytes| sb_sync::to_hex(&bytes))
+            .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
+        let name = format!("{folder}{} (conflict {hex}).md", path.stem());
+        match ops::create_note(vault, &name, text) {
+            Err(CoreError::AlreadyExists(_)) => {}
+            created => return created.map(|outcome| outcome.path),
+        }
+    }
+    Err(CoreError::AlreadyExists(format!(
+        "{folder}{} (conflict …).md",
+        path.stem()
+    )))
 }
 
 /// Replaces the file with the buffer if it still holds `saved`; `Some` is the stored path

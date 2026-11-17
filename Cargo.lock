@@ -5300,6 +5300,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "sb-core",
+ "sb-sync",
  "tempfile",
 ]
 
