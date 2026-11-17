@@ -70,6 +70,15 @@ pub struct NoteView {
     pub hash: Hash32,
 }
 
+/// What [`SyncDoc::resolve_claims`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resolved {
+    /// How many notes were tombstoned or moved.
+    pub changed: usize,
+    /// Whether a round found nothing left to settle before the round bound was reached.
+    pub settled: bool,
+}
+
 /// The CRDT document that mirrors the notes of one replica.
 pub struct SyncDoc {
     doc: LoroDoc,
@@ -218,19 +227,25 @@ impl SyncDoc {
         (claimed, rejected)
     }
 
+    /// The note as the document holds it now; `None` when its text carries a tombstone.
+    fn alive_view(&self, id: NoteId, path: NotePath) -> Option<NoteView> {
+        let text = self.text_of(&id);
+        let hash = content_hash(&text);
+        let dead = self.is_tombstoned(&id, &hash);
+        (!dead).then_some(NoteView {
+            id,
+            path,
+            text,
+            hash,
+        })
+    }
+
     /// Alive notes, ordered by id.
     pub fn alive_notes(&self) -> Vec<NoteView> {
-        let alive = self.claimed_paths().0.into_iter().filter_map(|(id, path)| {
-            let text = self.text_of(&id);
-            let hash = content_hash(&text);
-            let dead = self.is_tombstoned(&id, &hash);
-            (!dead).then_some(NoteView {
-                id,
-                path,
-                text,
-                hash,
-            })
-        });
+        let claimed = self.claimed_paths().0;
+        let alive = claimed
+            .into_iter()
+            .filter_map(|(id, path)| self.alive_view(id, path));
         alive.collect()
     }
 
@@ -247,6 +262,23 @@ impl SyncDoc {
         groups
     }
 
+    /// The keys that more than one alive note claims, with their claimants ordered by id. Text
+    /// is read and hashed only for the notes whose key is claimed more than once.
+    fn contested_claims(&self) -> Vec<Vec<NoteView>> {
+        let mut by_key: BTreeMap<NoteKey, Vec<(NoteId, NotePath)>> = BTreeMap::new();
+        for (id, path) in self.claimed_paths().0 {
+            by_key.entry(path.key()).or_default().push((id, path));
+        }
+        let contested = by_key.into_values().filter(|claims| claims.len() > 1);
+        let alive = contested.map(|claims| {
+            let views = claims.into_iter();
+            views
+                .filter_map(|(id, path)| self.alive_view(id, path))
+                .collect::<Vec<_>>()
+        });
+        alive.filter(|claimants| claimants.len() > 1).collect()
+    }
+
     /// One note per key: the one with the smallest id.
     pub fn view(&self) -> BTreeMap<NoteKey, NoteView> {
         let groups = self.claimants_by_key();
@@ -257,22 +289,31 @@ impl SyncDoc {
     }
 
     /// Settles every path claimed by more than one alive note (spec section 8.4).
-    /// Returns how many notes were tombstoned or moved.
-    pub fn resolve_claims(&mut self) -> Result<usize> {
+    pub fn resolve_claims(&mut self) -> Result<Resolved> {
+        self.resolve_within(MAX_RESOLVE_ROUNDS)
+    }
+
+    fn resolve_within(&mut self, rounds: usize) -> Result<Resolved> {
         let mut changed = 0;
-        for _ in 0..MAX_RESOLVE_ROUNDS {
+        for _ in 0..rounds {
             let round = self.resolve_round()?;
             if round == 0 {
-                break;
+                return Ok(Resolved {
+                    changed,
+                    settled: true,
+                });
             }
             changed += round;
         }
-        Ok(changed)
+        Ok(Resolved {
+            changed,
+            settled: false,
+        })
     }
 
     fn resolve_round(&mut self) -> Result<usize> {
         let mut changed = 0;
-        for claimants in self.claimants_by_key().values() {
+        for claimants in self.contested_claims() {
             let Some((keeper, others)) = claimants.split_first() else {
                 continue;
             };
@@ -511,15 +552,15 @@ mod tests {
     #[test]
     fn should_drop_a_duplicate_when_two_notes_claim_a_path_with_equal_text() {
         let (mut a, mut b) = claim_pair("x/Idea.md", "same\n", "x/idea.md", "same\n");
-        assert_eq!(a.resolve_claims().unwrap(), 1);
+        assert_eq!(a.resolve_claims().unwrap().changed, 1);
         let alive = a.alive_notes();
         assert_eq!(alive.len(), 1);
         assert_eq!(alive[0].id, id('0'));
         sync(&mut a, &mut b);
         b.resolve_claims().unwrap();
         assert_eq!(a.view(), b.view());
-        assert_eq!(a.resolve_claims().unwrap(), 0);
-        assert_eq!(b.resolve_claims().unwrap(), 0);
+        assert_eq!(a.resolve_claims().unwrap().changed, 0);
+        assert_eq!(b.resolve_claims().unwrap().changed, 0);
     }
 
     #[test]
@@ -538,7 +579,7 @@ mod tests {
     }
 
     fn resolve_until_stable(doc: &mut SyncDoc) {
-        while doc.resolve_claims().unwrap() > 0 {}
+        while doc.resolve_claims().unwrap().changed > 0 {}
     }
 
     #[test]
@@ -584,12 +625,21 @@ mod tests {
         let mut doc = SyncDoc::new();
         doc.create_note_with_id(&id('0'), &p(&stuck), "a").unwrap();
         doc.create_note_with_id(&id('f'), &p(&stuck), "b").unwrap();
-        assert_eq!(doc.resolve_claims().unwrap(), 1);
-        assert_eq!(doc.resolve_claims().unwrap(), 0);
+        assert_eq!(doc.resolve_claims().unwrap().changed, 1);
+        assert_eq!(doc.resolve_claims().unwrap().changed, 0);
         assert_eq!(
             texts(&doc)["conflict-ffffffffffffffffffffffffffffffff.md"],
             "b"
         );
+    }
+
+    #[test]
+    fn should_say_when_path_claims_did_not_settle_within_the_bound() {
+        let (mut doc, _) = claim_pair("x/Idea.md", "A\n", "x/idea.md", "B\n");
+        let cut_short = doc.resolve_within(1).unwrap();
+        assert_eq!((cut_short.changed, cut_short.settled), (1, false));
+        let rest = doc.resolve_within(1).unwrap();
+        assert_eq!((rest.changed, rest.settled), (0, true));
     }
 
     #[test]

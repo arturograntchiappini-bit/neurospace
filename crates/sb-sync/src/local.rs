@@ -23,6 +23,7 @@ pub const MAX_PASSES: u8 = 8;
 const MARKER_DIR: &str = ".secondbrain";
 const BASE_VERSION_FILE: &str = "base.version";
 const CHANGED_WHILE_SYNCING: &str = "changed while syncing";
+const UNSETTLED_CLAIMS: &str = "path claims did not settle in 16 rounds";
 
 /// The result of one file action: the reason when it was refused.
 type FileResult = std::result::Result<(), String>;
@@ -38,6 +39,10 @@ pub struct Outcome {
     pub blocked: Vec<BlockedNote>,
     /// How many passes ran.
     pub passes: u8,
+    /// How many notes the last pass saw in the document before it changed anything.
+    pub notes: usize,
+    /// A problem the round survived, in words for the status (never a secret or a note's text).
+    pub notice: Option<String>,
 }
 
 impl Outcome {
@@ -46,6 +51,8 @@ impl Outcome {
         self.disk_changed |= pass.disk_changed;
         self.blocked = pass.blocked;
         self.passes += pass.passes;
+        self.notes = pass.notes;
+        self.notice = pass.notice.or(self.notice.take());
     }
 }
 
@@ -56,6 +63,8 @@ struct StageRecord {
     version: Vec<u8>,
     doc_changed: bool,
     scan_blocked: Vec<BlockedNote>,
+    notes: usize,
+    notice: Option<String>,
 }
 
 /// A vault together with everything needed to reconcile it with the sync document.
@@ -143,8 +152,8 @@ impl LocalReplica {
         let scan = read(&self.vault)?;
         // A drive that goes away during the read phase turns unread notes into «deleted».
         require_marker(&self.vault)?;
-        self.doc.resolve_claims()?;
-        let steps = self.plan_steps(&scan);
+        let resolved = self.doc.resolve_claims()?;
+        let (steps, notes) = self.plan_steps(&scan);
         for action in steps.iter().filter_map(|step| step.doc.as_ref()) {
             apply_doc_action(&mut self.doc, action)?;
         }
@@ -157,6 +166,8 @@ impl LocalReplica {
             doc_changed: version != before,
             version,
             scan_blocked: blocked_notes(&scan),
+            notes,
+            notice: (!resolved.settled).then(|| UNSETTLED_CLAIMS.to_owned()),
         };
         Ok(steps)
     }
@@ -168,6 +179,8 @@ impl LocalReplica {
             doc_changed: self.stage.doc_changed,
             passes: 1,
             blocked: self.stage.scan_blocked.clone(),
+            notes: self.stage.notes,
+            notice: self.stage.notice.clone(),
             ..Outcome::default()
         };
         let mut base_changed = false;
@@ -203,16 +216,18 @@ impl LocalReplica {
         Ok(())
     }
 
-    fn plan_steps(&self, scan: &DiskScan) -> Vec<Step> {
+    /// The steps, and how many notes the document holds before they are applied.
+    fn plan_steps(&self, scan: &DiskScan) -> (Vec<Step>, usize) {
         let view = self.doc.view();
         let doc = &self.doc;
-        plan(&PlanInput {
+        let steps = plan(&PlanInput {
             disk: &scan.disk,
             view: &view,
             base: &self.base,
             tombstoned: &|id, hash| doc.is_tombstoned(id, hash),
             blocked_folders: &scan.blocked_folders,
-        })
+        });
+        (steps, view.len())
     }
 
     /// Whether a file was changed; a refused action becomes a blocked note.
@@ -569,6 +584,15 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(replica.doc.alive_notes().len(), 2);
+    }
+
+    #[test]
+    fn should_count_the_notes_the_last_pass_saw() {
+        let dirs = Dirs::new(&[("a.md", "A\n"), ("d/b.md", "B\n")]);
+        let mut replica = dirs.open();
+        assert_eq!(replica.reconcile().unwrap().notes, 2);
+        dirs.remove("a.md");
+        assert_eq!(replica.reconcile().unwrap().notes, 1);
     }
 
     #[test]

@@ -208,7 +208,8 @@ impl Replica {
         })
     }
 
-    /// What `status.json` shows now.
+    /// What `status.json` shows now. The note count is the one the last round saw, so it can
+    /// lag by a round: counting the document on every status request is too costly.
     pub fn status(&self) -> Status {
         let connected = self.connected_peers();
         // shortcut: an unreadable peers.json shows no peers; the engine meets the same error elsewhere.
@@ -222,7 +223,7 @@ impl Replica {
             device_id: to_hex(&self.device_id),
             addresses: self.addresses.iter().map(ToString::to_string).collect(),
             peers,
-            notes: self.local.doc.alive_notes().len(),
+            notes: self.outcome.notes,
             blocked: self.outcome.blocked.clone(),
             last_error: self.last_error.clone(),
             updated_unix: unix_now(),
@@ -305,6 +306,7 @@ impl Replica {
         self.local.state.save_peers(&[inviter])?;
         self.local.state.save_secret(&secret)?;
         self.waiting = true;
+        self.outcome.notes = 0;
         self.wait_deadline = Some(now + FRESH_JOIN_WAIT);
         Ok(Tick {
             close_sessions: self.drop_sessions(),
@@ -387,6 +389,9 @@ impl Replica {
             return Ok(());
         }
         self.outcome = self.local.reconcile()?;
+        if let Some(notice) = &self.outcome.notice {
+            self.last_error = Some(notice.clone());
+        }
         Ok(())
     }
 
@@ -404,18 +409,24 @@ impl Replica {
     }
 
     /// Local first, so pending local edits enter the document before the remote ones merge;
-    /// the first state of a group is imported without it, then the wait is over.
+    /// the first state of a group is imported without it, then the wait is over. A message
+    /// without updates changes nothing, so it costs no reconciliation (unless a wait ends).
     fn on_updates(
         &mut self,
         session: SessionId,
         peer_version: &[u8],
         updates: &[u8],
     ) -> Result<Vec<Outgoing>> {
-        self.reconcile_local()?;
+        let merges = !updates.is_empty() || self.waiting;
+        if merges {
+            self.reconcile_local()?;
+        }
         let pending = self.import_updates(updates)?;
         self.learn_version(session, peer_version)?;
         self.end_wait()?;
-        self.reconcile_local()?;
+        if merges {
+            self.reconcile_local()?;
+        }
         let mut outgoing = Vec::new();
         if pending {
             let message = Message::Version(self.local.doc.version());
@@ -554,6 +565,33 @@ mod tests {
         let replica =
             Replica::open(Vault::open(vault.path()).unwrap(), state_dir, [1; 32]).unwrap();
         assert!(replica.status().last_error.unwrap().contains("base.json"));
+    }
+
+    #[test]
+    fn should_not_reconcile_for_an_empty_updates_message() {
+        let mut fixture = fixture();
+        fixture.replica.session_opened(1, [2; 32]);
+        std::fs::write(fixture._vault.path().join("x.md"), "x\n").unwrap();
+        let empty = Message::Updates {
+            version: SyncDoc::new().version(),
+            updates: Vec::new(),
+        };
+        fixture.replica.on_message(1, empty).unwrap();
+        assert!(fixture.replica.local().doc.alive_notes().is_empty());
+        fixture.replica.reconcile().unwrap();
+        assert_eq!(fixture.replica.local().doc.alive_notes().len(), 1);
+    }
+
+    #[test]
+    fn should_count_notes_in_the_status_from_the_last_round() {
+        let mut fixture = fixture();
+        std::fs::write(fixture._vault.path().join("x.md"), "x\n").unwrap();
+        fixture.replica.reconcile().unwrap();
+        assert_eq!(fixture.replica.status().notes, 1);
+        let doc = &mut fixture.replica.local.doc;
+        doc.create_note(&NotePath::parse("y.md").unwrap(), "y\n")
+            .unwrap();
+        assert_eq!(fixture.replica.status().notes, 1);
     }
 
     #[test]

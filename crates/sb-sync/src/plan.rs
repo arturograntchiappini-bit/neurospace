@@ -1,7 +1,7 @@
 //! The reconciliation planner (spec section 8.5): a scan of the vault's files and one pure
 //! function that decides, per note key, what must change on disk, in the document and in the base.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use sb_core::{IgnoreReason, Ignored, NoteKey, NotePath, Vault};
 
@@ -216,10 +216,11 @@ pub fn plan(input: &PlanInput<'_>) -> Vec<Step> {
         .chain(input.view.keys())
         .chain(input.base.keys())
         .collect();
+    let captured = captured_hashes(input);
     let steps = keys
         .into_iter()
         .filter(|key| !is_blocked(input, key))
-        .filter_map(|key| row_step(input, key))
+        .filter_map(|key| row_step(input, &captured, key))
         .collect();
     let steps = pair_renames(steps, input, &LOCAL_RENAME);
     pair_renames(steps, input, &REMOTE_RENAME)
@@ -299,7 +300,7 @@ fn step(
     }
 }
 
-fn row_step(input: &PlanInput<'_>, key: &NoteKey) -> Option<Step> {
+fn row_step(input: &PlanInput<'_>, captured: &BTreeSet<Hash32>, key: &NoteKey) -> Option<Step> {
     let row = Row::new(input, key);
     let (disk, note, base) = (row.disk_hash(), row.note_hash(), row.base);
     if disk == note {
@@ -309,7 +310,7 @@ fn row_step(input: &PlanInput<'_>, key: &NoteKey) -> Option<Step> {
     match (disk != base, note != base) {
         (true, false) => document_follows_disk(input, &row),
         (false, true) => disk_follows_document(&row),
-        _ => both_changed(input, &row),
+        _ => both_changed(captured, &row),
     }
 }
 
@@ -366,9 +367,9 @@ fn create_file(note: &NoteView) -> DiskAction {
     }
 }
 
-fn both_changed(input: &PlanInput<'_>, row: &Row<'_>) -> Option<Step> {
+fn both_changed(captured: &BTreeSet<Hash32>, row: &Row<'_>) -> Option<Step> {
     let doc = match (&row.file, row.note) {
-        (Some(file), Some(_)) if already_captured(input, &file.hash) => None,
+        (Some(file), Some(_)) if captured.contains(&file.hash) => None,
         (Some(file), _) => Some(create_note(file)),
         (None, Some(note)) => {
             return Some(step(
@@ -383,15 +384,15 @@ fn both_changed(input: &PlanInput<'_>, row: &Row<'_>) -> Option<Step> {
     Some(step(row.key, doc, None, row.disk_hash()))
 }
 
-/// An alive note without file or base that already holds the content: an earlier round was
-/// interrupted after its document stage.
-fn already_captured(input: &PlanInput<'_>, hash: &Hash32) -> bool {
-    input.view.iter().any(|(key, note)| {
-        note.hash == *hash
-            && !input.disk.contains_key(key)
+/// The hashes of the alive notes without file or base: each holds content an earlier round
+/// captured in the document before it was interrupted.
+fn captured_hashes(input: &PlanInput<'_>) -> BTreeSet<Hash32> {
+    let captured = input.view.iter().filter(|(key, _)| {
+        !input.disk.contains_key(key)
             && input.base.get(key).is_none()
             && !under_blocked_folder(input, key)
-    })
+    });
+    captured.map(|(_, note)| note.hash).collect()
 }
 
 /// How one kind of rename is recognised among the steps and what it becomes.
@@ -489,19 +490,19 @@ fn into_rename(gone: &Step, appeared: &Step) -> Option<Step> {
 }
 
 /// Index pairs (gone, appeared) with equal content hashes, in key order, each step used once.
+/// Each `gone` step takes the first unused `appeared` step with its hash.
 fn pair_up(steps: &[Step], input: &PlanInput<'_>, kind: &RenameKind) -> Vec<(usize, usize)> {
-    let mut taken = vec![false; steps.len()];
+    let mut appeared_by_hash: BTreeMap<Hash32, VecDeque<usize>> = BTreeMap::new();
+    for (index, step) in steps.iter().enumerate() {
+        if let Some(hash) = (kind.appeared)(step, input) {
+            appeared_by_hash.entry(hash).or_default().push_back(index);
+        }
+    }
     let mut pairs = Vec::new();
     for (gone, gone_step) in steps.iter().enumerate() {
-        let Some(hash) = (kind.gone)(gone_step, input) else {
-            continue;
-        };
-        let found = steps
-            .iter()
-            .enumerate()
-            .find(|(index, step)| !taken[*index] && (kind.appeared)(step, input) == Some(hash));
-        if let Some((appeared, _)) = found {
-            taken[appeared] = true;
+        let hash = (kind.gone)(gone_step, input);
+        let queue = hash.and_then(|hash| appeared_by_hash.get_mut(&hash));
+        if let Some(appeared) = queue.and_then(VecDeque::pop_front) {
             pairs.push((gone, appeared));
         }
     }
@@ -681,6 +682,35 @@ mod tests {
         assert_eq!(path, "bin.md");
         assert!(reason.contains("UTF-8"), "reason was {reason:?}");
         assert!(scanned.blocked_folders.is_empty());
+    }
+
+    #[test]
+    fn should_pair_two_thousand_moved_notes_with_their_new_files() {
+        let count: usize = 2000;
+        let old = |i: usize| format!("old/n{i:04}.md");
+        let new = |i: usize| format!("new/n{i:04}.md");
+        let text = |i: usize| format!("note {i}\n");
+        let mut entries = Base::default();
+        let mut notes = Vec::new();
+        let mut disk = Vec::new();
+        for i in 0..count {
+            entries.set(key(&old(i)), h(&text(i)));
+            notes.push(NoteView {
+                id: NoteId::parse(&format!("{i:032x}")).unwrap(),
+                ..note('a', &old(i), &text(i))
+            });
+            disk.push(present(&new(i), &text(i)));
+        }
+        let steps = run(disk, notes, &entries, &[]);
+        assert_eq!(steps.len(), count);
+        for (i, step) in steps.iter().enumerate() {
+            let moved = DocAction::SetPath {
+                id: NoteId::parse(&format!("{i:032x}")).unwrap(),
+                path: npath(&new(i)),
+            };
+            assert_eq!(step.doc, Some(moved));
+            assert_eq!(step.clear_base, Some(key(&old(i))));
+        }
     }
 
     #[test]
