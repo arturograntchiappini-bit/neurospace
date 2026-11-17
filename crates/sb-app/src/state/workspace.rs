@@ -25,6 +25,20 @@ pub struct OpenNote {
     pub saved: String,
     /// When the buffer last changed; `Some` exactly while it differs from `saved`.
     pub last_edit: Option<Instant>,
+    /// Set by a failed save, cleared by the next edit: autosave waits for a keystroke.
+    pub autosave_paused: bool,
+}
+
+/// What `Workspace::save` did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Saved {
+    /// The note was clean; nothing to write.
+    Nothing,
+    /// The buffer replaced the file.
+    Written,
+    /// The file no longer holds what was last read (or is gone): nothing was written and the
+    /// buffer stays dirty, for the reload to keep in a conflict note.
+    ChangedOnDisk,
 }
 
 impl OpenNote {
@@ -89,15 +103,17 @@ impl Workspace {
     /// Opens a note, saving a dirty open one first; a failed save keeps the current note open.
     ///
     /// # Errors
-    /// The save error, or the read error for `path`.
+    /// The save error, `InvalidInput` when the open note changed on disk, or the read error for
+    /// `path`.
     pub fn select(&mut self, path: &NotePath) -> Result<()> {
-        self.save()?;
+        self.save_or_stop()?;
         let text = ops::read_note(&self.vault, path.as_str())?;
         self.open = Some(OpenNote {
             path: path.clone(),
             buffer: text.clone(),
             saved: text,
             last_edit: None,
+            autosave_paused: false,
         });
         Ok(())
     }
@@ -105,9 +121,9 @@ impl Workspace {
     /// Saves a dirty open note, then closes it; a failed save keeps it open.
     ///
     /// # Errors
-    /// The save error.
+    /// The save error, or `InvalidInput` when the open note changed on disk.
     pub fn close(&mut self) -> Result<()> {
-        self.save()?;
+        self.save_or_stop()?;
         self.open = None;
         Ok(())
     }
@@ -118,34 +134,60 @@ impl Workspace {
             return;
         };
         open.last_edit = (text != open.saved).then_some(now);
+        open.autosave_paused = false;
         open.buffer = text;
     }
 
-    /// True when the open note is dirty and `AUTOSAVE_DELAY` has passed since the last edit.
+    /// True when the open note is dirty, `AUTOSAVE_DELAY` has passed since the last edit and no
+    /// failed save is waiting for the next edit.
     pub fn autosave_due(&self, now: Instant) -> bool {
-        let last_edit = self.open.as_ref().and_then(|open| open.last_edit);
-        last_edit.is_some_and(|at| now.saturating_duration_since(at) >= AUTOSAVE_DELAY)
+        let Some(open) = self.open.as_ref().filter(|open| !open.autosave_paused) else {
+            return false;
+        };
+        open.last_edit
+            .is_some_and(|at| now.saturating_duration_since(at) >= AUTOSAVE_DELAY)
     }
 
-    /// Writes a dirty buffer to disk; `Ok(false)` when there was nothing to write. On error the
-    /// buffer and the dirty flag are untouched, so the text is never lost.
+    /// Writes a dirty buffer over the file, but only if the file still holds the text last read
+    /// or written (compare-and-swap): an external change is never replaced and a removed note is
+    /// never recreated. On `ChangedOnDisk` or an error nothing is written, the buffer and dirty
+    /// flag are untouched and autosave pauses until the next edit.
     ///
     /// # Errors
-    /// Whatever `ops::write_note` returns.
-    pub fn save(&mut self) -> Result<bool> {
+    /// Whatever `Vault::locate` or `Vault::replace_if` returns, except `NotFound`.
+    pub fn save(&mut self) -> Result<Saved> {
         let Some(open) = self.open.as_mut().filter(|open| open.is_dirty()) else {
-            return Ok(false);
+            return Ok(Saved::Nothing);
         };
-        let outcome = ops::write_note(&self.vault, open.path.as_str(), &open.buffer)?;
+        let stored = match swap_on_disk(&self.vault, open) {
+            Ok(Some(stored)) => stored,
+            Ok(None) => {
+                open.autosave_paused = true;
+                return Ok(Saved::ChangedOnDisk);
+            }
+            Err(error) => {
+                open.autosave_paused = true;
+                return Err(error);
+            }
+        };
         open.saved.clone_from(&open.buffer);
         open.last_edit = None;
-        open.path = outcome.path.clone();
-        self.index.upsert(outcome.path, open.buffer.clone());
+        open.path = stored.clone();
+        self.index.upsert(stored, open.buffer.clone());
         self.save_generation += 1;
-        if outcome.created {
-            self.refresh_tree();
+        Ok(Saved::Written)
+    }
+
+    /// Saves, and turns `ChangedOnDisk` into an error so the caller stops what it was doing.
+    fn save_or_stop(&mut self) -> Result<()> {
+        if self.save()? != Saved::ChangedOnDisk {
+            return Ok(());
         }
-        Ok(true)
+        let path = self.open.as_ref().map(|open| open.path.to_string());
+        Err(CoreError::InvalidInput(format!(
+            "{} changed on disk; it will reload in a moment",
+            path.unwrap_or_default()
+        )))
     }
 
     /// Creates an empty note called `name` (`.md` added when missing) in `folder` or the vault
@@ -165,7 +207,7 @@ impl Workspace {
     }
 
     fn create_at(&mut self, path: &str) -> Result<NotePath> {
-        self.save()?;
+        self.save_or_stop()?;
         let created = ops::create_note(&self.vault, path, "")?.path;
         self.index.upsert(created.clone(), String::new());
         self.refresh_tree();
@@ -180,10 +222,11 @@ impl Workspace {
     pub fn rename(&mut self, from: &NotePath, to: &str) -> Result<NotePath> {
         let to = with_markdown_extension(to)?;
         if self.is_open(from) {
-            self.save()?;
+            self.save_or_stop()?;
         }
         let outcome = ops::rename_note(&self.vault, from.as_str(), &to)?;
         self.index.remove(&outcome.from.key());
+        // An unreadable moved note stays out of the index; the next reload re-indexes it.
         if let Ok(text) = self.vault.read(&outcome.to) {
             self.index.upsert(outcome.to.clone(), text);
         }
@@ -275,6 +318,20 @@ impl Workspace {
     }
 }
 
+/// Replaces the file with the buffer if it still holds `saved`; `Some` is the stored path
+/// written to, `None` means it changed or vanished.
+fn swap_on_disk(vault: &Vault, open: &OpenNote) -> Result<Option<NotePath>> {
+    let Some(stored) = vault.locate(&open.path)? else {
+        return Ok(None);
+    };
+    let expected = open.saved.as_bytes();
+    match vault.replace_if(&stored, &open.buffer, &|bytes| bytes == expected) {
+        Ok(true) => Ok(Some(stored)),
+        Ok(false) | Err(CoreError::NotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn with_markdown_extension(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
@@ -315,6 +372,19 @@ mod tests {
         fs::read_to_string(dir.path().join(name)).unwrap()
     }
 
+    fn set_readonly(file: &Path, readonly: bool) {
+        let mut permissions = fs::metadata(file).unwrap().permissions();
+        permissions.set_readonly(readonly);
+        fs::set_permissions(file, permissions).unwrap();
+    }
+
+    fn open_dirty(files: &[(&str, &str)], open: &str, typed: &str) -> (TempDir, Workspace) {
+        let (dir, mut ws) = workspace(files);
+        ws.select(&p(open)).unwrap();
+        ws.edit(typed.into(), Instant::now());
+        (dir, ws)
+    }
+
     fn note_names(workspace: &Workspace) -> Vec<String> {
         workspace
             .index()
@@ -341,12 +411,12 @@ mod tests {
         ws.edit("new text".into(), t0);
         assert!(!ws.autosave_due(t0 + Duration::from_millis(499)));
         assert!(ws.autosave_due(t0 + Duration::from_millis(500)));
-        assert!(ws.save().unwrap());
+        assert_eq!(ws.save().unwrap(), Saved::Written);
         assert_eq!(on_disk(&dir, "a.md"), "new text");
         assert!(!ws.open_note().unwrap().is_dirty());
         assert!(!ws.autosave_due(t0 + Duration::from_secs(60)));
         assert_eq!(ws.save_generation(), 1);
-        assert!(!ws.save().unwrap());
+        assert_eq!(ws.save().unwrap(), Saved::Nothing);
         let indexed = ws.index().get(&p("a.md").key()).unwrap();
         assert_eq!(indexed.content, "new text");
     }
@@ -363,27 +433,131 @@ mod tests {
 
     #[test]
     fn should_keep_buffer_dirty_when_save_fails() {
-        let (dir, mut ws) = workspace(&[("a.md", "old")]);
-        ws.select(&p("a.md")).unwrap();
-        ws.edit("typed".into(), Instant::now());
+        let (dir, mut ws) = open_dirty(&[("a.md", "old")], "a.md", "typed");
         let file = dir.path().join("a.md");
-        let set_readonly = |readonly: bool| {
-            let mut permissions = fs::metadata(&file).unwrap().permissions();
-            permissions.set_readonly(readonly);
-            fs::set_permissions(&file, permissions).unwrap();
-        };
-        set_readonly(true);
+        set_readonly(&file, true);
         let failed = ws.save();
         let switched = ws.select(&p("a.md"));
         let closed = ws.close();
-        set_readonly(false);
+        set_readonly(&file, false);
         assert!(failed.is_err() && switched.is_err() && closed.is_err());
         let open = ws.open_note().unwrap();
         assert_eq!(open.buffer, "typed");
         assert!(open.is_dirty());
         assert_eq!(ws.save_generation(), 0);
-        assert!(ws.save().unwrap());
+        assert_eq!(ws.save().unwrap(), Saved::Written);
         assert_eq!(on_disk(&dir, "a.md"), "typed");
+    }
+
+    #[test]
+    fn should_not_overwrite_external_change_when_saving() {
+        let (dir, mut ws) = open_dirty(&[("a.md", "old")], "a.md", "mine");
+        fs::write(dir.path().join("a.md"), "theirs").unwrap();
+        assert_eq!(ws.save().unwrap(), Saved::ChangedOnDisk);
+        assert_eq!(on_disk(&dir, "a.md"), "theirs");
+        let open = ws.open_note().unwrap();
+        assert_eq!(open.buffer, "mine");
+        assert!(open.is_dirty());
+        assert_eq!(ws.save_generation(), 0);
+    }
+
+    #[test]
+    fn should_not_recreate_note_removed_on_disk() {
+        let (dir, mut ws) = open_dirty(&[("a.md", "old")], "a.md", "mine");
+        fs::remove_file(dir.path().join("a.md")).unwrap();
+        assert_eq!(ws.save().unwrap(), Saved::ChangedOnDisk);
+        assert!(!dir.path().join("a.md").exists());
+        assert!(ws.open_note().unwrap().is_dirty());
+    }
+
+    #[test]
+    fn should_pause_autosave_after_failed_save_until_next_edit() {
+        let t = Instant::now();
+        let (dir, mut ws) = open_dirty(&[("a.md", "old")], "a.md", "typed");
+        let file = dir.path().join("a.md");
+        set_readonly(&file, true);
+        let failed = ws.save();
+        set_readonly(&file, false);
+        assert!(failed.is_err());
+        assert!(!ws.autosave_due(t + Duration::from_secs(10)));
+        assert!(ws.open_note().unwrap().is_dirty());
+        let t2 = t + Duration::from_secs(11);
+        ws.edit("typed more".into(), t2);
+        assert!(ws.autosave_due(t2 + AUTOSAVE_DELAY));
+    }
+
+    #[test]
+    fn should_pause_autosave_when_note_changed_on_disk() {
+        let t = Instant::now();
+        let (dir, mut ws) = open_dirty(&[("a.md", "old")], "a.md", "mine");
+        fs::write(dir.path().join("a.md"), "theirs").unwrap();
+        assert_eq!(ws.save().unwrap(), Saved::ChangedOnDisk);
+        assert!(!ws.autosave_due(t + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn should_refuse_switch_when_open_note_changed_on_disk() {
+        let files = [("a.md", "old"), ("b.md", "other")];
+        let (dir, mut ws) = open_dirty(&files, "a.md", "mine");
+        fs::write(dir.path().join("a.md"), "theirs").unwrap();
+        let refused = ws.select(&p("b.md"));
+        assert!(matches!(refused, Err(CoreError::InvalidInput(_))));
+        let open = ws.open_note().unwrap();
+        assert_eq!((open.path.as_str(), open.buffer.as_str()), ("a.md", "mine"));
+        assert!(open.is_dirty());
+        assert!(matches!(ws.close(), Err(CoreError::InvalidInput(_))));
+        assert!(ws.open_note().is_some());
+    }
+
+    #[test]
+    fn should_stop_create_follow_and_rename_when_save_fails() {
+        let files = [("a.md", "[[b]]"), ("b.md", "")];
+        let (dir, mut ws) = open_dirty(&files, "a.md", "typed");
+        let file = dir.path().join("a.md");
+        set_readonly(&file, true);
+        let results = [
+            ws.create("New", None).map(drop),
+            ws.follow_link("b").map(drop),
+            ws.follow_link("missing").map(drop),
+            ws.rename(&p("a.md"), "z").map(drop),
+        ];
+        set_readonly(&file, false);
+        assert!(results.iter().all(Result::is_err), "{results:?}");
+        assert_eq!(note_names(&ws), ["a.md", "b.md"]);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        let open = ws.open_note().unwrap();
+        assert_eq!(
+            (open.path.as_str(), open.buffer.as_str()),
+            ("a.md", "typed")
+        );
+        assert!(open.is_dirty());
+    }
+
+    #[test]
+    fn should_keep_open_note_when_rename_target_exists() {
+        let files = [("a.md", "old"), ("b.md", "")];
+        let (_dir, mut ws) = open_dirty(&files, "a.md", "typed");
+        let refused = ws.rename(&p("a.md"), "b");
+        assert!(matches!(refused, Err(CoreError::AlreadyExists(_))));
+        let open = ws.open_note().unwrap();
+        assert_eq!(
+            (open.path.as_str(), open.buffer.as_str()),
+            ("a.md", "typed")
+        );
+    }
+
+    #[test]
+    fn should_keep_dirty_buffer_when_deleting_another_note() {
+        let files = [("a.md", "old"), ("b.md", "")];
+        let (dir, mut ws) = open_dirty(&files, "a.md", "typed");
+        ws.delete(&p("b.md")).unwrap();
+        assert!(!dir.path().join("b.md").exists());
+        let open = ws.open_note().unwrap();
+        assert_eq!(
+            (open.path.as_str(), open.buffer.as_str()),
+            ("a.md", "typed")
+        );
+        assert!(open.is_dirty());
     }
 
     #[test]
