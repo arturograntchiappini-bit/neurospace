@@ -83,15 +83,17 @@ impl Replica {
     /// Whatever `LocalReplica::open` reports.
     pub fn open(vault: Vault, state: StateDir, device_id: DeviceId) -> Result<Replica> {
         let waiting = state.fresh_join();
+        let mut local = LocalReplica::open(vault, state)?;
+        let last_error = local.notice.take();
         Ok(Replica {
-            local: LocalReplica::open(vault, state)?,
+            local,
             device_id,
             sessions: BTreeMap::new(),
             outcome: Outcome::default(),
             addresses: Vec::new(),
             waiting,
             wait_deadline: None,
-            last_error: None,
+            last_error,
         })
     }
 
@@ -541,6 +543,17 @@ mod tests {
             connected: true,
         };
         assert_eq!(fixture.replica.status().peers, [listed]);
+    }
+
+    #[test]
+    fn should_report_a_reset_base_in_the_status() {
+        let (vault, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::create_dir(vault.path().join(".secondbrain")).unwrap();
+        std::fs::write(state.path().join("base.json"), "{nope").unwrap();
+        let state_dir = StateDir::at(state.path()).unwrap();
+        let replica =
+            Replica::open(Vault::open(vault.path()).unwrap(), state_dir, [1; 32]).unwrap();
+        assert!(replica.status().last_error.unwrap().contains("base.json"));
     }
 
     #[test]

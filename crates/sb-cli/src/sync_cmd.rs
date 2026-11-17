@@ -41,7 +41,7 @@ fn join(vault: &Vault, ticket: &str, json: bool) -> Result<(), CliError> {
 }
 
 fn leave(vault: &Vault, json: bool) -> Result<(), CliError> {
-    let applied = control::leave(vault, &state_of(vault)?)?;
+    let applied = control::leave(&state_of(vault)?)?;
     report_applied("leave", applied, json)
 }
 

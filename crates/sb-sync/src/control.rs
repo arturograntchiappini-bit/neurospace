@@ -6,7 +6,7 @@ use std::time::Duration;
 use sb_core::Vault;
 
 use crate::error::{Result, SyncError};
-use crate::replica::{Replica, Tick, unix_now};
+use crate::replica::{Replica, unix_now};
 use crate::state::{PendingCommand, StateDir, Status, remove_if_exists};
 use crate::ticket::Ticket;
 
@@ -45,17 +45,21 @@ pub fn invite(state: &StateDir) -> Result<Ticket> {
 /// Failures of the state directory or the vault's state.
 pub fn join(vault: &Vault, state: &StateDir, ticket: &Ticket) -> Result<Applied> {
     let command = PendingCommand::Join(ticket.to_string());
-    apply_or_queue(vault, state, &command, |replica| {
-        replica.join(ticket, Duration::ZERO)
+    apply_or_queue(state, &command, || {
+        // The id is not used on this path: no session is opened.
+        let device_id = state.device_id()?.unwrap_or_default();
+        let mut replica = Replica::open(vault.clone(), state.clone(), device_id)?;
+        replica.join(ticket, Duration::ZERO).map(drop)
     })
 }
 
-/// Leaves the group now, or queues the command for the running engine.
+/// Leaves the group now, or queues the command for the running engine. Leaving needs neither
+/// the vault nor the document, so it works when either is broken.
 ///
 /// # Errors
-/// Failures of the state directory or the vault's state.
-pub fn leave(vault: &Vault, state: &StateDir) -> Result<Applied> {
-    apply_or_queue(vault, state, &PendingCommand::Leave(true), Replica::leave)
+/// Failures of the state directory.
+pub fn leave(state: &StateDir) -> Result<Applied> {
+    apply_or_queue(state, &PendingCommand::Leave(true), || state.clear_group())
 }
 
 /// The engine's status, or `None` when there is none or it is older than `STATUS_MAX_AGE_SECS`.
@@ -68,13 +72,12 @@ pub fn status(state: &StateDir, now_unix: u64) -> Result<Option<Status>> {
     Ok(state.read_status()?.filter(fresh))
 }
 
-/// Holding the engine lock means no engine runs, so the command is applied directly through
-/// a replica that is dropped, with the lock, afterwards.
+/// Holding the engine lock means no engine runs, so the command is applied directly, with the
+/// lock held until it is done.
 fn apply_or_queue(
-    vault: &Vault,
     state: &StateDir,
     command: &PendingCommand,
-    apply: impl FnOnce(&mut Replica) -> Result<Tick>,
+    apply: impl FnOnce() -> Result<()>,
 ) -> Result<Applied> {
     let _lock = match state.lock() {
         Ok(lock) => lock,
@@ -86,10 +89,7 @@ fn apply_or_queue(
     };
     // A command left from before would otherwise run on top of the new state at the next engine start.
     remove_if_exists(&state.file("command.pending"))?;
-    // The id is not used on this path: no session is opened.
-    let device_id = state.device_id()?.unwrap_or_default();
-    let mut replica = Replica::open(vault.clone(), state.clone(), device_id)?;
-    apply(&mut replica)?;
+    apply()?;
     Ok(Applied::Now)
 }
 
@@ -174,22 +174,44 @@ mod tests {
         assert_eq!(join(vault, state, &ticket()).unwrap(), Applied::Now);
         assert!(!state.file("command.pending").exists());
         state.write_pending(&stale).unwrap();
-        assert_eq!(leave(vault, state).unwrap(), Applied::Now);
+        assert_eq!(leave(state).unwrap(), Applied::Now);
         assert!(!state.file("command.pending").exists());
     }
 
     #[test]
     fn should_apply_or_queue_leave_the_same_way() {
         let fx = fixture();
-        let (vault, state) = (&fx.vault, &fx.state);
+        let state = &fx.state;
         state.save_secret(&[7; 32]).unwrap();
         {
             let _engine = state.lock().unwrap();
-            assert_eq!(leave(vault, state).unwrap(), Applied::Queued);
+            assert_eq!(leave(state).unwrap(), Applied::Queued);
             assert_eq!(pending(state), serde_json::json!({ "leave": true }));
             assert_eq!(state.secret().unwrap(), Some([7; 32]));
         }
-        assert_eq!(leave(vault, state).unwrap(), Applied::Now);
+        assert_eq!(leave(state).unwrap(), Applied::Now);
+        assert_eq!(state.secret().unwrap(), None);
+    }
+
+    #[test]
+    fn should_leave_even_when_the_document_is_corrupt() {
+        let fx = fixture();
+        let (vault, state) = (&fx.vault, &fx.state);
+        state.save_secret(&[7; 32]).unwrap();
+        std::fs::create_dir(vault.root().join(".secondbrain")).unwrap();
+        std::fs::write(state.file("doc.snap"), b"not a snapshot").unwrap();
+        assert_eq!(leave(state).unwrap(), Applied::Now);
+        assert_eq!(state.secret().unwrap(), None);
+        assert!(!state.file("doc.snap").exists());
+    }
+
+    #[test]
+    fn should_leave_even_when_the_vault_lost_its_marker_folder() {
+        let fx = fixture();
+        let state = &fx.state;
+        state.save_secret(&[7; 32]).unwrap();
+        std::fs::write(state.file("doc.log"), b"x").unwrap();
+        assert_eq!(leave(state).unwrap(), Applied::Now);
         assert_eq!(state.secret().unwrap(), None);
     }
 

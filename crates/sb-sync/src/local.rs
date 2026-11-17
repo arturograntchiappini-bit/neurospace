@@ -73,6 +73,8 @@ pub struct LocalReplica {
     stage: StageRecord,
     /// The version last written to `base.version`, if any.
     base_version: Option<Vec<u8>>,
+    /// What `open` repaired, for the host to show once in the status.
+    pub(crate) notice: Option<String>,
 }
 
 impl LocalReplica {
@@ -84,7 +86,7 @@ impl LocalReplica {
     pub fn open(vault: Vault, state: StateDir) -> Result<LocalReplica> {
         ensure_marker(&vault, &state)?;
         let (store, doc) = DocStore::open(&state)?;
-        let mut base = Base::load(&state)?;
+        let (mut base, notice) = load_base_or_empty(&state)?;
         let base_version = drop_base_without_history(&state, &doc, &mut base)?;
         Ok(LocalReplica {
             vault,
@@ -94,6 +96,7 @@ impl LocalReplica {
             store,
             stage: StageRecord::default(),
             base_version,
+            notice,
         })
     }
 
@@ -261,6 +264,21 @@ fn ensure_marker(vault: &Vault, state: &StateDir) -> Result<()> {
         return Err(SyncError::VaultMarkerMissing(marker));
     }
     std::fs::create_dir_all(&marker).map_err(io_error(&marker))
+}
+
+/// An unparsable `base.json` is read as an empty base and overwritten: like the base guard
+/// below, this cannot trash anything. The notice says so, for the status.
+fn load_base_or_empty(state: &StateDir) -> Result<(Base, Option<String>)> {
+    match Base::load(state) {
+        Err(SyncError::CorruptState { .. }) => {
+            let base = Base::default();
+            base.save(state)?;
+            let notice = "base.json was unreadable and was reset; notes that differ between \
+                          this device and the group may become conflict copies";
+            Ok((base, Some(notice.to_owned())))
+        }
+        loaded => loaded.map(|base| (base, None)),
+    }
 }
 
 /// A base the loaded document cannot vouch for would turn every note into a remote deletion.
@@ -551,6 +569,20 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(replica.doc.alive_notes().len(), 2);
+    }
+
+    #[test]
+    fn should_start_with_an_empty_base_when_base_json_is_garbage() {
+        let dirs = Dirs::new(&[("a.md", "A\n")]);
+        dirs.open().reconcile().unwrap();
+        std::fs::write(dirs.state_file("base.json"), "{nope").unwrap();
+        let mut replica = dirs.open();
+        assert!(replica.base.is_empty());
+        assert!(replica.notice.is_some());
+        replica.reconcile().unwrap();
+        expect_files(&replica, &[("a.md", "A\n")]);
+        assert!(trash(&replica).is_empty());
+        assert!(dirs.open().notice.is_none());
     }
 
     #[test]

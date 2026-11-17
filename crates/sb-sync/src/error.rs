@@ -35,7 +35,11 @@ pub enum SyncError {
         reason: String,
     },
     /// The vault folder lost the marker that tells it is the synced vault.
-    #[error("{} is missing: this does not look like the vault that was synced", .0.display())]
+    #[error(
+        "{} is missing: this does not look like the vault that was synced. If this is the vault, \
+         create an empty `.secondbrain` folder in it; otherwise run `sb sync leave`.",
+        .0.display()
+    )]
     VaultMarkerMissing(PathBuf),
     /// The sync document rejected an operation.
     #[error("sync document error: {0}")]
@@ -53,3 +57,19 @@ pub enum SyncError {
 
 /// Result alias used across `sb-sync`.
 pub type Result<T> = std::result::Result<T, SyncError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_tell_how_to_get_out_when_the_marker_is_missing() {
+        let marker = PathBuf::from("v").join(".secondbrain");
+        let text = SyncError::VaultMarkerMissing(marker).to_string();
+        assert!(
+            text.contains("create an empty `.secondbrain` folder"),
+            "{text}"
+        );
+        assert!(text.contains("`sb sync leave`"), "{text}");
+    }
+}
