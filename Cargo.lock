@@ -5299,6 +5299,8 @@ name = "sb-app"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "sb-core",
+ "tempfile",
 ]
 
 [[package]]
