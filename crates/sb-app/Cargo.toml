@@ -1,0 +1,20 @@
+[package]
+name = "sb-app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "sb_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "secondbrain"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "clipboard", "links", "accesskit"] }

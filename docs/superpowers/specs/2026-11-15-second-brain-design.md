@@ -598,7 +598,7 @@ Linux has no portable blur for a window (appendix A.5), so it always gets `Simul
 | Document surface | `#FFFFFF` | `#232325` |
 | Primary text | `#1C1C1E` | `#F5F5F7` |
 | Secondary text | `#3C3C43` | `#C8C8D2` |
-| Accent text (links, selected item) | `#0A45A8` | `#B4D0FF` |
+| Accent text (links, selected item) | `#0940A0` | `#B8D3FF` |
 | Hairline | white 35 % | white 8 % |
 | Top highlight | white 50 % | white 10 % |
 | Shadow | black 8 %, blur 24, offset y 6 | black 30 %, blur 24, offset y 6 |
