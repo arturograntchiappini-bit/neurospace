@@ -273,7 +273,7 @@ impl SecondBrainApp {
         if pressed(Key::N) {
             self.open_new_note_dialog();
         }
-        if pressed(Key::F) {
+        if self.view.dialog.is_none() && pressed(Key::F) {
             self.view.sidebars.left = true;
             ctx.memory_mut(|memory| memory.request_focus(sidebar::search_field_id()));
         }

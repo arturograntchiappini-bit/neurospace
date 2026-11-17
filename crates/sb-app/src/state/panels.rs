@@ -3,13 +3,15 @@
 
 use std::time::{Duration, Instant};
 
-use sb_core::{Backlink, IgnoreReason, NotePath, OutLink, SearchHit};
+use sb_core::{Backlink, IgnoreReason, Ignored, NotePath, OutLink, SearchHit};
 
 use super::notice::Notice;
 use super::workspace::Workspace;
 
 /// How long the search text must stay unchanged before the query runs.
 pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+/// The most ignored files the status strip lists; the rest are counted.
+pub const MAX_IGNORED_LISTED: usize = 20;
 
 /// What the user asked for in a side panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,13 +124,15 @@ pub struct InspectorData {
 pub struct InspectorCache {
     key: Option<(NotePath, u64)>,
     data: InspectorData,
+    computed: usize,
 }
 
 impl InspectorCache {
     /// The lists for the open note of `workspace`; empty when no note is open.
     pub fn data(&mut self, workspace: &Workspace) -> &InspectorData {
         let Some(open) = workspace.open_note() else {
-            *self = InspectorCache::default();
+            self.key = None;
+            self.data = InspectorData::default();
             return &self.data;
         };
         let revision = workspace.index_revision();
@@ -136,8 +140,14 @@ impl InspectorCache {
         if !fresh.is_some_and(|(path, at)| *path == open.path && *at == revision) {
             self.data = compute(workspace, &open.path);
             self.key = Some((open.path.clone(), revision));
+            self.computed += 1;
         }
         &self.data
+    }
+
+    /// How many times the lists were computed; stays put while the open note and index do.
+    pub fn computations(&self) -> usize {
+        self.computed
     }
 }
 
@@ -228,6 +238,8 @@ impl NoteDialog {
             DialogKind::Rename(from) => workspace.rename(from, &self.name),
         };
         self.error = done.as_ref().err().map(ToString::to_string);
+        // Enter took the focus off the field: take it back so the name can be retyped at once.
+        self.focused = false;
         done.is_ok()
     }
 }
@@ -235,6 +247,19 @@ impl NoteDialog {
 /// `n` followed by `one` when `n` is 1 and by `many` otherwise.
 pub fn counted(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// One line per ignored file, `path: reason`, at most `MAX_IGNORED_LISTED`, then «and k more».
+pub fn ignored_lines(ignored: &[Ignored]) -> Vec<String> {
+    let mut lines: Vec<String> = ignored
+        .iter()
+        .take(MAX_IGNORED_LISTED)
+        .map(|file| format!("{}: {}", file.path, ignore_reason_text(file.reason)))
+        .collect();
+    if ignored.len() > MAX_IGNORED_LISTED {
+        lines.push(format!("and {} more", ignored.len() - MAX_IGNORED_LISTED));
+    }
+    lines
 }
 
 /// Why a file was left out of the index, in words.
@@ -335,13 +360,13 @@ mod tests {
         assert_eq!(data.outgoing[0].resolved, Some(p("b.md")));
         assert_eq!(data.outgoing[1].resolved, None);
         assert_eq!(data.backlinks[0].from, p("b.md"));
-        // A recomputation allocates a new vector; an unchanged key hands back the old one.
-        let before = cache.data(&ws).backlinks.as_ptr();
-        assert_eq!(cache.data(&ws).backlinks.as_ptr(), before);
+        let computed = cache.computations();
+        cache.data(&ws);
+        assert_eq!(cache.computations(), computed);
         ws.rename(&p("b.md"), "c").unwrap();
         let data = cache.data(&ws);
-        assert_ne!(data.backlinks.as_ptr(), before);
         assert_eq!(data.backlinks[0].from, p("c.md"));
+        assert_eq!(cache.computations(), computed + 1);
     }
 
     #[test]
@@ -349,8 +374,10 @@ mod tests {
         let (dir, mut ws) = workspace(&[("a.md", "keep")]);
         let mut dialog = NoteDialog::new_note(None);
         dialog.name = "a".into();
+        dialog.focused = true;
         assert!(!dialog.confirm(&mut ws));
         assert!(dialog.error.as_deref().unwrap().contains("already exists"));
+        assert!(!dialog.focused, "the field must take the focus again");
         assert_eq!(fs::read_to_string(dir.path().join("a.md")).unwrap(), "keep");
         dialog.name = "b".into();
         assert!(dialog.confirm(&mut ws));
@@ -393,6 +420,21 @@ mod tests {
         );
         NoteAction::Rename(p("a.md")).run(&mut ws, &mut dialog);
         assert_eq!(dialog.unwrap().kind, DialogKind::Rename(p("a.md")));
+    }
+
+    #[test]
+    fn should_cap_ignored_list_and_count_the_rest() {
+        let files: Vec<Ignored> = (0..23)
+            .map(|n| Ignored {
+                path: format!("f{n}.md"),
+                reason: IgnoreReason::NotUtf8,
+            })
+            .collect();
+        let lines = ignored_lines(&files);
+        assert_eq!(lines.len(), MAX_IGNORED_LISTED + 1);
+        assert_eq!(lines[0], "f0.md: not UTF-8 text");
+        assert_eq!(lines[MAX_IGNORED_LISTED], "and 3 more");
+        assert_eq!(ignored_lines(&files[..2]).len(), 2);
     }
 
     #[test]

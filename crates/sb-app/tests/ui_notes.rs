@@ -95,8 +95,54 @@ fn should_show_error_in_dialog_when_name_taken() {
     press_enter(&mut f.harness);
     f.harness.get_by_label("Note name");
     f.harness.get_by_label_contains("already exists");
+    assert!(f.harness.get_by_label("Note name").is_focused());
     let text = fs::read_to_string(f.vault.join("a.md")).unwrap();
     assert_eq!(text, "Link to [[b]] and [[ghost]] #tag");
+}
+
+#[test]
+fn should_keep_dialog_and_files_when_rename_target_exists() {
+    let mut f = open_fixture();
+    f.harness.get_by_label("b").click_secondary();
+    f.harness.run();
+    click_label(&mut f.harness, "Rename…");
+    type_into(&mut f.harness, "New name", "a");
+    press_enter(&mut f.harness);
+    f.harness.get_by_label("New name");
+    f.harness.get_by_label_contains("already exists");
+    let text = fs::read_to_string(f.vault.join("a.md")).unwrap();
+    assert_eq!(text, "Link to [[b]] and [[ghost]] #tag");
+    assert!(f.vault.join("b.md").is_file());
+}
+
+#[test]
+fn should_not_move_focus_to_search_with_ctrl_f_while_dialog_is_open() {
+    let mut f = open_fixture();
+    f.harness.key_press_modifiers(Modifiers::COMMAND, Key::N);
+    f.harness.run();
+    f.harness.key_press_modifiers(Modifiers::COMMAND, Key::F);
+    f.harness.run();
+    assert!(!f.harness.get_by_label("Search notes").is_focused());
+    assert!(f.harness.get_by_label("Note name").is_focused());
+}
+
+#[test]
+fn should_keep_tab_focus_inside_open_dialog() {
+    let mut f = open_fixture();
+    f.harness.key_press_modifiers(Modifiers::COMMAND, Key::N);
+    f.harness.run();
+    f.harness.get_by_label("Cancel").focus();
+    f.harness.run();
+    let inside = ["Note name", "Create", "Cancel"];
+    for _ in 0..5 {
+        f.harness.key_press(Key::Tab);
+        f.harness.run();
+        assert!(
+            inside
+                .iter()
+                .any(|l| f.harness.get_by_label(l).is_focused())
+        );
+    }
 }
 
 #[test]
@@ -230,4 +276,82 @@ fn should_show_word_count_and_ignored_files() {
     click_label(&mut harness, "a");
     harness.get_by_label("6 words");
     harness.get_by_label("Sync off");
+}
+
+fn focus_row(harness: &mut Harness<'static, SecondBrainApp>, label: &str) {
+    harness.get_by_label(label).focus();
+    harness.run();
+}
+
+#[test]
+fn should_rename_focused_note_with_f2() {
+    let mut f = open_fixture();
+    focus_row(&mut f.harness, "b");
+    f.harness.key_press(Key::F2);
+    f.harness.run();
+    type_into(&mut f.harness, "New name", "b2");
+    press_enter(&mut f.harness);
+    assert!(f.vault.join("b2.md").is_file());
+    assert!(!f.vault.join("b.md").exists());
+}
+
+#[test]
+fn should_trash_focused_note_with_delete_key() {
+    let mut f = open_fixture();
+    focus_row(&mut f.harness, "b");
+    f.harness.key_press(Key::Delete);
+    f.harness.run();
+    assert!(!f.vault.join("b.md").exists());
+    f.harness.get_by_label("Moved to trash: b.md");
+}
+
+#[test]
+fn should_open_note_menu_with_menu_key() {
+    let mut f = open_fixture();
+    focus_row(&mut f.harness, "b");
+    f.harness.key_press(Key::Menu);
+    f.harness.run();
+    click_label(&mut f.harness, "Rename…");
+    f.harness.get_by_label("New name");
+}
+
+#[test]
+fn should_open_folder_menu_with_shift_f10() {
+    let mut f = open_fixture();
+    focus_row(&mut f.harness, "sub");
+    f.harness.key_press_modifiers(Modifiers::SHIFT, Key::F10);
+    f.harness.run();
+    click_label(&mut f.harness, "New note here…");
+    type_into(&mut f.harness, "Note name", "inner");
+    press_enter(&mut f.harness);
+    assert!(f.vault.join("sub/inner.md").is_file());
+}
+
+#[test]
+fn should_list_ignored_files_when_label_is_clicked() {
+    let scratch = tempfile::tempdir().unwrap();
+    let vault = make_vault(scratch.path());
+    fs::write(vault.join("bad.md"), [0xFF, 0xFE, 0xFD]).unwrap();
+    let (mut harness, _dir) = harness(Some(&vault));
+    run_until(&mut harness, "vault screen", |app| {
+        app.screen_name() == "vault"
+    });
+    harness.run();
+    click_label(&mut harness, "1 file ignored");
+    harness.get_by_label("bad.md: not UTF-8 text");
+}
+
+#[test]
+fn should_label_search_hit_without_snippet_by_its_title_only() {
+    let scratch = tempfile::tempdir().unwrap();
+    let vault = make_vault(scratch.path());
+    fs::write(vault.join("zebra.md"), "stripes").unwrap();
+    let (mut harness, _dir) = harness(Some(&vault));
+    run_until(&mut harness, "vault screen", |app| {
+        app.screen_name() == "vault"
+    });
+    harness.run();
+    type_into(&mut harness, "Search notes", "zebra");
+    wait_for_label(&mut harness, "zebra");
+    harness.get_by_label("zebra");
 }

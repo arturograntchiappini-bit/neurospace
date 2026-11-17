@@ -3,8 +3,8 @@
 use std::time::Instant;
 
 use eframe::egui::{
-    Align, Button, CentralPanel, Frame, Layout, Margin, Panel, Response, RichText, Role, Sense,
-    StrokeKind, Ui, WidgetInfo, pos2, vec2,
+    Align, Button, CentralPanel, Frame, Layout, Margin, Panel, Popup, Response, RichText, Role,
+    Sense, StrokeKind, Ui, WidgetInfo, pos2, vec2,
 };
 
 use crate::state::notice::{Notice, NoticeBoard, NoticeKind};
@@ -206,13 +206,11 @@ fn ignored_label(ui: &mut Ui, workspace: &Workspace) {
         return;
     }
     let text = panels::counted(ignored.len(), "file ignored", "files ignored");
-    ui.label(text).on_hover_ui(|ui| {
-        for file in ignored {
-            ui.label(format!(
-                "{}: {}",
-                file.path,
-                panels::ignore_reason_text(file.reason)
-            ));
+    // A button, not a label: keyboard and screen-reader users open the list too.
+    let button = flat_button(ui, &text);
+    Popup::menu(&button).show(|ui| {
+        for line in panels::ignored_lines(ignored) {
+            ui.label(line);
         }
     });
 }

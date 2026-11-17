@@ -12,8 +12,8 @@ pub mod workspace;
 pub use jobs::{Job, Poll};
 pub use notice::{INFO_NOTICE_TTL, Notice, NoticeBoard, NoticeKind};
 pub use panels::{
-    DialogKind, InspectorCache, InspectorData, NoteAction, NoteDialog, SEARCH_DEBOUNCE, SearchBox,
-    counted, ignore_reason_text,
+    DialogKind, InspectorCache, InspectorData, MAX_IGNORED_LISTED, NoteAction, NoteDialog,
+    SEARCH_DEBOUNCE, SearchBox, counted, ignore_reason_text, ignored_lines,
 };
 pub use reload::{RELOAD_DEBOUNCE, Reloader};
 pub use settings::{Settings, ThemeChoice};

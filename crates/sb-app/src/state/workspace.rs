@@ -262,11 +262,16 @@ impl Workspace {
         Ok(outcome.to)
     }
 
-    /// Moves a note to the vault's trash. An open copy is closed without saving.
+    /// Moves a note to the vault's trash. An open copy is saved first, so the trash holds the
+    /// typed text, and then closed.
     ///
     /// # Errors
-    /// Whatever `ops::delete_note` returns; then nothing changes.
+    /// The save error, `InvalidInput` when the open note changed on disk, or whatever
+    /// `ops::delete_note` returns; then nothing is deleted.
     pub fn delete(&mut self, path: &NotePath) -> Result<()> {
+        if self.is_open(path) {
+            self.save_or_stop()?;
+        }
         let outcome = ops::delete_note(&self.vault, path.as_str())?;
         self.write_generation += 1;
         self.index.remove(&outcome.path.key());
@@ -784,10 +789,26 @@ mod tests {
         ws.delete(&p("a.md")).unwrap();
         assert!(!dir.path().join("a.md").exists());
         let trash = dir.path().join(".secondbrain/trash");
-        assert_eq!(fs::read_dir(trash).unwrap().count(), 1);
+        let trashed: Vec<_> = fs::read_dir(trash).unwrap().collect();
+        assert_eq!(trashed.len(), 1);
+        let kept = fs::read_to_string(trashed[0].as_ref().unwrap().path()).unwrap();
+        assert_eq!(kept, "unsaved");
         assert!(ws.open_note().is_none());
         assert_eq!(note_names(&ws), ["b.md"]);
         assert_eq!(ws.tree().notes, [p("b.md")]);
+    }
+
+    #[test]
+    fn should_refuse_delete_when_open_note_changed_on_disk() {
+        let (dir, mut ws) = open_dirty(&[("a.md", "old")], "a.md", "mine");
+        fs::write(dir.path().join("a.md"), "theirs").unwrap();
+        assert!(matches!(
+            ws.delete(&p("a.md")),
+            Err(CoreError::InvalidInput(_))
+        ));
+        assert_eq!(on_disk(&dir, "a.md"), "theirs");
+        let open = ws.open_note().unwrap();
+        assert_eq!((open.path.as_str(), open.buffer.as_str()), ("a.md", "mine"));
     }
 
     #[test]
