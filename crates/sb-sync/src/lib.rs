@@ -20,7 +20,10 @@ pub use doc::{Hash32, NoteId, NoteView, SyncDoc, conflict_path, content_hash};
 pub use engine::{Command, DEBOUNCE, EngineEvent, EngineHandle, Network, RESCAN, TICK};
 pub use error::{Result, SyncError};
 pub use local::{LocalReplica, MAX_PASSES, Outcome};
-pub use net::{DIAL_TIMEOUT, HANDSHAKE_TIMEOUT, IrohNetwork, MAX_PENDING_HANDSHAKES, start_engine};
+pub use net::{
+    DIAL_TIMEOUT, HANDSHAKE_TIMEOUT, IrohNetwork, MAX_PENDING_HANDSHAKES, ensure_identity,
+    start_engine,
+};
 pub use plan::{
     BaseChange, DiskAction, DiskEntry, DiskScan, DiskState, DocAction, PlanInput, Step, plan, scan,
 };

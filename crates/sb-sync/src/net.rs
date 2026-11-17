@@ -310,6 +310,18 @@ fn load_or_create_key(state: &StateDir) -> Result<SecretKey> {
     Ok(key)
 }
 
+/// Makes sure the device key, the device id and the group secret exist, and returns the device id.
+/// The network takes its key from the same place, so an invitation and a running engine always agree.
+///
+/// # Errors
+/// Failures of the state directory.
+pub fn ensure_identity(state: &StateDir) -> Result<DeviceId> {
+    let id = *load_or_create_key(state)?.public().as_bytes();
+    state.save_device_id(&id)?;
+    state.ensure_secret()?;
+    Ok(id)
+}
+
 async fn bind_endpoint(key: SecretKey, config: &NetConfig) -> Result<Endpoint> {
     let builder = match config.mode {
         NetMode::Lan => {
@@ -557,6 +569,18 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let started = runtime.block_on(async { IrohNetwork::start(commands, &state) });
         assert!(matches!(started, Err(SyncError::Net(_))));
+    }
+
+    #[test]
+    fn should_create_the_identity_once_and_start_the_network_with_it() {
+        let (_dir, state) = lan_state(r#"{"mode":"lan","mdns":false}"#);
+        let id = ensure_identity(&state).unwrap();
+        assert_eq!(ensure_identity(&state).unwrap(), id);
+        assert_eq!(state.device_id().unwrap(), Some(id));
+        assert!(state.secret().unwrap().is_some());
+        let (commands, _inbox) = mpsc::channel();
+        let network = IrohNetwork::start(commands, &state).unwrap();
+        assert_eq!(network.device_id(), id);
     }
 
     #[test]

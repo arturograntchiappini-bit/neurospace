@@ -4,3 +4,4 @@ pub mod cli;
 pub mod commands;
 pub mod mcp;
 pub mod render;
+pub mod sync_cmd;

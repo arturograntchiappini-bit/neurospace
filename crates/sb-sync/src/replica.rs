@@ -195,14 +195,24 @@ impl Replica {
         let connected = self.connected_peers();
         // shortcut: an unreadable peers.json shows no peers; the engine meets the same error elsewhere.
         let known = self.local.state.peers().unwrap_or_default();
+        let mut peers: Vec<PeerStatus> = known
+            .into_iter()
+            .map(|entry| peer_status(entry, &connected))
+            .collect();
+        // A device that dialled in is a member too, even if no one has told us about it yet.
+        for id in connected.iter().map(|id| to_hex(id)) {
+            if !peers.iter().any(|peer| peer.id == id) {
+                peers.push(PeerStatus {
+                    id,
+                    connected: true,
+                });
+            }
+        }
         Status {
             pid: std::process::id(),
             device_id: to_hex(&self.device_id),
             addresses: self.addresses.iter().map(ToString::to_string).collect(),
-            peers: known
-                .into_iter()
-                .map(|entry| peer_status(entry, &connected))
-                .collect(),
+            peers,
             notes: self.local.doc.alive_notes().len(),
             blocked: self.outcome.blocked.clone(),
             last_error: self.last_error.clone(),
@@ -506,6 +516,18 @@ mod tests {
     fn durable_notes(fixture: &Fixture) -> usize {
         let state = StateDir::at(fixture.state.path()).unwrap();
         DocStore::open(&state).unwrap().1.alive_notes().len()
+    }
+
+    #[test]
+    fn should_list_a_connected_peer_in_the_status_although_it_is_not_in_peers_json() {
+        let mut fixture = fixture();
+        fixture.replica.session_opened(1, [2; 32]);
+        let peers = fixture.replica.status().peers;
+        let expected = PeerStatus {
+            id: to_hex(&[2; 32]),
+            connected: true,
+        };
+        assert_eq!(peers, [expected]);
     }
 
     #[test]

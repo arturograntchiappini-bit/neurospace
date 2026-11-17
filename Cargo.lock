@@ -3513,6 +3513,7 @@ dependencies = [
  "clap",
  "rmcp",
  "sb-core",
+ "sb-sync",
  "schemars",
  "serde",
  "serde_json",

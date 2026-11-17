@@ -7,7 +7,7 @@ use sb_core::ops;
 use sb_core::{CoreError, Vault};
 
 use crate::cli::{Cli, Command};
-use crate::{mcp, render};
+use crate::{mcp, render, sync_cmd};
 
 /// Everything that makes a command fail.
 #[derive(Debug, thiserror::Error)]
@@ -24,6 +24,9 @@ pub enum CliError {
     /// The MCP server stopped on a protocol failure.
     #[error("MCP server failed: {0}")]
     Mcp(String),
+    /// Sync failed.
+    #[error(transparent)]
+    Sync(#[from] sb_sync::SyncError),
 }
 
 /// Runs the parsed command line.
@@ -45,6 +48,7 @@ pub fn run(cli: Cli) -> Result<(), CliError> {
         Command::Graph { around, depth } => graph(&vault, around.as_deref(), depth, json),
         Command::Tags => render::emit(json, &ops::list_tags(&vault)?, render::tags),
         Command::Mcp => mcp::serve_stdio(vault),
+        Command::Sync { action } => sync_cmd::run(&vault, action, json),
     }
 }
 

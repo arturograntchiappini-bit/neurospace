@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `sb` command line: `list`, `read`, `write`, `append`, `delete`, `rename`, `search`, `links`, `graph` and `tags`, with text or `--json` output.
 - `sb mcp`: an MCP stdio server exposing the note operations as ten tools (`list_notes`, `read_note`, `write_note`, `append_to_note`, `delete_note`, `rename_note`, `search_notes`, `get_links`, `get_graph`, `list_tags`) for AI agents.
+- Sync engine (`sb-sync`): peer-to-peer sync of a vault between devices over `iroh`, with no server of its own; a CRDT document merges edits line by line, concurrent differences become conflict copies, removals go to the vault's trash, and a file that cannot be read is blocked instead of deleted. Modes `internet` (default) and `lan`.
+- `sb sync run`, `invite`, `join <TICKET>`, `leave` and `status`: pair devices with a ticket, run the engine in the foreground (log on stderr, clean stop on Ctrl+C or SIGTERM) and inspect it, with `--json` output.
 
 ### Changed
 
@@ -27,3 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - One folder that could not be listed (access denied) made list, search, links, graph and tags fail; it is now reported as ignored and the scan goes on.
 - Two MCP tool calls at the same moment could lose text (`append_to_note` on the same note); tool calls now run one at a time.
 - A `[[Note#Heading\|Alias]]` link inside a table kept a backslash in its heading.
+
+### Security
+
+- The sync state files (device key, group secret, history) are readable by their owner only on Linux.
+- A sync ticket contains the group secret and is a password: whoever holds it can join the group and read and write every note. `sb sync run` never logs a ticket or the secret.

@@ -87,4 +87,28 @@ pub enum Command {
     Tags,
     /// Run the MCP server on stdio.
     Mcp,
+    /// Sync the vault with your other devices, peer to peer.
+    Sync {
+        /// What to do.
+        #[command(subcommand)]
+        action: SyncAction,
+    },
+}
+
+/// One `sb sync` command.
+#[derive(Debug, Subcommand)]
+pub enum SyncAction {
+    /// Run the sync engine in the foreground until Ctrl+C or until the vault leaves its group.
+    Run,
+    /// Print a ticket that lets another device join this vault's group; the ticket is a password.
+    Invite,
+    /// Join the group of a ticket from another device.
+    Join {
+        /// The ticket printed by `sb sync invite`.
+        ticket: String,
+    },
+    /// Leave the group; the notes stay where they are.
+    Leave,
+    /// Show the running engine's status.
+    Status,
 }

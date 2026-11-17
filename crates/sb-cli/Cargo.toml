@@ -15,11 +15,12 @@ path = "src/main.rs"
 clap.workspace = true
 rmcp = { version = "3.10", default-features = false, features = ["server", "macros", "transport-io"] }
 sb-core = { path = "../sb-core" }
+sb-sync = { path = "../sb-sync" }
 schemars = "1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { version = "1", features = ["rt", "macros", "io-std"] }
+tokio = { version = "1", features = ["rt", "macros", "io-std", "signal"] }
 
 [dev-dependencies]
 rmcp = { version = "3.10", default-features = false, features = ["server", "macros", "client"] }
