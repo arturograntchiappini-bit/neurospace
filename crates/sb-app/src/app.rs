@@ -9,6 +9,7 @@ use eframe::egui::{
 use sb_core::Result as CoreResult;
 
 use crate::platform;
+use crate::state::welcome::WelcomeForm;
 use crate::state::{
     InspectorCache, Job, NoteAction, NoteDialog, Notice, NoticeBoard, Poll, SearchBox, Settings,
     ThemeChoice, Workspace,
@@ -16,8 +17,21 @@ use crate::state::{
 use crate::ui::menu::{self, MenuOutcome};
 use crate::ui::shell::{self, Sidebars, TopBar};
 use crate::ui::theme::{self, Material, Palette};
-use crate::ui::welcome::{self, WelcomeForm};
+use crate::ui::welcome;
 use crate::ui::{dialogs, inspector, sidebar};
+
+/// One-time setup of a context: fonts, the styles of both themes and the zoom-key rule.
+///
+/// The application calls it in `new`; a test harness whose context is not the one given to
+/// `new` calls it through its context setup.
+pub fn prepare_context(ctx: &Context) {
+    theme::install_fonts(ctx);
+    ctx.options_mut(|options| options.zoom_with_keyboard = false);
+    for theme in [Theme::Light, Theme::Dark] {
+        // The glass alpha is not part of a style, so every material gives the same result.
+        theme::apply(ctx, theme, &theme::palette(theme, Material::Opaque));
+    }
+}
 
 /// How the application starts.
 #[derive(Clone, Debug)]
@@ -64,7 +78,7 @@ pub struct SecondBrainApp {
 impl SecondBrainApp {
     /// Loads the settings and starts opening `options.vault` or else the last vault.
     pub fn new(ctx: &Context, options: AppOptions) -> SecondBrainApp {
-        theme::install_fonts(ctx);
+        prepare_context(ctx);
         let settings = Settings::load(&options.settings_path);
         let start = options.vault.or_else(|| settings.last_vault.clone());
         let mut app = SecondBrainApp {
@@ -159,15 +173,11 @@ impl SecondBrainApp {
         }
     }
 
-    /// Pushes theme, zoom and styles to `ctx`; cheap enough to run every frame.
+    /// Pushes the theme choice and the text size to `ctx`.
     fn sync_context(&self, ctx: &Context) {
-        ctx.options_mut(|options| options.zoom_with_keyboard = false);
         ctx.set_theme(theme_preference(self.settings.theme));
         if ctx.zoom_factor() != self.settings.zoom {
             ctx.set_zoom_factor(self.settings.zoom);
-        }
-        for theme in [Theme::Light, Theme::Dark] {
-            theme::apply(ctx, theme, &theme::palette(theme, self.material()));
         }
     }
 
@@ -233,7 +243,7 @@ impl SecondBrainApp {
             sidebars: &mut self.view.sidebars,
             settings: &mut self.settings,
         };
-        let outcome = shell::top_bar(ui, palette, bar);
+        let bar_outcome = shell::top_bar(ui, palette, bar);
         shell::status_strip(ui, palette, &mut self.notices, workspace);
         let action = show_panels(ui, palette, workspace, &mut self.view);
         shell::document_area(ui, palette);
@@ -242,7 +252,16 @@ impl SecondBrainApp {
         if let Some(notice) = notice {
             self.notices.post(notice, Instant::now());
         }
-        self.apply_menu(outcome);
+        if bar_outcome.new_note {
+            self.open_new_note_dialog();
+        }
+        self.apply_menu(bar_outcome.menu);
+    }
+
+    fn open_new_note_dialog(&mut self) {
+        if self.view.dialog.is_none() {
+            self.view.dialog = Some(NoteDialog::new_note(None));
+        }
     }
 
     /// Ctrl+N opens the «New note» dialog; Ctrl+F focuses the search field.
@@ -251,8 +270,8 @@ impl SecondBrainApp {
             let shortcut = KeyboardShortcut::new(Modifiers::COMMAND, key);
             ctx.input_mut(|input| input.consume_shortcut(&shortcut))
         };
-        if pressed(Key::N) && self.view.dialog.is_none() {
-            self.view.dialog = Some(NoteDialog::new_note(None));
+        if pressed(Key::N) {
+            self.open_new_note_dialog();
         }
         if pressed(Key::F) {
             self.view.sidebars.left = true;

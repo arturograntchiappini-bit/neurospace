@@ -212,6 +212,10 @@ fn set_visuals(style: &mut Style, p: &Palette) {
     v.widgets.hovered.expansion = 0.0;
     v.widgets.hovered.weak_bg_fill = p.hover.to_color32();
     v.widgets.hovered.bg_fill = p.hover.to_color32();
+    // egui draws keyboard focus with the `active` visuals: the ring is a 2 px accent stroke.
+    v.widgets.active.bg_stroke = Stroke::new(2.0, p.accent.to_color32());
+    v.widgets.active.weak_bg_fill = p.selection.to_color32();
+    v.widgets.open.weak_bg_fill = p.selection.to_color32();
     let text = Stroke::new(1.0, p.text_primary.to_color32());
     for widget in [
         &mut v.widgets.noninteractive,
@@ -376,7 +380,12 @@ mod tests {
         for &(name, surface) in &glass {
             let description = format!("accent on selection over glass over {name}");
             pairs.push((description, p.accent, composite(p.selection, surface)));
+            let description = format!("primary on selection over glass over {name}");
+            pairs.push((description, p.text_primary, composite(p.selection, surface)));
         }
+        let on_document = composite(p.selection, p.document);
+        let description = "primary on selection over document".to_owned();
+        pairs.push((description, p.text_primary, on_document));
         pairs
     }
 
@@ -403,6 +412,22 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn should_draw_focus_ring_and_pressed_fills_from_the_palette() {
+        let ctx = Context::default();
+        for theme in THEMES {
+            let p = palette(theme, Material::Simulated);
+            apply(&ctx, theme, &p);
+            let style = ctx.style_of(theme);
+            let widgets = &style.visuals.widgets;
+            let ring = Stroke::new(2.0, p.accent.to_color32());
+            assert_eq!(widgets.active.bg_stroke, ring, "{theme:?}: focus ring");
+            let fill = p.selection.to_color32();
+            assert_eq!(widgets.active.weak_bg_fill, fill, "{theme:?}: focused fill");
+            assert_eq!(widgets.open.weak_bg_fill, fill, "{theme:?}: open menu fill");
         }
     }
 

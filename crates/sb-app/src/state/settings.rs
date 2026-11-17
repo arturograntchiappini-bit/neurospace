@@ -1,7 +1,7 @@
 //! Remembered choices: last vault, theme, transparency and text size (`app.json`).
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -71,7 +71,10 @@ impl Settings {
             fs::create_dir_all(parent)?;
         }
         let temporary = path.with_extension("json.tmp");
-        fs::write(&temporary, serde_json::to_vec_pretty(self)?)?;
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(&serde_json::to_vec_pretty(self)?)?;
+        // Without this a crash right after the rename can leave an empty `app.json`.
+        file.sync_all()?;
         fs::rename(&temporary, path)
     }
 

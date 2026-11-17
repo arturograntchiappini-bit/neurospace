@@ -6,6 +6,7 @@ pub mod panels;
 pub mod reload;
 pub mod settings;
 pub mod tree;
+pub mod welcome;
 pub mod workspace;
 
 pub use jobs::{Job, Poll};

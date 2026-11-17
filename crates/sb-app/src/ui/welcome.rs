@@ -4,31 +4,23 @@ use std::path::PathBuf;
 
 use eframe::egui::{Button, CentralPanel, Key, Margin, RichText, TextEdit, Ui};
 
+use crate::state::welcome::WelcomeForm;
 use crate::ui::theme::{self, Palette};
 
 const CARD_WIDTH: f32 = 420.0;
 const CARD_HEIGHT: f32 = 240.0;
 const CARD_PADDING: i8 = 24;
 
-/// What the welcome screen shows and what the user has typed.
-#[derive(Debug, Default)]
-pub struct WelcomeForm {
-    /// The text of the path field.
-    pub path: String,
-    /// Why the last attempt to open a vault failed.
-    pub error: Option<String>,
-}
-
 /// Draws the welcome card; returns the folder the user asked to open, if any.
 pub fn show(ui: &mut Ui, p: &Palette, form: &mut WelcomeForm) -> Option<PathBuf> {
-    let mut chosen = None;
+    let mut chosen = form.poll_picker();
     CentralPanel::no_frame().show(ui, |ui| {
         ui.add_space(((ui.available_height() - CARD_HEIGHT) / 2.0).max(0.0));
         ui.vertical_centered(|ui| {
             let card = theme::glass_frame(p).inner_margin(Margin::same(CARD_PADDING));
             card.show(ui, |ui| {
                 ui.set_width(CARD_WIDTH);
-                chosen = card_contents(ui, p, form);
+                chosen = card_contents(ui, p, form).or(chosen.take());
             });
         });
     });
@@ -40,11 +32,11 @@ fn card_contents(ui: &mut Ui, p: &Palette, form: &mut WelcomeForm) -> Option<Pat
     ui.label("Choose the folder that holds your notes.");
     ui.add_space(8.0);
     let mut chosen = None;
-    if ui.button("Open a folder").clicked() {
-        chosen = rfd::FileDialog::new().pick_folder();
-        if let Some(folder) = &chosen {
-            form.path = folder.display().to_string();
-        }
+    let pick = ui.add_enabled(!form.is_picking(), Button::new("Open a folder"));
+    if pick.clicked() {
+        let ctx = ui.ctx().clone();
+        let dialog = || rfd::FileDialog::new().pick_folder();
+        form.start_picker(dialog, move || ctx.request_repaint());
     }
     let field = TextEdit::singleline(&mut form.path)
         .hint_text("Vault folder path")

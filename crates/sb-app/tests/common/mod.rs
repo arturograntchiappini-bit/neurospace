@@ -6,8 +6,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::Context;
 use egui_kittest::Harness;
-use sb_app::app::{AppOptions, SecondBrainApp};
-use sb_app::ui::theme;
+use sb_app::app::{AppOptions, SecondBrainApp, prepare_context};
 use tempfile::TempDir;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -16,10 +15,10 @@ const DEADLINE: Duration = Duration::from_secs(10);
 /// A harness over `options`; the caller keeps the temporary directories alive.
 pub fn harness_from(options: AppOptions) -> Harness<'static, SecondBrainApp> {
     let app = SecondBrainApp::new(&Context::default(), options);
-    // `new` installed the fonts on its own context; the text styles need them on this one.
+    // `new` prepared its own context; the harness renders with another one.
     Harness::builder()
         .with_size([1200.0, 800.0])
-        .with_context_setup(theme::install_fonts)
+        .with_context_setup(prepare_context)
         .build_ui_state(|ui, app: &mut SecondBrainApp| app.show(ui), app)
 }
 

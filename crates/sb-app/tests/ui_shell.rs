@@ -5,12 +5,13 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use eframe::egui::{Key, Modifiers, Theme};
+use eframe::App;
+use eframe::egui::{Key, Modifiers, Role, Theme, Visuals, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use sb_app::app::{AppOptions, SecondBrainApp};
 use sb_app::state::settings::Settings;
-use sb_app::ui::theme::Material;
+use sb_app::ui::theme::{self, Material};
 use tempfile::TempDir;
 
 use common::{harness, harness_from, run_until};
@@ -168,5 +169,103 @@ fn should_dismiss_error_notice() {
         harness
             .query_by_label_contains("Could not save settings")
             .is_none()
+    );
+}
+
+fn toggle_hides_and_shows(toggle: &str, section: &str) {
+    let (mut harness, _dir, _scratch) = open_vault_harness();
+    harness.get_by_label(section);
+    harness.get_by_role_and_label(Role::Button, toggle).click();
+    harness.run();
+    assert!(
+        harness.query_by_label(section).is_none(),
+        "{section} still shown"
+    );
+    harness.get_by_role_and_label(Role::Button, toggle).click();
+    harness.run();
+    harness.get_by_label(section);
+}
+
+#[test]
+fn should_hide_and_show_left_panel_with_sidebar_toggle() {
+    toggle_hides_and_shows("Toggle sidebar", "FILES");
+}
+
+#[test]
+fn should_hide_and_show_right_panel_with_inspector_toggle() {
+    toggle_hides_and_shows("Toggle inspector", "OUTGOING LINKS");
+}
+
+#[test]
+fn should_open_new_note_dialog_from_top_bar_button() {
+    let (mut harness, _dir, _scratch) = open_vault_harness();
+    assert!(harness.query_by_label("Note name").is_none());
+    harness.get_by_label("New").click();
+    harness.run();
+    harness.get_by_label("Note name");
+}
+
+#[test]
+fn should_choose_material_and_clear_colour_from_availability_and_setting() {
+    let (mut harness, _dir, _scratch) = open_vault_harness();
+    let dark = Visuals::dark();
+    let backdrop = |theme, material| {
+        let top = theme::palette(theme, material).backdrop_top;
+        top.to_color32().to_normalized_gamma_f32()
+    };
+    let simulated = backdrop(Theme::Dark, Material::Simulated);
+    assert_eq!(harness.state().clear_color(&dark), simulated);
+    harness.state_mut().set_material_available(true);
+    assert_eq!(harness.state().material(), Material::Mica);
+    assert_eq!(harness.state().clear_color(&dark), [0.0; 4]);
+    harness.get_by_label("Menu").click();
+    harness.run();
+    harness.get_by_label("Reduce transparency").click();
+    harness.run();
+    assert_eq!(harness.state().material(), Material::Opaque);
+    let opaque = backdrop(Theme::Light, Material::Opaque);
+    assert_eq!(harness.state().clear_color(&Visuals::light()), opaque);
+}
+
+/// A vault window at text size 200 % that is 360 x 240 points (720 x 480 px).
+fn small_zoomed_harness() -> (Harness<'static, SecondBrainApp>, TempDir, TempDir) {
+    let scratch = tempfile::tempdir().unwrap();
+    let vault = make_vault(scratch.path());
+    let dir = tempfile::tempdir().unwrap();
+    let settings_path = dir.path().join("app.json");
+    let settings = Settings {
+        zoom: 2.0,
+        ..Settings::default()
+    };
+    settings.save(&settings_path).unwrap();
+    let options = AppOptions {
+        settings_path,
+        state_base: dir.path().join("state"),
+        vault: Some(vault),
+    };
+    let mut harness = harness_from(options);
+    harness.set_size(vec2(360.0, 240.0));
+    (harness, dir, scratch)
+}
+
+#[test]
+fn should_keep_side_panels_within_thirty_percent_of_a_small_zoomed_window() {
+    let (mut harness, _dir, _scratch) = small_zoomed_harness();
+    run_until(&mut harness, "vault screen", |app| {
+        app.screen_name() == "vault"
+    });
+    harness.run();
+    let width = harness.ctx.content_rect().width();
+    // Node rectangles are in points, like `width`.
+    let search = harness.get_by_label("Search notes").rect();
+    let links = harness.get_by_label("OUTGOING LINKS").rect();
+    let (left_edge, right_edge) = (search.right(), links.left());
+    assert!(
+        left_edge <= 0.3 * width,
+        "left panel too wide: {left_edge} of {width}"
+    );
+    assert!(
+        right_edge >= 0.7 * width,
+        "right panel too wide: {right_edge} of {width}"
     );
 }

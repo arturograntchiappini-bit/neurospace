@@ -3,8 +3,8 @@
 use std::time::Instant;
 
 use eframe::egui::{
-    Align, Button, CentralPanel, Frame, Layout, Margin, Panel, Response, RichText, Sense, Ui, pos2,
-    vec2,
+    Align, Button, CentralPanel, Frame, Layout, Margin, Panel, Response, RichText, Role, Sense,
+    StrokeKind, Ui, WidgetInfo, pos2, vec2,
 };
 
 use crate::state::notice::{Notice, NoticeBoard, NoticeKind};
@@ -13,8 +13,11 @@ use crate::state::{Workspace, panels};
 use crate::ui::menu::{self, MenuOutcome};
 use crate::ui::theme::{self, GUTTER, Palette};
 
-const BAR_HALF_WIDTH: f32 = 7.0;
-const BAR_SPACING: f32 = 5.0;
+const ICON_INSET: f32 = 5.0;
+const ICON_RADIUS: f32 = 3.0;
+const ICON_DIVIDER: f32 = 0.35;
+/// A side panel never takes more than this fraction of the window width.
+const SIDE_PANEL_MAX_FRACTION: f32 = 0.3;
 const GAP: i8 = GUTTER as i8;
 const PADDING_X: i8 = 12;
 const PADDING_Y: i8 = 8;
@@ -68,8 +71,17 @@ fn flat_button(ui: &mut Ui, text: &str) -> Response {
     ui.add(Button::new(text).frame_when_inactive(false))
 }
 
-/// The top bar: sidebar toggle, actions, vault name, sync and the «Menu» menu.
-pub fn top_bar(ui: &mut Ui, p: &Palette, bar: TopBar<'_>) -> MenuOutcome {
+/// What the user asked for in the top bar this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TopBarOutcome {
+    /// What the «Menu» menu did.
+    pub menu: MenuOutcome,
+    /// «New» was pressed.
+    pub new_note: bool,
+}
+
+/// The top bar: sidebar toggle, actions, vault name, sync, the «Menu» menu and inspector toggle.
+pub fn top_bar(ui: &mut Ui, p: &Palette, bar: TopBar<'_>) -> TopBarOutcome {
     let outer = Margin {
         left: GAP,
         right: GAP,
@@ -87,40 +99,67 @@ pub fn top_bar(ui: &mut Ui, p: &Palette, bar: TopBar<'_>) -> MenuOutcome {
         .inner
 }
 
-/// A button drawn as three bars: the font has no glyph for «Toggle sidebar».
-fn sidebar_toggle(ui: &mut Ui) -> Response {
+/// A button drawn as a window with a divider on one side: the font has no glyph for a menu or
+/// panel symbol. It shows and hides the side panel on `on_left`.
+fn panel_toggle(ui: &mut Ui, on_left: bool, name: &'static str) -> Response {
     let side = ui.spacing().interact_size.y;
     let (rect, response) = ui.allocate_exact_size(vec2(side, side), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, ui.is_enabled(), name));
     let visuals = ui.style().interact(&response);
     let painter = ui.painter();
     if response.hovered() || response.has_focus() {
-        painter.rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+        let (fill, ring) = (visuals.weak_bg_fill, visuals.bg_stroke);
+        painter.rect(rect, visuals.corner_radius, fill, ring, StrokeKind::Inside);
     }
-    for offset in [-BAR_SPACING, 0.0, BAR_SPACING] {
-        let y = rect.center().y + offset;
-        let (left, right) = (
-            rect.center().x - BAR_HALF_WIDTH,
-            rect.center().x + BAR_HALF_WIDTH,
-        );
-        painter.line_segment([pos2(left, y), pos2(right, y)], visuals.fg_stroke);
-    }
-    response.accessible_name("Toggle sidebar")
+    let icon = rect.shrink(ICON_INSET);
+    painter.rect_stroke(icon, ICON_RADIUS, visuals.fg_stroke, StrokeKind::Inside);
+    let inset = icon.width() * ICON_DIVIDER;
+    let x = if on_left {
+        icon.left() + inset
+    } else {
+        icon.right() - inset
+    };
+    let divider = [pos2(x, icon.top()), pos2(x, icon.bottom())];
+    painter.line_segment(divider, visuals.fg_stroke);
+    response
 }
 
-fn top_bar_row(ui: &mut Ui, bar: TopBar<'_>) -> MenuOutcome {
-    if sidebar_toggle(ui).clicked() {
+/// Adds `add` at the right end of the row, in visual order (left to right) so that Tab follows
+/// the eye. A right-to-left layout would create the widgets in reverse order, so the width of
+/// the cluster is measured and remembered from the previous frame instead.
+fn right_aligned<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let id = ui.scope_id().with("right_cluster_width");
+    let known: f32 = ui.data(|data| data.get_temp(id)).unwrap_or(0.0);
+    ui.add_space((ui.available_width() - known).max(0.0));
+    let start = ui.cursor().left();
+    let result = add(ui);
+    let width = ui.cursor().left() - start;
+    if (width - known).abs() > 0.5 {
+        ui.data_mut(|data| data.insert_temp(id, width));
+        ui.ctx().request_repaint();
+    }
+    result
+}
+
+fn top_bar_row(ui: &mut Ui, bar: TopBar<'_>) -> TopBarOutcome {
+    let mut outcome = TopBarOutcome::default();
+    if panel_toggle(ui, true, "Toggle sidebar").clicked() {
         bar.sidebars.left = !bar.sidebars.left;
     }
-    for action in ["New", "Quick open", "Graph", "Edit"] {
+    outcome.new_note = flat_button(ui, "New").clicked();
+    for action in ["Quick open", "Graph", "Edit"] {
         flat_button(ui, action);
     }
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        let outcome = menu::menu_button(ui, bar.settings);
-        flat_button(ui, "Sync");
+    outcome.menu = right_aligned(ui, |ui| {
         ui.label(bar.vault_name);
-        outcome
-    })
-    .inner
+        flat_button(ui, "Sync");
+        let menu = menu::menu_button(ui, bar.settings);
+        if panel_toggle(ui, false, "Toggle inspector").clicked() {
+            bar.sidebars.right = !bar.sidebars.right;
+        }
+        menu
+    });
+    outcome
 }
 
 /// The slim glass strip at the bottom: word count, ignored files, the notice, sync summary.
@@ -199,10 +238,13 @@ pub fn left_panel<R>(
     open: &mut bool,
     content: impl FnOnce(&mut Ui) -> R,
 ) -> Option<R> {
-    let panel = Panel::left("left_panel")
-        .default_size(LEFT_PANEL_WIDTH)
-        .min_size(LEFT_PANEL_MIN)
-        .frame(glass_panel_frame(p, side_margin(true)));
+    let panel = sized(
+        ui,
+        Panel::left("left_panel"),
+        LEFT_PANEL_WIDTH,
+        LEFT_PANEL_MIN,
+    )
+    .frame(glass_panel_frame(p, side_margin(true)));
     show_side_panel(ui, panel, open, |ui| {
         paint_panel_highlight(ui, p);
         content(ui)
@@ -216,14 +258,25 @@ pub fn right_panel<R>(
     open: &mut bool,
     content: impl FnOnce(&mut Ui) -> R,
 ) -> Option<R> {
-    let panel = Panel::right("right_panel")
-        .default_size(RIGHT_PANEL_WIDTH)
-        .min_size(RIGHT_PANEL_MIN)
-        .frame(glass_panel_frame(p, side_margin(false)));
+    let panel = sized(
+        ui,
+        Panel::right("right_panel"),
+        RIGHT_PANEL_WIDTH,
+        RIGHT_PANEL_MIN,
+    )
+    .frame(glass_panel_frame(p, side_margin(false)));
     show_side_panel(ui, panel, open, |ui| {
         paint_panel_highlight(ui, p);
         content(ui)
     })
+}
+
+/// Gives `panel` its default and minimum width, both capped so that it never takes more than
+/// `SIDE_PANEL_MAX_FRACTION` of the window (the text size can make the window small in points).
+fn sized(ui: &Ui, panel: Panel, default: f32, min: f32) -> Panel {
+    let max = ui.ctx().content_rect().width() * SIDE_PANEL_MAX_FRACTION;
+    // `default_size` widens the range to include itself, so the range comes last.
+    panel.default_size(default).size_range(min.min(max)..=max)
 }
 
 /// Outer margin of a side panel: the window-edge gutter on its outer side only.
