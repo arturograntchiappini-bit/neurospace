@@ -75,13 +75,15 @@ pub fn scan(vault: &Vault) -> Result<DiskScan> {
     })
 }
 
-/// `InvalidPath` cannot be a note and `CaseCollision` keys belong to the file that won.
+/// `InvalidPath` cannot be a note. A `CaseCollision` blocks its key: neither case variant may
+/// be read as an edit or a deletion of the note that was synced.
 fn blocked_entry(ignored: &Ignored) -> Option<(NoteKey, DiskEntry)> {
     let reason = match ignored.reason {
         IgnoreReason::NotUtf8 => "not valid UTF-8",
         IgnoreReason::TooLarge => "larger than 4 MiB",
         IgnoreReason::Unreadable => "cannot be read",
-        IgnoreReason::InvalidPath | IgnoreReason::CaseCollision => return None,
+        IgnoreReason::CaseCollision => "differs only in case from another note",
+        IgnoreReason::InvalidPath => return None,
     };
     let key = NotePath::parse(&ignored.path).ok()?.key();
     let entry = DiskEntry::Blocked {
@@ -679,6 +681,30 @@ mod tests {
         assert_eq!(path, "bin.md");
         assert!(reason.contains("UTF-8"), "reason was {reason:?}");
         assert!(scanned.blocked_folders.is_empty());
+    }
+
+    #[test]
+    fn should_block_the_key_of_a_case_collision() {
+        let ignored = Ignored {
+            path: "note.md".to_owned(),
+            reason: IgnoreReason::CaseCollision,
+        };
+        let (blocked_key, entry) = blocked_entry(&ignored).unwrap();
+        assert_eq!(blocked_key, key("note.md"));
+        assert!(matches!(entry, DiskEntry::Blocked { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_scan_case_variants_of_one_note_as_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Note.md"), "new").unwrap();
+        std::fs::write(tmp.path().join("note.md"), "synced").unwrap();
+        let scanned = scan(&Vault::open(tmp.path()).unwrap()).unwrap();
+        assert!(matches!(
+            scanned.disk.get(&key("note.md")),
+            Some(DiskEntry::Blocked { .. })
+        ));
     }
 
     #[cfg(unix)]

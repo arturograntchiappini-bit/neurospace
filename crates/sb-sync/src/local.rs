@@ -127,9 +127,19 @@ impl LocalReplica {
     /// Stops before touching anything when the vault lost its marker folder (spec 8.5 rule 5):
     /// an unmounted vault looks like a vault whose notes were all deleted.
     pub(crate) fn run_doc_stage(&mut self) -> Result<Vec<Step>> {
+        self.doc_stage_reading(scan)
+    }
+
+    /// `run_doc_stage` with the scan injected, so a test can make the vault vanish during it.
+    fn doc_stage_reading(
+        &mut self,
+        read: impl FnOnce(&Vault) -> Result<DiskScan>,
+    ) -> Result<Vec<Step>> {
         require_marker(&self.vault)?;
         let before = self.doc.version();
-        let scan = scan(&self.vault)?;
+        let scan = read(&self.vault)?;
+        // A drive that goes away during the read phase turns unread notes into «deleted».
+        require_marker(&self.vault)?;
         self.doc.resolve_claims()?;
         let steps = self.plan_steps(&scan);
         for action in steps.iter().filter_map(|step| step.doc.as_ref()) {
@@ -522,6 +532,25 @@ mod tests {
         assert!(dirs.path(".secondbrain").is_dir());
         assert_eq!(modified("base.json").unwrap(), base_time.unwrap());
         assert_eq!(modified("base.version").unwrap(), version_time.unwrap());
+    }
+
+    #[test]
+    fn should_not_tombstone_notes_when_the_vault_vanishes_during_the_scan() {
+        let dirs = Dirs::new(&[("a.md", "A\n"), ("b.md", "B\n")]);
+        let mut replica = dirs.open();
+        replica.reconcile().unwrap();
+        let vanishing_scan = |vault: &Vault| {
+            dirs.remove("a.md");
+            dirs.remove("b.md");
+            std::fs::remove_dir(dirs.path(".secondbrain")).unwrap();
+            scan(vault)
+        };
+        let error = replica.doc_stage_reading(vanishing_scan).unwrap_err();
+        assert!(
+            matches!(error, SyncError::VaultMarkerMissing(_)),
+            "{error:?}"
+        );
+        assert_eq!(replica.doc.alive_notes().len(), 2);
     }
 
     #[test]
