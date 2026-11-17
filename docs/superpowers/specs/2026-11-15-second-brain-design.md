@@ -320,6 +320,7 @@ All sync state lives **outside** the vault, so copying or sharing the vault fold
 | `config.json` | `{ "mode": "internet" \| "lan", "bind_port": <u16 or null>, "mdns": <bool> }`, defaults `internet`, `null`, `true` |
 | `doc.snap`, `doc.log` | the sync document: snapshot plus append-only update log |
 | `base.json` | per note key, the content hash at the last point disk and document agreed |
+| `base.version` | the document version the base was last saved against, hex. Written after `base.json`. |
 | `engine.lock` | exclusive lock held by the running engine |
 | `status.json` | written by the engine every tick: process id, device id, addresses, peers and their connection state, note count, blocked notes, last error, timestamp |
 | `fresh-join` | marker: this replica joined a group and has not reconciled since (section 8.6) |
@@ -327,7 +328,9 @@ All sync state lives **outside** the vault, so copying or sharing the vault fold
 
 Moving the vault folder changes the hash, so the replica looks unconfigured and must join again. That is safe (section 8.6) and visible.
 
-The files `secret`, `peers.json`, `config.json` and `command.pending` are the engine's **control plane**: the engine re-reads them on every tick. The CLI configures sync by editing them, whether or not an engine is running.
+**The base never outlives the document it was saved against.** A base entry says «disk and document agreed on this content»; with the note missing from the document, the engine reads that as «the note was deleted elsewhere» and moves the file to the trash. If the document on disk ever loses history while the base survives (a damaged or deleted `doc.log`, a partly restored state directory), that reading would trash every note. So when the engine opens its state it checks that the loaded document includes the version in `base.version`; if the base is not empty and the file is missing, unreadable or names history the document does not have, the base is cleared. With an empty base nothing can be trashed: files become notes again, and a file that differs from a note becomes a conflict copy.
+
+The files `secret`, `peers.json` and `command.pending` are the engine's **control plane**: the engine re-reads them on every tick. The CLI configures sync by editing them, whether or not an engine is running. `config.json` is read once, when the engine starts: a change to the network mode, port or mDNS takes effect at the next start (ruling of the M2 final review, 2026-11-17).
 
 ### 8.4 Sync document (call)
 
@@ -417,7 +420,7 @@ Rules that make this safe:
 2. **Compare before overwrite.** A file is replaced, renamed or trashed only if, re-read immediately beforehand with the replacement already prepared, it still has the content seen during the scan. Otherwise the key is blocked for this round. A writer that slips in between that check and the rename can still be overwritten; the window is a few system calls and is accepted.
 3. **Local first.** When a remote update arrives, the engine reconciles, then imports the update, then reconciles again. Pending local edits therefore enter the document as edits and merge with the remote ones line by line; the «both changed» rows are reached only in crash and race situations and after a join without contact (section 8.6).
 4. **Echo.** The engine's own writes trigger the watcher; the resulting round finds everything in agreement and produces nothing.
-5. **Missing vault.** If the vault directory does not exist, or `.secondbrain/` has disappeared from a vault that has sync state, the engine stops with an error instead of treating every note as deleted.
+5. **Missing vault.** If the vault directory does not exist, or `.secondbrain/` has disappeared from a vault that has sync state, nothing is treated as deleted: starting the engine fails with an error, and a running engine abandons the round before touching the document or any file. The check runs at the start of every round, because a drive can be unmounted while the engine runs and leave an empty folder behind. A running engine reports the error, keeps going and tries again at the next round, so sync resumes by itself when the vault is back.
 6. New files use the display path from `paths`. A note that already exists locally keeps its local casing.
 
 ### 8.6 Joining and leaving

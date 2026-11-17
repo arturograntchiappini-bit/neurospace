@@ -194,6 +194,32 @@ impl Vault {
         Ok(existing.is_none())
     }
 
+    /// Replaces an existing note only if `still_expected` accepts the bytes on disk at the moment
+    /// of the swap. The new content is fully written to a temporary file before the check, so the
+    /// window between check and rename is a few system calls. Returns whether it replaced.
+    /// The caller must first resolve the spelling of `path` with `locate`.
+    ///
+    /// # Errors
+    /// `NotFound` when no regular file is there, `InvalidInput` over `MAX_NOTE_BYTES`,
+    /// `SymlinkInPath`, or `Io` (a read-only note is refused with `PermissionDenied`).
+    pub fn replace_if(
+        &self,
+        path: &NotePath,
+        content: &str,
+        still_expected: &dyn Fn(&[u8]) -> bool,
+    ) -> Result<bool> {
+        check_size(content.len())?;
+        let target = self.require_file(path)?;
+        refuse_read_only(&target)?;
+        let temp = temp_sibling(&target);
+        write_new_file(&temp, content.as_bytes()).map_err(io_error(&temp))?;
+        let swapped = swap_if(&temp, &target, path, still_expected);
+        if !matches!(swapped, Ok(true)) {
+            let _ = fs::remove_file(&temp);
+        }
+        swapped
+    }
+
     /// Creates a note and never replaces anything. The caller must first resolve the spelling
     /// of `path` with `adopt_folders`: this method uses the path as given.
     ///
@@ -206,7 +232,7 @@ impl Vault {
         if lstat(&target)?.is_some() {
             return Err(CoreError::AlreadyExists(path.to_string()));
         }
-        write_new_file(&target, content.as_bytes()).map_err(|source| match source.kind() {
+        create_atomically(&target, content.as_bytes()).map_err(|source| match source.kind() {
             io::ErrorKind::AlreadyExists => CoreError::AlreadyExists(path.to_string()),
             _ => CoreError::Io {
                 path: target.clone(),
@@ -515,13 +541,53 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     })
 }
 
+/// Creates `target` complete or not at all: the content is written to a synced temporary sibling
+/// and hard-linked into place, which fails when the name is taken.
+fn create_atomically(target: &Path, bytes: &[u8]) -> io::Result<()> {
+    let temp = temp_sibling(target);
+    write_new_file(&temp, bytes)?;
+    let linked = fs::hard_link(&temp, target);
+    let _ = fs::remove_file(&temp);
+    match linked {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => write_new_file(target, bytes),
+        other => other,
+    }
+}
+
 /// Replaces `target` through a synced sibling temporary file, so readers never see a partial note.
 fn write_atomically(target: &Path, bytes: &[u8]) -> Result<()> {
+    refuse_read_only(target)?;
     let temp = temp_sibling(target);
     write_new_file(&temp, bytes).map_err(io_error(&temp))?;
     replace_keeping_permissions(&temp, target).inspect_err(|_| {
         let _ = fs::remove_file(&temp);
     })
+}
+
+/// A read-only note is refused on every platform, before any temporary file exists.
+fn refuse_read_only(target: &Path) -> Result<()> {
+    if lstat(target)?.is_some_and(|existing| existing.permissions().readonly()) {
+        return Err(io_error(target)(io::ErrorKind::PermissionDenied.into()));
+    }
+    Ok(())
+}
+
+/// Renames `temp` over `target` when `still_expected` accepts the target's current bytes.
+fn swap_if(
+    temp: &Path,
+    target: &Path,
+    path: &NotePath,
+    still_expected: &dyn Fn(&[u8]) -> bool,
+) -> Result<bool> {
+    let current = fs::read(target).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => CoreError::NotFound(path.to_string()),
+        _ => io_error(target)(error),
+    })?;
+    if !still_expected(&current) {
+        return Ok(false);
+    }
+    replace_keeping_permissions(temp, target)?;
+    Ok(true)
 }
 
 fn replace_keeping_permissions(temp: &Path, target: &Path) -> Result<()> {
@@ -622,6 +688,103 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), dir.path().join("Link")).unwrap();
         let result = vault.adopt_folders(&p("link/n.md"));
         assert!(matches!(result, Err(CoreError::SymlinkInPath(_))));
+    }
+
+    #[test]
+    fn should_create_without_leaving_temporary_files() {
+        let (dir, vault) = vault();
+        let folder = dir.path().join("d");
+        vault.create(&p("d/n.md"), "content").unwrap();
+        assert_eq!(entry_count(&folder), 1);
+        assert_eq!(fs::read_to_string(folder.join("n.md")).unwrap(), "content");
+
+        let again = vault.create(&p("d/n.md"), "other");
+        assert!(matches!(again, Err(CoreError::AlreadyExists(_))));
+        assert_eq!(fs::read_to_string(folder.join("n.md")).unwrap(), "content");
+        assert_eq!(entry_count(&folder), 1);
+
+        fs::create_dir(folder.join("dir.md")).unwrap();
+        let blocked = vault.create(&p("d/dir.md"), "x");
+        assert!(matches!(blocked, Err(CoreError::AlreadyExists(_))));
+        assert_eq!(temporary_entries(&folder), 0);
+    }
+
+    fn temporary_entries(folder: &Path) -> usize {
+        fs::read_dir(folder)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".sb-"))
+            .count()
+    }
+
+    #[test]
+    fn should_create_the_whole_file_when_the_name_is_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("n.md");
+        create_atomically(&target, b"content").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "content");
+        assert_eq!(entry_count(dir.path()), 1);
+    }
+
+    #[test]
+    fn should_not_replace_or_litter_when_the_name_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("n.md");
+        fs::write(&file, "old").unwrap();
+        let error = create_atomically(&file, b"new").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "old");
+        assert_eq!(temporary_entries(dir.path()), 0);
+
+        let folder = dir.path().join("dir.md");
+        fs::create_dir(&folder).unwrap();
+        let error = create_atomically(&folder, b"new").unwrap_err();
+        eprintln!("directory in the way reported {:?}", error.kind());
+        assert!(folder.is_dir());
+        assert_eq!(entry_count(&folder), 0);
+        assert_eq!(temporary_entries(dir.path()), 0);
+    }
+
+    #[test]
+    fn should_replace_only_when_predicate_accepts_current_bytes() {
+        let (dir, vault) = vault();
+        vault.write(&p("a.md"), "old").unwrap();
+        let replaced = vault.replace_if(&p("a.md"), "new", &|bytes| bytes == b"old");
+        assert!(matches!(replaced, Ok(true)));
+        assert_eq!(vault.read(&p("a.md")).unwrap(), "new");
+        let refused = vault.replace_if(&p("a.md"), "newer", &|bytes| bytes == b"old");
+        assert!(matches!(refused, Ok(false)));
+        assert_eq!(vault.read(&p("a.md")).unwrap(), "new");
+        assert_eq!(temporary_entries(dir.path()), 0);
+        let missing = vault.replace_if(&p("missing.md"), "x", &|_| true);
+        assert!(matches!(missing, Err(CoreError::NotFound(_))));
+        assert_eq!(temporary_entries(dir.path()), 0);
+    }
+
+    #[test]
+    fn should_refuse_to_replace_a_read_only_note() {
+        let (dir, vault) = vault();
+        vault.write(&p("n.md"), "old").unwrap();
+        let file = dir.path().join("n.md");
+        let set_readonly = |readonly: bool| {
+            let mut permissions = fs::metadata(&file).unwrap().permissions();
+            permissions.set_readonly(readonly);
+            fs::set_permissions(&file, permissions).unwrap();
+        };
+        set_readonly(true);
+        let written = vault.write(&p("n.md"), "new");
+        let appended = vault.append(&p("n.md"), "x");
+        set_readonly(false);
+        for result in [written.map(|_| ()), appended.map(|_| ())] {
+            match result {
+                Err(CoreError::Io { source, .. }) => {
+                    assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+                }
+                other => panic!("expected a permission error, got {other:?}"),
+            }
+        }
+        assert_eq!(fs::read_to_string(&file).unwrap(), "old");
+        assert_eq!(entry_count(dir.path()), 1);
     }
 
     #[test]

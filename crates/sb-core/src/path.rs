@@ -6,10 +6,6 @@ const MAX_PATH_BYTES: usize = 1024;
 const MAX_COMPONENT_BYTES: usize = 255;
 const MARKDOWN_EXTENSION: &str = ".md";
 const ILLEGAL_CHARS: &str = "<>:\"|?*";
-const WINDOWS_DEVICE_NAMES: [&str; 22] = [
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-];
 
 /// Reason a raw string is not a valid note path (spec section 5.2).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -154,14 +150,32 @@ fn validate_component(component: &str) -> Result<(), PathError> {
     if component.ends_with([' ', '.']) {
         return Err(PathError::TrailingSpaceOrDot);
     }
-    let stem = component.split('.').next().unwrap_or(component);
-    if WINDOWS_DEVICE_NAMES
-        .iter()
-        .any(|name| name.eq_ignore_ascii_case(stem))
-    {
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches(' ');
+    if is_windows_device_name(stem) {
         return Err(PathError::ReservedName(stem.to_owned()));
     }
     Ok(())
+}
+
+fn is_windows_device_name(stem: &str) -> bool {
+    let upper = stem.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let numbered = upper
+        .strip_prefix("COM")
+        .or_else(|| upper.strip_prefix("LPT"));
+    numbered.is_some_and(|suffix| {
+        let mut chars = suffix.chars();
+        matches!(chars.next(), Some('0'..='9' | '¹' | '²' | '³')) && chars.next().is_none()
+    })
 }
 
 fn is_illegal_char(c: char) -> bool {
@@ -218,6 +232,47 @@ mod tests {
                 *expected,
                 "path: {raw:?}"
             );
+        }
+    }
+
+    #[test]
+    fn should_reject_device_names_in_every_spelling() {
+        for raw in [
+            "CON .md",
+            "nul  .md",
+            "a/AUX .md",
+            "prn .notes.md",
+            "COM0.md",
+            "lpt0.md",
+            "COM¹.md",
+            "LPT².md",
+            "com³.md",
+            "CONIN$.md",
+            "conout$.md",
+        ] {
+            assert!(
+                matches!(
+                    NotePath::parse(raw).unwrap_err(),
+                    PathError::ReservedName(_)
+                ),
+                "path: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_still_accept_names_that_only_resemble_device_names() {
+        for raw in [
+            "CONSOLE.md",
+            "COM10.md",
+            "COM.md",
+            "LPT.md",
+            "CON-notes.md",
+            "COM⁴.md",
+            "CONIN.md",
+            "my CON.md",
+        ] {
+            assert!(NotePath::parse(raw).is_ok(), "path: {raw:?}");
         }
     }
 
