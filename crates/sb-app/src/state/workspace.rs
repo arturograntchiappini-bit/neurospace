@@ -39,6 +39,8 @@ pub struct OpenNote {
     pub last_edit: Option<Instant>,
     /// Set by a failed save, cleared by the next edit: autosave waits for a keystroke.
     pub autosave_paused: bool,
+    /// Words in `buffer`, recounted whenever the buffer is replaced (never per frame).
+    words: usize,
 }
 
 /// What `Workspace::save` did.
@@ -154,6 +156,7 @@ impl Workspace {
         };
         open.last_edit = (text != open.saved).then_some(now);
         open.autosave_paused = false;
+        open.words = count_words(&text);
         open.buffer = text;
     }
 
@@ -329,9 +332,7 @@ impl Workspace {
 
     /// Whitespace-separated words in the open buffer; 0 when no note is open.
     pub fn word_count(&self) -> usize {
-        self.open
-            .as_ref()
-            .map_or(0, |open| open.buffer.split_whitespace().count())
+        self.open.as_ref().map_or(0, |open| open.words)
     }
 
     /// Swaps in an index rebuilt from disk and reconciles the open note with it. `Stale` (nothing
@@ -437,11 +438,16 @@ impl Workspace {
 fn clean_note(path: NotePath, text: String) -> OpenNote {
     OpenNote {
         path,
+        words: count_words(&text),
         buffer: text.clone(),
         saved: text,
         last_edit: None,
         autosave_paused: false,
     }
+}
+
+fn count_words(text: &str) -> usize {
+    text.split_whitespace().count()
 }
 
 /// Creates `<stem> (conflict <8 hex>).md` next to `path` holding `text`. A name that exists is
@@ -879,5 +885,19 @@ mod tests {
         assert_eq!(ws.word_count(), 3);
         ws.edit("  a  b ".into(), Instant::now());
         assert_eq!(ws.word_count(), 2);
+    }
+
+    #[test]
+    fn should_recount_words_when_a_reload_replaces_the_buffer() {
+        let (dir, mut ws) = workspace(&[("a.md", "one two")]);
+        ws.select(&p("a.md")).unwrap();
+        fs::write(dir.path().join("a.md"), "one two three four").unwrap();
+        let rebuilt = sb_core::Index::build(ws.vault()).unwrap();
+        let tag = ws.write_generation();
+        assert!(matches!(
+            ws.apply_index(rebuilt, tag),
+            ApplyOutcome::Applied(_)
+        ));
+        assert_eq!(ws.word_count(), 4);
     }
 }

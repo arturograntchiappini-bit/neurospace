@@ -82,6 +82,20 @@ impl Reloader {
         notices
     }
 
+    /// How long until `tick` would start a rebuild: `None` when no change is waiting or a
+    /// rebuild is running (its end wakes the UI). Call it after `tick`; the watcher only records
+    /// the time of a change, so the UI must schedule its own wake-up for the end of the debounce.
+    pub fn next_tick_in(&self, now: Instant) -> Option<Duration> {
+        if self.job.is_some() {
+            return None;
+        }
+        let last = (*self
+            .last_change
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner))?;
+        Some(RELOAD_DEBOUNCE.saturating_sub(now.saturating_duration_since(last)))
+    }
+
     fn collect(&mut self, workspace: &mut Workspace, now: Instant) -> Vec<Notice> {
         let (tag, built) = match self.job.as_ref().map(Job::poll) {
             Some(Poll::Ready(done)) => done,
@@ -540,6 +554,26 @@ mod tests {
         let open = ws.open_note().unwrap();
         assert_eq!((open.buffer.as_str(), open.saved.as_str()), ("mine", "old"));
         assert!(open.is_dirty());
+    }
+
+    #[test]
+    fn should_report_time_left_until_the_debounce_elapses() {
+        let (_dir, mut ws, mut reloader) = setup(&[("a.md", "a")]);
+        let t0 = Instant::now();
+        assert_eq!(reloader.next_tick_in(t0), None);
+        reloader.mark_changed(t0);
+        let early = t0 + Duration::from_millis(100);
+        assert_eq!(
+            reloader.next_tick_in(early),
+            Some(RELOAD_DEBOUNCE - Duration::from_millis(100))
+        );
+        let at = t0 + RELOAD_DEBOUNCE;
+        reloader.tick(&mut ws, at);
+        assert!(reloader.is_reloading());
+        // A running rebuild wakes the UI itself when it finishes.
+        assert_eq!(reloader.next_tick_in(at), None);
+        finish_job(&mut ws, &mut reloader, at);
+        assert_eq!(reloader.next_tick_in(at), None);
     }
 
     #[test]

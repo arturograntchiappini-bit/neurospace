@@ -54,6 +54,20 @@ A ticket is a password: anyone who has it joins the group and receives every not
 
 `sb sync run` writes its log to stderr (never the ticket or the secret) and nothing to stdout. Ctrl+C (and SIGTERM on Linux) stops it cleanly with exit code 0, as does `sb sync leave` from another terminal (tested on Linux with SIGTERM; on Windows the same shutdown path runs, but Ctrl+C itself was not tested).
 
+## Desktop app
+
+`secondbrain [VAULT_DIR]` opens the desktop window (`cargo run -p sb-app`). Without an argument it reopens the last vault, or shows a welcome screen where you pick a folder.
+
+**Layout.** A top bar (sidebar toggle, New, Quick open, Graph, Preview/Edit, vault name, Sync, the menu, inspector toggle), the file tree and search on the left, the open note in the middle on a solid surface, backlinks, outgoing links and tags on the right, and a status strip at the bottom. The note is shown in a text editor with light colouring of headings, links and code, or as rendered Markdown where `[[wikilinks]]` are clickable; a link to a note that does not exist yet creates it, an attachment link (`![[image.png]]`) never does and is shown as plain text. The line width of a note is capped at 760 points.
+
+**Shortcuts.** Ctrl+N new note, Ctrl+O quick open (Up and Down choose, Enter opens, Escape closes), Ctrl+E switch between editor and preview, Ctrl+G graph, Ctrl+F search, Ctrl+Plus, Ctrl+Minus and Ctrl+0 for the text size. Every control can also be reached with Tab.
+
+**Saving.** There is no save button: the note is saved 500 ms after the last keystroke, when the window loses focus, when you open another note or vault, and when the application closes. If the file changed on disk while you had unsaved edits (another device, an agent, another editor), nothing is overwritten: your text is written to `<name> (conflict <id>).md` next to the note and the note reloads with the file's text. If the note was removed on disk, your text is kept the same way. A failed save keeps your text in the editor and shows the error in the status strip.
+
+**Look.** The tool areas are glass over a neutral backdrop (the Windows Mica material where the system accepts it, a simulated glass elsewhere); «Reduce transparency» in the menu makes everything opaque, and the menu also sets the theme (System, Light, Dark) and the text size (75 % to 200 %). The font is Inter, used under the SIL Open Font License 1.1 (`crates/sb-app/assets/Inter-LICENSE.txt`).
+
+**Testing.** The GUI is tested headless (`egui_kittest`) and by starting the binary; it has not been tried interactively by a person, and nothing was run on Linux.
+
 ## Use with AI agents
 
 `sb mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio. It lets an AI agent such as Claude Code or Claude Desktop read, search, write and navigate a vault with the same operations as the command line; `list_notes` reports the number of ignored files in `ignored`, while `sb list` names them on stderr. Stdout carries protocol messages only; a failed operation (bad path, missing note) comes back as a tool result with `isError: true`.

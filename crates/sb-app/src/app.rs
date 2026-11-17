@@ -1,5 +1,6 @@
 //! The application: screens, settings and the glass material.
 
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -11,14 +12,15 @@ use sb_core::Result as CoreResult;
 use crate::platform;
 use crate::state::welcome::WelcomeForm;
 use crate::state::{
-    InspectorCache, Job, NoteAction, NoteDialog, Notice, NoticeBoard, Poll, SearchBox, Settings,
-    ThemeChoice, Workspace,
+    AUTOSAVE_DELAY, InspectorCache, Job, NoteAction, NoteDialog, Notice, NoticeBoard, Poll,
+    QuickOpen, Reloader, Saved, SearchBox, Settings, ThemeChoice, Workspace,
 };
+use crate::ui::editor::{self, EditorState};
 use crate::ui::menu::{self, MenuOutcome};
-use crate::ui::shell::{self, Sidebars, TopBar};
+use crate::ui::shell::{self, Sidebars, TopBar, TopBarOutcome};
 use crate::ui::theme::{self, Material, Palette};
 use crate::ui::welcome;
-use crate::ui::{dialogs, inspector, sidebar};
+use crate::ui::{dialogs, inspector, quick_open, sidebar};
 
 /// One-time setup of a context: fonts, the styles of both themes and the zoom-key rule.
 ///
@@ -60,6 +62,11 @@ struct VaultView {
     search: SearchBox,
     inspector: InspectorCache,
     dialog: Option<NoteDialog>,
+    editor: EditorState,
+    quick_open: Option<QuickOpen>,
+    graph: bool,
+    reloader: Option<Reloader>,
+    window_focused: bool,
 }
 
 /// The whole application state behind the window.
@@ -146,6 +153,16 @@ impl SecondBrainApp {
         }
     }
 
+    /// Whether the open note is shown rendered instead of in the editor. Used by tests.
+    pub fn is_previewing(&self) -> bool {
+        self.view.editor.preview
+    }
+
+    /// Whether the graph view is switched on (the view itself is drawn by a later task).
+    pub fn graph_shown(&self) -> bool {
+        self.view.graph
+    }
+
     /// The error the welcome screen shows, if any. Used by tests.
     pub fn welcome_error(&self) -> Option<&str> {
         self.welcome.error.as_deref()
@@ -215,11 +232,28 @@ impl SecondBrainApp {
         self.welcome = WelcomeForm::default();
         self.view = VaultView {
             sidebars: self.view.sidebars,
+            reloader: self.start_reloader(workspace.vault().root()),
             ..VaultView::default()
         };
         self.settings.last_vault = Some(path);
         self.save_settings();
         self.screen = Screen::Vault(Box::new(workspace));
+    }
+
+    /// Starts following the vault folder; without a watcher the vault stays usable.
+    fn start_reloader(&mut self, root: &Path) -> Option<Reloader> {
+        let ctx = self.ctx.clone();
+        match Reloader::start(root, move || ctx.request_repaint()) {
+            Ok(reloader) => Some(reloader),
+            Err(error) => {
+                let notice = Notice::error(format!(
+                    "Could not watch the vault folder: {error}. \
+                     External changes will not appear until you reopen the vault"
+                ));
+                self.notices.post(notice, Instant::now());
+                None
+            }
+        }
     }
 
     fn fail_opening(&mut self, reason: &str) {
@@ -234,6 +268,7 @@ impl SecondBrainApp {
     }
 
     fn show_vault(&mut self, ui: &mut Ui, palette: &Palette) {
+        self.tick_vault(ui.ctx());
         let name = self.vault_name();
         let Screen::Vault(workspace) = &mut self.screen else {
             return;
@@ -242,38 +277,128 @@ impl SecondBrainApp {
             vault_name: &name,
             sidebars: &mut self.view.sidebars,
             settings: &mut self.settings,
+            preview: self.view.editor.preview,
         };
         let bar_outcome = shell::top_bar(ui, palette, bar);
         shell::status_strip(ui, palette, &mut self.notices, workspace);
-        let action = show_panels(ui, palette, workspace, &mut self.view);
-        shell::document_area(ui, palette);
+        let side = show_panels(ui, palette, workspace, &mut self.view);
+        let centre = shell::document_area(ui, palette, |ui| {
+            editor::show(ui, palette, workspace, &mut self.view.editor)
+        });
         dialogs::show(ui.ctx(), palette, &mut self.view.dialog, workspace);
-        let notice = action.and_then(|action| action.run(workspace, &mut self.view.dialog));
+        let found = quick_open::show(ui.ctx(), palette, &mut self.view.quick_open, workspace);
+        let notice = side
+            .or(centre)
+            .or(found)
+            .and_then(|action| action.run(workspace, &mut self.view.dialog));
         if let Some(notice) = notice {
             self.notices.post(notice, Instant::now());
         }
-        if bar_outcome.new_note {
+        self.schedule_autosave(ui.ctx());
+        self.apply_bar(bar_outcome);
+    }
+
+    /// Saves when the autosave delay has passed or the window lost focus; follows the folder.
+    fn tick_vault(&mut self, ctx: &Context) {
+        let now = Instant::now();
+        let focused = ctx.input(|input| input.focused);
+        let lost_focus = mem::replace(&mut self.view.window_focused, focused) && !focused;
+        let due = self.workspace().is_some_and(|w| w.autosave_due(now));
+        if lost_focus || due {
+            self.save_open_note();
+        }
+        self.tick_reloader(ctx, now);
+    }
+
+    /// Applies a finished rebuild and wakes the UI when the debounce of a pending change ends.
+    fn tick_reloader(&mut self, ctx: &Context, now: Instant) {
+        let (Screen::Vault(workspace), Some(reloader)) =
+            (&mut self.screen, self.view.reloader.as_mut())
+        else {
+            return;
+        };
+        for notice in reloader.tick(workspace, now) {
+            self.notices.post(notice, now);
+        }
+        if let Some(wait) = reloader.next_tick_in(now) {
+            ctx.request_repaint_after(wait);
+        }
+    }
+
+    /// Asks for a frame when the delay of a pending autosave has passed.
+    fn schedule_autosave(&self, ctx: &Context) {
+        let open = self.workspace().and_then(Workspace::open_note);
+        if open.is_some_and(|open| open.is_dirty() && !open.autosave_paused) {
+            ctx.request_repaint_after(AUTOSAVE_DELAY);
+        }
+    }
+
+    /// Saves the open note. Nothing is written when the file changed under it: the reloader is
+    /// told to look at the folder and the user is told why. True when nothing unsaved remains.
+    fn save_open_note(&mut self) -> bool {
+        let now = Instant::now();
+        let Screen::Vault(workspace) = &mut self.screen else {
+            return true;
+        };
+        let path = workspace.open_note().map(|open| open.path.to_string());
+        let path = path.unwrap_or_default();
+        match workspace.save() {
+            Ok(Saved::Nothing | Saved::Written) => true,
+            Ok(Saved::ChangedOnDisk) => {
+                if let Some(reloader) = self.view.reloader.as_mut() {
+                    reloader.mark_changed(now);
+                }
+                let text = format!("{path} changed on disk; reloading");
+                self.notices.post(Notice::info(text), now);
+                false
+            }
+            Err(error) => {
+                let text = format!("Could not save {path}: {error}");
+                self.notices.post(Notice::error(text), now);
+                false
+            }
+        }
+    }
+
+    fn apply_bar(&mut self, outcome: TopBarOutcome) {
+        if outcome.new_note {
             self.open_new_note_dialog();
         }
-        self.apply_menu(bar_outcome.menu);
+        if outcome.quick_open {
+            self.open_quick_open();
+        }
+        self.view.editor.preview ^= outcome.toggle_preview;
+        self.view.graph ^= outcome.toggle_graph;
+        self.apply_menu(outcome.menu);
     }
 
     fn open_new_note_dialog(&mut self) {
-        if self.view.dialog.is_none() {
+        if self.view.dialog.is_none() && self.view.quick_open.is_none() {
             self.view.dialog = Some(NoteDialog::new_note(None));
         }
     }
 
-    /// Ctrl+N opens the «New note» dialog; Ctrl+F focuses the search field.
+    fn open_quick_open(&mut self) {
+        if self.view.dialog.is_none() && self.view.quick_open.is_none() {
+            self.view.quick_open = Some(QuickOpen::default());
+        }
+    }
+
+    /// The shortcuts of spec 9.3, taken before the editor can see them. A popup in front keeps
+    /// them to itself.
     fn handle_note_keys(&mut self, ctx: &Context) {
-        let pressed = |key| {
-            let shortcut = KeyboardShortcut::new(Modifiers::COMMAND, key);
-            ctx.input_mut(|input| input.consume_shortcut(&shortcut))
-        };
-        if pressed(Key::N) {
+        if self.view.dialog.is_some() || self.view.quick_open.is_some() {
+            return;
+        }
+        if pressed(ctx, Key::N) {
             self.open_new_note_dialog();
         }
-        if self.view.dialog.is_none() && pressed(Key::F) {
+        if pressed(ctx, Key::O) {
+            self.open_quick_open();
+        }
+        self.view.editor.preview ^= pressed(ctx, Key::E);
+        self.view.graph ^= pressed(ctx, Key::G);
+        if pressed(ctx, Key::F) {
             self.view.sidebars.left = true;
             ctx.memory_mut(|memory| memory.request_focus(sidebar::search_field_id()));
         }
@@ -296,17 +421,28 @@ impl SecondBrainApp {
 
     /// Closes the vault (saving its open note) and returns to the welcome screen.
     fn leave_vault(&mut self) {
+        if !self.save_open_note() {
+            return;
+        }
         let Screen::Vault(workspace) = &mut self.screen else {
             return;
         };
         match workspace.close() {
-            Ok(()) => self.screen = Screen::Welcome,
+            Ok(()) => {
+                self.screen = Screen::Welcome;
+                self.view.reloader = None;
+            }
             Err(error) => {
                 let notice = Notice::error(format!("Could not close the note: {error}"));
                 self.notices.post(notice, Instant::now());
             }
         }
     }
+}
+
+fn pressed(ctx: &Context, key: Key) -> bool {
+    let shortcut = KeyboardShortcut::new(Modifiers::COMMAND, key);
+    ctx.input_mut(|input| input.consume_shortcut(&shortcut))
 }
 
 /// Draws both side panels; returns what the user asked for in either.
@@ -349,6 +485,11 @@ impl eframe::App for SecondBrainApp {
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         platform::sync_material(&*frame, ui.ctx().theme(), self);
         self.show(ui);
+    }
+
+    /// A window closed within the autosave delay must not lose what was typed.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_open_note();
     }
 
     fn clear_color(&self, visuals: &Visuals) -> [f32; 4] {

@@ -21,7 +21,7 @@ const SIDE_PANEL_MAX_FRACTION: f32 = 0.3;
 const GAP: i8 = GUTTER as i8;
 const PADDING_X: i8 = 12;
 const PADDING_Y: i8 = 8;
-const DOCUMENT_PADDING: i8 = 16;
+const DOCUMENT_PADDING: i8 = 32;
 const LEFT_PANEL_WIDTH: f32 = 240.0;
 const LEFT_PANEL_MIN: f32 = 180.0;
 const RIGHT_PANEL_WIDTH: f32 = 260.0;
@@ -53,6 +53,8 @@ pub struct TopBar<'a> {
     pub sidebars: &'a mut Sidebars,
     /// Settings the «Menu» menu edits.
     pub settings: &'a mut Settings,
+    /// True while the note is shown rendered: the mode button then offers «Edit».
+    pub preview: bool,
 }
 
 fn glass_panel_frame(p: &Palette, outer: Margin) -> Frame {
@@ -78,6 +80,12 @@ pub struct TopBarOutcome {
     pub menu: MenuOutcome,
     /// «New» was pressed.
     pub new_note: bool,
+    /// «Quick open» was pressed.
+    pub quick_open: bool,
+    /// «Graph» was pressed.
+    pub toggle_graph: bool,
+    /// «Edit» or «Preview» was pressed.
+    pub toggle_preview: bool,
 }
 
 /// The top bar: sidebar toggle, actions, vault name, sync, the «Menu» menu and inspector toggle.
@@ -147,9 +155,10 @@ fn top_bar_row(ui: &mut Ui, bar: TopBar<'_>) -> TopBarOutcome {
         bar.sidebars.left = !bar.sidebars.left;
     }
     outcome.new_note = flat_button(ui, "New").clicked();
-    for action in ["Quick open", "Graph", "Edit"] {
-        flat_button(ui, action);
-    }
+    outcome.quick_open = flat_button(ui, "Quick open").clicked();
+    outcome.toggle_graph = flat_button(ui, "Graph").clicked();
+    let mode = if bar.preview { "Edit" } else { "Preview" };
+    outcome.toggle_preview = flat_button(ui, mode).clicked();
     outcome.menu = right_aligned(ui, |ui| {
         ui.label(bar.vault_name);
         flat_button(ui, "Sync");
@@ -300,10 +309,10 @@ fn show_side_panel<R>(
     shown.map(|shown| shown.inner)
 }
 
-/// The solid document surface; empty until later tasks fill it.
-pub fn document_area(ui: &mut Ui, p: &Palette) {
+/// The solid document surface; `content` draws the note, the preview or the graph on it.
+pub fn document_area<R>(ui: &mut Ui, p: &Palette, content: impl FnOnce(&mut Ui) -> R) -> R {
     let frame = theme::document_frame(p)
         .inner_margin(Margin::same(DOCUMENT_PADDING))
         .outer_margin(Margin::same(GAP));
-    CentralPanel::default().frame(frame).show(ui, |_ui| {});
+    CentralPanel::default().frame(frame).show(ui, content).inner
 }
