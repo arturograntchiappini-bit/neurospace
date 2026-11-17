@@ -13,6 +13,8 @@ pub type Secret = [u8; 32];
 pub type DeviceId = [u8; 32];
 
 const APP_DIR: &str = "secondbrain";
+/// The most peers `peers.json` holds; a new peer beyond it is dropped and the oldest stay.
+pub const MAX_STORED_PEERS: usize = 256;
 const GROUP_FILES: [&str; 9] = [
     "secret",
     "peers.json",
@@ -151,6 +153,9 @@ pub struct Status {
     pub notes: usize,
     /// Notes that cannot be synced right now.
     pub blocked: Vec<BlockedNote>,
+    /// Entries of the sync document that a peer made up or garbled, skipped as malformed.
+    #[serde(default)]
+    pub rejected_entries: usize,
     /// The most recent error, if any.
     pub last_error: Option<String>,
     /// Time of this update, in seconds since the Unix epoch.
@@ -249,6 +254,8 @@ fn create_private_dirs(dir: &Path) -> io::Result<()> {
 }
 
 fn write_temporary(tmp: &Path, bytes: &[u8]) -> Result<()> {
+    // A stale file would keep its older, possibly wider, mode when reopened.
+    let _ = std::fs::remove_file(tmp);
     let written = private_options()
         .write(true)
         .create(true)
@@ -423,10 +430,14 @@ impl StateDir {
         write_json(&self.file("peers.json"), &peers)
     }
 
-    /// Adds a peer, or merges new addresses into a known one. True when the id is new.
+    /// Adds a peer, or merges new addresses into a known one. True when the id is new and was stored;
+    /// at `MAX_STORED_PEERS` a new id is dropped.
     pub fn add_peer(&self, peer: PeerEntry) -> Result<bool> {
         let mut peers = self.peers()?;
         let Some(known) = peers.iter_mut().find(|known| known.id == peer.id) else {
+            if peers.len() >= MAX_STORED_PEERS {
+                return Ok(false);
+            }
             peers.push(peer);
             self.save_peers(&peers)?;
             return Ok(true);
@@ -714,6 +725,44 @@ mod tests {
     }
 
     #[test]
+    fn should_keep_the_oldest_peers_when_the_list_is_full() {
+        let (_tmp, state) = fresh();
+        let id = |n: usize| format!("{n:064x}");
+        let peer = |n: usize| PeerEntry {
+            id: id(n),
+            addrs: Vec::new(),
+        };
+        let full: Vec<PeerEntry> = (0..MAX_STORED_PEERS).map(peer).collect();
+        state.save_peers(&full).unwrap();
+        assert!(!state.add_peer(peer(MAX_STORED_PEERS)).unwrap());
+        let stored = state.peers().unwrap();
+        assert_eq!(stored.len(), MAX_STORED_PEERS);
+        assert!(stored.iter().all(|entry| entry.id != id(MAX_STORED_PEERS)));
+        let extra = PeerEntry {
+            id: id(0),
+            addrs: vec!["1.2.3.4:5".to_string()],
+        };
+        assert!(!state.add_peer(extra).unwrap());
+        assert_eq!(state.peers().unwrap()[0].addrs, ["1.2.3.4:5"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_not_keep_the_mode_of_a_stale_temporary_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, state) = fresh();
+        let tmp = state.file("secret.tmp");
+        std::fs::write(&tmp, "old").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        state.save_secret(&[1; 32]).unwrap();
+        let mode = std::fs::metadata(state.file("secret"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
     fn should_default_config_and_accept_partial_files() {
         let (_tmp, state) = fresh();
         let default = NetConfig {
@@ -804,6 +853,7 @@ mod tests {
                 path: "a.md".to_string(),
                 reason: "not UTF-8".to_string(),
             }],
+            rejected_entries: 2,
             last_error: Some("boom".to_string()),
             updated_unix: 1_700_000_000,
         };

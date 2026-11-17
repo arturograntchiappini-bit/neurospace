@@ -23,6 +23,7 @@ pub const MAX_PASSES: u8 = 8;
 const MARKER_DIR: &str = ".secondbrain";
 const BASE_VERSION_FILE: &str = "base.version";
 const CHANGED_WHILE_SYNCING: &str = "changed while syncing";
+const COMPACTION_FAILED: &str = "compaction of the sync document failed; will retry";
 const UNSETTLED_CLAIMS: &str = "path claims did not settle in 16 rounds";
 
 /// The result of one file action: the reason when it was refused.
@@ -41,6 +42,8 @@ pub struct Outcome {
     pub passes: u8,
     /// How many notes the last pass saw in the document before it changed anything.
     pub notes: usize,
+    /// How many entries of the sync document were skipped as malformed.
+    pub rejected_entries: usize,
     /// A problem the round survived, in words for the status (never a secret or a note's text).
     pub notice: Option<String>,
 }
@@ -52,6 +55,7 @@ impl Outcome {
         self.blocked = pass.blocked;
         self.passes += pass.passes;
         self.notes = pass.notes;
+        self.rejected_entries = pass.rejected_entries;
         self.notice = pass.notice.or(self.notice.take());
     }
 }
@@ -64,6 +68,7 @@ struct StageRecord {
     doc_changed: bool,
     scan_blocked: Vec<BlockedNote>,
     notes: usize,
+    rejected_entries: usize,
     notice: Option<String>,
 }
 
@@ -158,18 +163,30 @@ impl LocalReplica {
             apply_doc_action(&mut self.doc, action)?;
         }
         self.store.persist(&self.doc)?;
-        if self.store.log_len()? > COMPACT_LOG_BYTES {
-            self.store.compact(&self.doc)?;
-        }
+        let compaction = self.compact_when_over(COMPACT_LOG_BYTES);
         let version = self.doc.version();
         self.stage = StageRecord {
             doc_changed: version != before,
             version,
             scan_blocked: blocked_notes(&scan),
             notes,
-            notice: (!resolved.settled).then(|| UNSETTLED_CLAIMS.to_owned()),
+            rejected_entries: self.doc.rejected_entries(),
+            notice: (!resolved.settled)
+                .then(|| UNSETTLED_CLAIMS.to_owned())
+                .or(compaction),
         };
         Ok(steps)
+    }
+
+    /// Compaction only shrinks the log, so a failure is reported and the round goes on.
+    fn compact_when_over(&mut self, log_bytes: u64) -> Option<String> {
+        let due = self.store.log_len().map(|len| len > log_bytes);
+        let failed = match due {
+            Ok(true) => self.store.compact(&self.doc).err(),
+            Ok(false) => None,
+            Err(error) => Some(error),
+        };
+        failed.map(|_| COMPACTION_FAILED.to_owned())
     }
 
     /// Carries the file actions out, applies the base changes of the steps that succeeded and
@@ -180,6 +197,7 @@ impl LocalReplica {
             passes: 1,
             blocked: self.stage.scan_blocked.clone(),
             notes: self.stage.notes,
+            rejected_entries: self.stage.rejected_entries,
             notice: self.stage.notice.clone(),
             ..Outcome::default()
         };
@@ -587,6 +605,26 @@ mod tests {
     }
 
     #[test]
+    fn should_report_a_failed_compaction_and_carry_on() {
+        let dirs = Dirs::new(&[(
+            "a.md", "A
+",
+        )]);
+        let mut replica = dirs.open();
+        replica.reconcile().unwrap();
+        std::fs::create_dir(dirs.state_file("doc.snap.tmp")).unwrap();
+        let notice = replica.compact_when_over(0).unwrap();
+        assert!(notice.contains("compaction"), "{notice}");
+        dirs.write(
+            "b.md", "B
+",
+        );
+        let outcome = replica.reconcile().unwrap();
+        assert!(outcome.doc_changed);
+        assert_eq!(replica.doc.alive_notes().len(), 2);
+    }
+
+    #[test]
     fn should_count_the_notes_the_last_pass_saw() {
         let dirs = Dirs::new(&[("a.md", "A\n"), ("d/b.md", "B\n")]);
         let mut replica = dirs.open();
@@ -963,6 +1001,11 @@ mod tests {
     #[test]
     fn should_not_trash_notes_when_base_version_does_not_decode() {
         assert_nothing_trashed_when_base_version_is(Some(b"ffff"));
+    }
+
+    #[test]
+    fn should_not_trash_notes_when_base_version_is_an_empty_version_with_trailing_bytes() {
+        assert_nothing_trashed_when_base_version_is(Some(b"00ff"));
     }
 
     #[cfg(unix)]

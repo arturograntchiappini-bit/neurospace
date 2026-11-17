@@ -101,8 +101,15 @@ fn parse_entry(key: &str, value: &LoroValue) -> Option<(NoteId, NotePath)> {
     Some((NoteId::parse(key)?, NotePath::parse(path).ok()?))
 }
 
+/// Decodes a version vector and refuses trailing bytes: the decoder ignores them, so `00ff` would
+/// read as the empty version, which every document includes.
 fn decode_version(bytes: &[u8]) -> Result<VersionVector> {
-    VersionVector::decode(bytes).map_err(doc_error)
+    let version = VersionVector::decode(bytes).map_err(doc_error)?;
+    // The encoding is canonical in length, so a longer input than its re-encoding has trailing bytes.
+    if version.encode().len() != bytes.len() {
+        return Err(doc_error("version vector has trailing bytes"));
+    }
+    Ok(version)
 }
 
 impl SyncDoc {

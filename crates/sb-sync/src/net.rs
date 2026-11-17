@@ -341,18 +341,27 @@ fn existing_identity(state: &StateDir) -> Result<DeviceId> {
     Ok(*SecretKey::from_bytes(&bytes).public().as_bytes())
 }
 
-/// Binds the endpoint. Local discovery is an optimisation: when binding with mDNS fails (no multicast), it is
-/// retried once without it, because address hints and, in `internet` mode, discovery still work.
+/// Binds the endpoint once, then adds local discovery to it. Local discovery is an optimisation: when it cannot
+/// start (no multicast), the endpoint stays up, because address hints and, in `internet` mode, discovery still work.
+/// Binding only once means a fixed `bind_port` is never claimed by a half-built endpoint that a retry would race.
 async fn bind_endpoint(key: SecretKey, config: &NetConfig) -> Result<Endpoint> {
-    if config.mdns
-        && let Ok(endpoint) = bind_with(key.clone(), config, true).await
-    {
-        return Ok(endpoint);
+    let endpoint = bind_with(key, config).await?;
+    if config.mdns {
+        add_local_discovery(&endpoint);
     }
-    bind_with(key, config, false).await
+    Ok(endpoint)
 }
 
-async fn bind_with(key: SecretKey, config: &NetConfig, mdns: bool) -> Result<Endpoint> {
+fn add_local_discovery(endpoint: &Endpoint) {
+    let Ok(services) = endpoint.address_lookup() else {
+        return;
+    };
+    if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
+        services.add(mdns);
+    }
+}
+
+async fn bind_with(key: SecretKey, config: &NetConfig) -> Result<Endpoint> {
     let builder = match config.mode {
         NetMode::Lan => {
             Endpoint::builder(presets::Minimal).portmapper_config(PortmapperConfig::Disabled)
@@ -360,9 +369,6 @@ async fn bind_with(key: SecretKey, config: &NetConfig, mdns: bool) -> Result<End
         NetMode::Internet => Endpoint::builder(presets::N0),
     };
     let mut builder = builder.secret_key(key).alpns(vec![ALPN.to_vec()]);
-    if mdns {
-        builder = builder.address_lookup(MdnsAddressLookup::builder());
-    }
     if let Some(port) = config.bind_port {
         let any_interface = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
         builder = builder
@@ -676,18 +682,27 @@ mod tests {
         assert!(state.lock().is_ok());
     }
 
-    #[test]
-    fn should_listen_on_the_configured_port() {
+    fn assert_listens_on_a_fixed_port(mdns: bool) {
         let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
-        let config = format!(r#"{{"mode":"lan","mdns":false,"bind_port":{port}}}"#);
+        let config = format!(r#"{{"mode":"lan","mdns":{mdns},"bind_port":{port}}}"#);
         let (_dir, state) = lan_state(&config);
         let (commands, _inbox) = mpsc::channel();
         let network = IrohNetwork::start(commands, &state).unwrap();
         let addresses = network.addresses();
         assert!(!addresses.is_empty());
         assert!(addresses.iter().all(|address| address.port() == port));
+    }
+
+    #[test]
+    fn should_listen_on_the_configured_port() {
+        assert_listens_on_a_fixed_port(false);
+    }
+
+    #[test]
+    fn should_listen_on_the_configured_port_with_local_discovery() {
+        assert_listens_on_a_fixed_port(true);
     }
 
     fn default_state() -> (tempfile::TempDir, StateDir) {

@@ -58,8 +58,9 @@ pub struct Outgoing {
 
 struct Session {
     peer: DeviceId,
-    /// What the peer is known to hold, so nothing is sent back to where it came from.
-    known: Vec<u8>,
+    /// What the peer is known to hold, so nothing is sent back to where it came from. `None`
+    /// until its `Version` arrives: nothing is exported to a peer whose holdings are unknown.
+    known: Option<Vec<u8>>,
 }
 
 /// A vault, its sync document and the open sessions to peers.
@@ -133,7 +134,7 @@ impl Replica {
             self.last_error = Some(error.to_string());
         }
         let version = self.local.doc.version();
-        let known = SyncDoc::new().version();
+        let known = None;
         self.sessions.insert(session, Session { peer, known });
         [
             Message::Version(version),
@@ -225,6 +226,7 @@ impl Replica {
             peers,
             notes: self.outcome.notes,
             blocked: self.outcome.blocked.clone(),
+            rejected_entries: self.outcome.rejected_entries,
             last_error: self.last_error.clone(),
             updated_unix: unix_now(),
         }
@@ -402,7 +404,7 @@ impl Replica {
         let version = doc.version();
         let known = SyncDoc::merge_versions(peer_version, &version)?;
         if let Some(state) = self.sessions.get_mut(&session) {
-            state.known = known;
+            state.known = Some(known);
         }
         let message = Message::Updates { version, updates };
         Ok(vec![Outgoing { session, message }])
@@ -447,8 +449,12 @@ impl Replica {
     }
 
     fn learn_version(&mut self, session: SessionId, version: &[u8]) -> Result<()> {
-        if let Some(state) = self.sessions.get_mut(&session) {
-            state.known = SyncDoc::merge_versions(&state.known, version)?;
+        let known = self
+            .sessions
+            .get_mut(&session)
+            .and_then(|state| state.known.as_mut());
+        if let Some(known) = known {
+            *known = SyncDoc::merge_versions(known, version)?;
         }
         Ok(())
     }
@@ -479,10 +485,13 @@ impl Replica {
         let version = doc.version();
         let mut outgoing = Vec::new();
         for (&session, state) in &mut self.sessions {
-            let Some(updates) = doc.updates_for(&state.known)? else {
+            let Some(known) = &state.known else {
                 continue;
             };
-            state.known = SyncDoc::merge_versions(&state.known, &version)?;
+            let Some(updates) = doc.updates_for(known)? else {
+                continue;
+            };
+            state.known = Some(SyncDoc::merge_versions(known, &version)?);
             let message = Message::Updates {
                 version: version.clone(),
                 updates,
@@ -568,6 +577,55 @@ mod tests {
     }
 
     #[test]
+    fn should_send_nothing_to_a_session_before_its_version_arrives() {
+        let mut fixture = fixture();
+        fixture.replica.session_opened(1, [2; 32]);
+        std::fs::write(
+            fixture._vault.path().join("x.md"),
+            "x
+",
+        )
+        .unwrap();
+        assert!(fixture.replica.reconcile().unwrap().is_empty());
+        let empty = SyncDoc::new().version();
+        let reply = fixture
+            .replica
+            .on_message(1, Message::Version(empty))
+            .unwrap();
+        let [
+            Outgoing {
+                message: Message::Updates { updates, .. },
+                ..
+            },
+        ] = &reply[..]
+        else {
+            panic!("expected one Updates, got {reply:?}");
+        };
+        let mut peer = SyncDoc::new();
+        peer.import(updates).unwrap();
+        assert_eq!(peer.alive_notes().len(), 1);
+        assert!(fixture.replica.reconcile().unwrap().is_empty());
+    }
+
+    #[test]
+    fn should_count_entries_a_peer_made_up_in_the_status() {
+        let mut fixture = fixture();
+        fixture.replica.session_opened(1, [2; 32]);
+        assert_eq!(fixture.replica.status().rejected_entries, 0);
+        let peer = loro::LoroDoc::new();
+        let paths = peer.get_map("paths");
+        paths.insert("not-an-id", "a.md").unwrap();
+        peer.commit();
+        let updates = peer.export(loro::ExportMode::all_updates()).unwrap();
+        let message = Message::Updates {
+            version: SyncDoc::new().version(),
+            updates,
+        };
+        fixture.replica.on_message(1, message).unwrap();
+        assert_eq!(fixture.replica.status().rejected_entries, 1);
+    }
+
+    #[test]
     fn should_not_reconcile_for_an_empty_updates_message() {
         let mut fixture = fixture();
         fixture.replica.session_opened(1, [2; 32]);
@@ -627,6 +685,9 @@ mod tests {
     fn should_persist_before_sending_updates_for_a_session() {
         let mut fixture = fixture();
         fixture.replica.session_opened(1, [2; 32]);
+        let empty = SyncDoc::new().version();
+        let reply = fixture.replica.on_message(1, Message::Version(empty));
+        assert!(reply.is_ok());
         let doc = &mut fixture.replica.local.doc;
         doc.create_note(&note_path(), "not yet durable\n").unwrap();
         let outgoing = fixture.replica.updates_for_sessions().unwrap();

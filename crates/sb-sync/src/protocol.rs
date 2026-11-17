@@ -58,6 +58,16 @@ impl Message {
         }
     }
 
+    /// The length `encode` would return, computed without copying the payloads.
+    pub fn encoded_len(&self) -> usize {
+        match self {
+            Message::Hello { proof, .. } => 1 + 2 + proof.len(),
+            Message::Version(version) => 1 + version.len(),
+            Message::Updates { version, updates } => 1 + 4 + version.len() + updates.len(),
+            Message::Peers(ids) => 1 + ids.len() * 32,
+        }
+    }
+
     /// Decodes a frame payload.
     ///
     /// # Errors
@@ -257,6 +267,25 @@ mod tests {
         let mut expected = vec![1, 0, 1];
         expected.extend([9u8; 32]);
         assert_eq!(hello.encode(), expected);
+    }
+
+    #[test]
+    fn should_compute_the_encoded_length_without_encoding() {
+        let messages = [
+            Message::Hello {
+                version: 1,
+                proof: [9; 32],
+            },
+            Message::Version(vec![1, 2, 3]),
+            Message::Updates {
+                version: vec![1, 2],
+                updates: vec![3; 10],
+            },
+            Message::Peers(vec![[1; 32], [2; 32]]),
+        ];
+        for message in messages {
+            assert_eq!(message.encoded_len(), message.encode().len(), "{message:?}");
+        }
     }
 
     #[test]

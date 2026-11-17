@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -13,7 +13,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::auth::{GroupTag, group_tag};
 use crate::error::{Result, SyncError};
-use crate::protocol::Message;
+use crate::protocol::{FRAME_MAX, Message};
 use crate::replica::{Outgoing, Replica, SessionId, Tick};
 use crate::session::SessionEvent;
 use crate::state::{DeviceId, EngineLock, PeerEntry, Secret, StateDir, Status, to_hex};
@@ -44,7 +44,7 @@ pub trait Network: Send + 'static {
     fn addresses(&self) -> Vec<SocketAddr>;
     /// Called on every tick with the current secret, the known peers and the peers that already have a session.
     /// When the secret differs from the previous call, abort every open session and every dial in flight.
-    /// Session ids are never reused.
+    /// Session ids are never reused. All events of one session carry the same group tag.
     fn refresh(&mut self, secret: Secret, peers: &[PeerEntry], connected: &[DeviceId]);
     /// Ends the connection of one session.
     fn close_session(&mut self, session: SessionId);
@@ -86,6 +86,8 @@ pub const TICK: Duration = Duration::from_secs(5);
 /// The longest time without a round.
 pub const RESCAN: Duration = Duration::from_secs(60);
 
+const OVERSIZE: &str = "a message for a peer exceeds the 1 GiB frame limit and was not sent; the sync history is too large";
+
 /// A burst of changes never postpones a round by more than this, so a file that changes
 /// continuously still gets one.
 const MAX_POSTPONE: Duration = Duration::from_secs(5);
@@ -111,18 +113,34 @@ impl EngineHandle {
         events: Option<Sender<EngineEvent>>,
         make_network: impl FnOnce(Sender<Command>, &StateDir) -> Result<Box<dyn Network>>,
     ) -> Result<EngineHandle> {
+        let folder = Folder {
+            root: vault_root,
+            make_watcher: watch_vault,
+        };
+        Self::start_watching(&folder, state, events, make_network)
+    }
+
+    /// `start` with the way the folder is watched injected, so a test can make watching fail.
+    fn start_watching(
+        folder: &Folder<'_>,
+        state: StateDir,
+        events: Option<Sender<EngineEvent>>,
+        make_network: impl FnOnce(Sender<Command>, &StateDir) -> Result<Box<dyn Network>>,
+    ) -> Result<EngineHandle> {
+        let vault_root = folder.root;
         let lock = state.lock()?;
         let (commands, inbox) = mpsc::channel();
         let mut network = make_network(commands.clone(), &state)?;
         let id = network.device_id();
-        let (replica, watcher) = match open_parts(vault_root, &state, id, &commands) {
-            Ok(parts) => parts,
+        let replica = match open_replica(vault_root, &state, id) {
+            Ok(replica) => replica,
             Err(error) => {
                 network.shutdown();
                 return Err(error);
             }
         };
-        let actor = Actor::new(replica, network, events, watcher);
+        let watching = Watching::start(vault_root, commands.clone(), folder.make_watcher);
+        let actor = Actor::new(replica, network, events, watching);
         let thread = std::thread::Builder::new()
             .name("sb-sync-engine".into())
             .spawn(move || actor.run_until_stopped(lock, &inbox))
@@ -211,21 +229,61 @@ impl Drop for EngineHandle {
     }
 }
 
-/// Opens the replica and makes sure the group secret and the device id are on disk, then starts the watcher.
-fn open_parts(
-    vault_root: &Path,
-    state: &StateDir,
-    device_id: DeviceId,
-    commands: &Sender<Command>,
-) -> Result<(Replica, VaultWatcher)> {
+/// Opens the replica and makes sure the group secret and the device id are on disk.
+fn open_replica(vault_root: &Path, state: &StateDir, device_id: DeviceId) -> Result<Replica> {
     let replica = Replica::open(Vault::open(vault_root)?, state.clone(), device_id)?;
     state.ensure_secret()?;
     state.save_device_id(&device_id)?;
+    Ok(replica)
+}
+
+type WatchFn = fn(&Path, &Sender<Command>) -> Result<VaultWatcher>;
+
+/// The vault folder and the way it is watched.
+struct Folder<'a> {
+    root: &'a Path,
+    make_watcher: WatchFn,
+}
+
+fn watch_vault(root: &Path, commands: &Sender<Command>) -> Result<VaultWatcher> {
     let changes = commands.clone();
-    let watcher = watch(vault_root, move || {
+    Ok(watch(root, move || {
         let _ = changes.send(Command::VaultChanged);
-    })?;
-    Ok((replica, watcher))
+    })?)
+}
+
+/// The folder watcher and what is needed to make a new one. Without a watcher the engine still
+/// rescans every `RESCAN`.
+struct Watching {
+    root: PathBuf,
+    commands: Sender<Command>,
+    make: WatchFn,
+    current: Option<VaultWatcher>,
+    /// Said once, when the engine starts without a watcher.
+    notice: Option<String>,
+}
+
+impl Watching {
+    fn start(root: &Path, commands: Sender<Command>, make: WatchFn) -> Watching {
+        let current = make(root, &commands);
+        let notice = current
+            .as_ref()
+            .err()
+            .map(|error| format!("file watching is off, rescanning every {RESCAN:?}: {error}"));
+        Watching {
+            root: root.to_path_buf(),
+            commands,
+            make,
+            current: current.ok(),
+            notice,
+        }
+    }
+
+    /// Replaces the watcher: after a drive came back, the old one may watch nothing.
+    fn restart(&mut self) -> Result<()> {
+        self.current = Some((self.make)(&self.root, &self.commands)?);
+        Ok(())
+    }
 }
 
 fn emit(events: Option<&Sender<EngineEvent>>, event: EngineEvent) {
@@ -307,7 +365,10 @@ struct Actor {
     last_error: Option<String>,
     /// The tag of the current group secret; sessions authenticated under another one are refused.
     group: Option<GroupTag>,
-    _watcher: VaultWatcher,
+    watching: Watching,
+    /// The vault lost its marker folder; the watcher is replaced after the next good round.
+    rewatch: bool,
+    frame_limit: usize,
 }
 
 impl Actor {
@@ -315,7 +376,7 @@ impl Actor {
         replica: Replica,
         network: Box<dyn Network>,
         events: Option<Sender<EngineEvent>>,
-        watcher: VaultWatcher,
+        watching: Watching,
     ) -> Actor {
         let started = Instant::now();
         let mut actor = Actor {
@@ -328,7 +389,9 @@ impl Actor {
             blocked: 0,
             last_error: None,
             group: None,
-            _watcher: watcher,
+            watching,
+            rewatch: false,
+            frame_limit: FRAME_MAX,
         };
         actor.group = actor.read_group();
         actor
@@ -355,6 +418,9 @@ impl Actor {
     }
 
     fn run(mut self, inbox: &Receiver<Command>) {
+        if let Some(notice) = self.watching.notice.take() {
+            self.report(&SyncError::Net(notice));
+        }
         self.round();
         let mut running = self.tick();
         while running {
@@ -429,10 +495,24 @@ impl Actor {
         match self.replica.reconcile() {
             Ok(outgoing) => {
                 self.last_error = None;
+                self.replace_watcher_after_outage();
                 self.after_reconcile();
                 self.send_all(outgoing);
             }
-            Err(error) => self.report(&error),
+            Err(error) => {
+                self.rewatch |= matches!(error, SyncError::VaultMarkerMissing(_));
+                self.report(&error);
+            }
+        }
+    }
+
+    /// An unmounted vault takes its watches with it; the first good round after it makes a new watcher.
+    fn replace_watcher_after_outage(&mut self) {
+        if !std::mem::take(&mut self.rewatch) {
+            return;
+        }
+        if let Err(error) = self.watching.restart() {
+            self.report(&error);
         }
     }
 
@@ -534,9 +614,14 @@ impl Actor {
         }
     }
 
-    /// Sends each message on its session; a session that cannot take it is closed.
+    /// Sends each message on its session; a session that cannot take it is closed. A message over the
+    /// frame limit is never queued: the peer could not read it, so it is reported instead.
     fn send_all(&mut self, outgoing: Vec<Outgoing>) {
         for Outgoing { session, message } in outgoing {
+            if message.encoded_len() > self.frame_limit {
+                self.report(&SyncError::Net(OVERSIZE.into()));
+                continue;
+            }
             let link = self.sessions.get(&session);
             if !link.is_some_and(|link| link.outbound.send(message).is_ok()) {
                 self.close(session);
@@ -565,6 +650,8 @@ impl Actor {
             (Ok(None), _) => return,
             (Err(error), _) | (_, Err(error)) => return self.report(&error),
         };
+        // The same secret the network authenticates with, so a failed read at one tick heals at the next.
+        self.group = Some(group_tag(&secret));
         let connected = self.replica.connected_peers();
         self.network.refresh(secret, &peers, &connected);
     }
@@ -690,16 +777,30 @@ mod tests {
         state_dir: tempfile::TempDir,
         id: DeviceId,
     ) -> Result<Rig> {
+        start_in_watching(vault, state_dir, id, watch_vault)
+    }
+
+    fn start_in_watching(
+        vault: tempfile::TempDir,
+        state_dir: tempfile::TempDir,
+        id: DeviceId,
+        make_watcher: WatchFn,
+    ) -> Result<Rig> {
         let state = StateDir::at(state_dir.path()).unwrap();
         let (event_tx, events) = mpsc::channel();
         let (command_tx, command_rx) = mpsc::channel();
         let calls = Arc::new(Mutex::new(Calls::default()));
         let shared = Arc::clone(&calls);
+        let make_network = move |tx, _: &StateDir| -> Result<Box<dyn Network>> {
+            command_tx.send(tx).unwrap();
+            Ok(Box::new(FakeNetwork { id, calls: shared }))
+        };
+        let folder = Folder {
+            root: vault.path(),
+            make_watcher,
+        };
         let handle =
-            EngineHandle::start(vault.path(), state.clone(), Some(event_tx), move |tx, _| {
-                command_tx.send(tx).unwrap();
-                Ok(Box::new(FakeNetwork { id, calls: shared }))
-            })?;
+            EngineHandle::start_watching(&folder, state.clone(), Some(event_tx), make_network)?;
         Ok(Rig {
             handle,
             events,
@@ -955,6 +1056,139 @@ mod tests {
         wait_until("three notes", || note_count(&rig) == 3);
         assert!(rig.handle.status().unwrap().last_error.is_none());
         rig.handle.shutdown().unwrap();
+    }
+
+    fn no_watcher(_: &Path, _: &Sender<Command>) -> Result<VaultWatcher> {
+        Err(SyncError::Net("too many open files".into()))
+    }
+
+    #[test]
+    fn should_start_without_a_watcher_and_say_so() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::write(vault.path().join("a.md"), "text\n").unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let rig = start_in_watching(vault, state_dir, [1; 32], no_watcher).unwrap();
+        let mut said = false;
+        let deadline = Instant::now() + LIMIT;
+        while !said && Instant::now() < deadline {
+            let event = rig.events.recv_timeout(Duration::from_millis(50));
+            said = matches!(&event, Ok(EngineEvent::Error(text)) if text.contains("file watching is off"));
+        }
+        assert!(said, "no notice about the missing watcher");
+        wait_until("the first round", || note_count(&rig) == 1);
+        rig.handle.shutdown().unwrap();
+    }
+
+    static WATCHERS_MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn counting_watcher(root: &Path, commands: &Sender<Command>) -> Result<VaultWatcher> {
+        WATCHERS_MADE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        watch_vault(root, commands)
+    }
+
+    #[test]
+    fn should_make_a_new_watcher_after_the_vault_came_back() {
+        let vault = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let rig = start_in_watching(vault, state_dir, [1; 32], counting_watcher).unwrap();
+        wait_until("the first round", || {
+            rig.handle.status().unwrap().last_error.is_none()
+        });
+        let made = || WATCHERS_MADE.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(made(), 1);
+        std::fs::remove_dir_all(rig.vault.path().join(".secondbrain")).unwrap();
+        std::fs::write(rig.vault.path().join("b.md"), "b\n").unwrap();
+        wait_until("the error in the status", || {
+            rig.handle.status().unwrap().last_error.is_some()
+        });
+        std::fs::create_dir(rig.vault.path().join(".secondbrain")).unwrap();
+        std::fs::write(rig.vault.path().join("c.md"), "c\n").unwrap();
+        wait_until("both notes", || note_count(&rig) == 2);
+        assert_eq!(made(), 2);
+        rig.handle.shutdown().unwrap();
+    }
+
+    struct Bare {
+        actor: Actor,
+        state: StateDir,
+        _dirs: (tempfile::TempDir, tempfile::TempDir),
+    }
+
+    /// An actor that was never run, with a replica whose group secret was not created yet.
+    fn bare_actor() -> Bare {
+        let (vault, state_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let state = StateDir::at(state_dir.path()).unwrap();
+        let opened = Vault::open(vault.path()).unwrap();
+        let replica = Replica::open(opened, state.clone(), [1; 32]).unwrap();
+        let (commands, _inbox) = mpsc::channel();
+        let watching = Watching::start(vault.path(), commands, watch_vault);
+        let network = FakeNetwork {
+            id: [1; 32],
+            calls: Arc::default(),
+        };
+        let actor = Actor::new(replica, Box::new(network), None, watching);
+        Bare {
+            actor,
+            state,
+            _dirs: (vault, state_dir),
+        }
+    }
+
+    fn link(actor: &mut Actor, session: SessionId) -> UnboundedReceiver<Message> {
+        let (outbound, receiver) = unbounded_channel();
+        let peer = [9; 32];
+        actor
+            .sessions
+            .insert(session, SessionLink { peer, outbound });
+        receiver
+    }
+
+    #[test]
+    fn should_not_queue_a_message_over_the_frame_limit_and_say_so() {
+        let mut bare = bare_actor();
+        let mut receiver = link(&mut bare.actor, 1);
+        bare.actor.frame_limit = 8;
+        let big = Message::Version(vec![0; 100]);
+        let outgoing = Outgoing {
+            session: 1,
+            message: big.clone(),
+        };
+        bare.actor.send_all(vec![outgoing]);
+        assert!(receiver.try_recv().is_err());
+        let said = bare.actor.last_error.clone().unwrap();
+        assert!(said.contains("frame limit"), "{said}");
+        assert!(bare.actor.sessions.contains_key(&1));
+        bare.actor.frame_limit = 1000;
+        let outgoing = Outgoing {
+            session: 1,
+            message: big.clone(),
+        };
+        bare.actor.send_all(vec![outgoing]);
+        assert_eq!(receiver.try_recv().unwrap(), big);
+    }
+
+    #[test]
+    fn should_accept_sessions_once_the_secret_becomes_readable() {
+        let mut bare = bare_actor();
+        assert_eq!(bare.actor.group, None);
+        bare.state.save_secret(&[6; 32]).unwrap();
+        let tag = group_tag(&[6; 32]);
+        let (outbound, _receiver) = unbounded_channel();
+        let opened = SessionEvent::Opened {
+            peer: [9; 32],
+            outbound,
+        };
+        bare.actor.on_session(1, tag, opened);
+        assert!(!bare.actor.sessions.contains_key(&1));
+        bare.actor.refresh_network();
+        assert_eq!(bare.actor.group, Some(tag));
+        let (outbound, _receiver) = unbounded_channel();
+        let opened = SessionEvent::Opened {
+            peer: [9; 32],
+            outbound,
+        };
+        bare.actor.on_session(2, tag, opened);
+        assert!(bare.actor.sessions.contains_key(&2));
     }
 
     #[test]

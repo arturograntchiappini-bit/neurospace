@@ -154,9 +154,9 @@ impl DocStore {
     /// in between leaves an older but complete snapshot rather than orphaned frames.
     pub fn reset(&mut self) -> Result<SyncDoc> {
         remove_if_exists(&self.log)?;
+        self.log_good_len = 0;
         remove_if_exists(&self.snap)?;
         let doc = SyncDoc::new();
-        self.log_good_len = 0;
         self.persisted = doc.version();
         Ok(doc)
     }
@@ -534,6 +534,18 @@ mod tests {
         let loaded = Base::load(&state).unwrap();
         assert_eq!(loaded.keys().collect::<Vec<_>>(), vec![&key("a.md")]);
         assert_eq!(loaded.get(&key("a.md")), Some(&[0xab; 32]));
+    }
+
+    #[test]
+    fn should_forget_the_log_offset_even_when_the_snapshot_cannot_be_removed() {
+        let (_tmp, state) = fresh();
+        let (mut store, mut doc) = DocStore::open(&state).unwrap();
+        doc.create_note(&path("a.md"), "one").unwrap();
+        store.persist(&doc).unwrap();
+        std::fs::create_dir(state.file("doc.snap")).unwrap();
+        assert!(store.reset().is_err());
+        assert!(!state.file("doc.log").exists());
+        assert_eq!(store.log_good_len, 0);
     }
 
     #[test]
