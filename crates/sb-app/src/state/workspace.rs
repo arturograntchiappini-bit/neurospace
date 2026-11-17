@@ -303,6 +303,30 @@ impl Workspace {
         self.create_at(path.as_str())
     }
 
+    /// Creates and opens the note a graph ghost node stands for. The ghost id is lowercase, so the
+    /// path comes from the first link (in key order) that produces that id: this keeps the letter
+    /// case as the link wrote it (spec 6.3, 6.6).
+    ///
+    /// # Errors
+    /// `NotFound` when no link has that ghost id, or any error of `create_at` (such as
+    /// `AlreadyExists`: nothing is replaced).
+    pub fn create_from_ghost(&mut self, ghost_id: &str) -> Result<NotePath> {
+        let path = self
+            .ghost_target(ghost_id)
+            .ok_or_else(|| CoreError::NotFound(ghost_id.to_owned()))?;
+        self.create_at(path.as_str())
+    }
+
+    fn ghost_target(&self, ghost_id: &str) -> Option<NotePath> {
+        let wants = ghost_id.strip_prefix('?')?;
+        self.index.notes().find_map(|entry| {
+            let links = entry.links.iter().filter(|link| !link.is_attachment());
+            links
+                .filter_map(|link| new_note_path(&link.target, &entry.path).ok())
+                .find(|path| path.key().as_str().strip_suffix(".md") == Some(wants))
+        })
+    }
+
     /// Notes whose path contains `query` (ignoring case), those whose name starts with it first.
     pub fn quick_open(&self, query: &str) -> Vec<NotePath> {
         if query.is_empty() {
@@ -899,5 +923,57 @@ mod tests {
             ApplyOutcome::Applied(_)
         ));
         assert_eq!(ws.word_count(), 4);
+    }
+
+    #[test]
+    fn should_create_and_select_note_with_the_case_as_written_when_ghost_found() {
+        let (dir, mut ws) = workspace(&[("a.md", "[[Ghost]]"), ("sub/b.md", "[[./Next]]")]);
+        let graph = ws.index().graph();
+        let ghosts: Vec<&str> = graph
+            .nodes
+            .iter()
+            .filter(|n| !n.exists)
+            .map(|n| n.id.as_str())
+            .collect();
+        assert_eq!(
+            ghosts,
+            ["?ghost", "?sub/next"],
+            "ids as the graph builds them"
+        );
+        let created = ws.create_from_ghost("?ghost").unwrap();
+        assert_eq!(created, p("Ghost.md"));
+        assert_eq!(ws.open_note().unwrap().path, p("Ghost.md"));
+        assert!(dir.path().join("Ghost.md").is_file());
+        let anchored = ws.create_from_ghost("?sub/next").unwrap();
+        assert_eq!(anchored, p("sub/Next.md"));
+    }
+
+    #[test]
+    fn should_report_not_found_when_no_link_has_the_ghost_id() {
+        let (_dir, mut ws) = workspace(&[("a.md", "[[Ghost]] ![[p.png]]")]);
+        for id in ["?other", "?p.png", "?p"] {
+            let error = ws.create_from_ghost(id).unwrap_err();
+            assert!(
+                matches!(&error, CoreError::NotFound(found) if found == id),
+                "{id}"
+            );
+        }
+        assert!(ws.open_note().is_none());
+    }
+
+    #[test]
+    fn should_not_replace_existing_note_when_ghost_path_is_taken() {
+        let (dir, mut ws) = workspace(&[("a.md", "[[Ghost]]")]);
+        fs::write(dir.path().join("Ghost.md"), "precious").unwrap();
+        let error = ws.create_from_ghost("?ghost").unwrap_err();
+        assert!(matches!(error, CoreError::AlreadyExists(_)));
+        assert_eq!(on_disk(&dir, "Ghost.md"), "precious");
+    }
+
+    #[test]
+    fn should_save_the_open_note_before_creating_from_a_ghost() {
+        let (dir, mut ws) = open_dirty(&[("a.md", "[[Ghost]]")], "a.md", "[[Ghost]] typed");
+        ws.create_from_ghost("?ghost").unwrap();
+        assert_eq!(on_disk(&dir, "a.md"), "[[Ghost]] typed");
     }
 }

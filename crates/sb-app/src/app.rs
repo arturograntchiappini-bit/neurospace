@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use eframe::egui::{
-    CentralPanel, Context, Key, KeyboardShortcut, Modifiers, Theme, ThemePreference, Ui, Visuals,
+    CentralPanel, Context, Key, KeyboardShortcut, Modifiers, Rect, Theme, ThemePreference, Ui,
+    Visuals,
 };
 use sb_core::Result as CoreResult;
 
@@ -16,6 +17,7 @@ use crate::state::{
     QuickOpen, Reloader, Saved, SearchBox, Settings, ThemeChoice, Workspace,
 };
 use crate::ui::editor::{self, EditorState};
+use crate::ui::graph_view::GraphView;
 use crate::ui::menu::{self, MenuOutcome};
 use crate::ui::shell::{self, Sidebars, TopBar, TopBarOutcome};
 use crate::ui::theme::{self, Material, Palette};
@@ -65,6 +67,7 @@ struct VaultView {
     editor: EditorState,
     quick_open: Option<QuickOpen>,
     graph: bool,
+    graph_view: GraphView,
     reloader: Option<Reloader>,
     window_focused: bool,
 }
@@ -158,9 +161,19 @@ impl SecondBrainApp {
         self.view.editor.preview
     }
 
-    /// Whether the graph view is switched on (the view itself is drawn by a later task).
+    /// Whether the graph view replaces the note in the centre pane.
     pub fn graph_shown(&self) -> bool {
         self.view.graph
+    }
+
+    /// Whether the graph layout has come to rest. Used by tests.
+    pub fn graph_settled(&self) -> bool {
+        self.view.graph_view.is_settled()
+    }
+
+    /// Where the graph drew node `id` last frame. Used by tests.
+    pub fn graph_node_rect(&self, id: &str) -> Option<Rect> {
+        self.view.graph_view.node_rect(id)
     }
 
     /// The error the welcome screen shows, if any. Used by tests.
@@ -283,19 +296,31 @@ impl SecondBrainApp {
         shell::status_strip(ui, palette, &mut self.notices, workspace);
         let side = show_panels(ui, palette, workspace, &mut self.view);
         let centre = shell::document_area(ui, palette, |ui| {
-            editor::show(ui, palette, workspace, &mut self.view.editor)
+            show_centre(ui, palette, workspace, &mut self.view)
         });
         dialogs::show(ui.ctx(), palette, &mut self.view.dialog, workspace);
         let found = quick_open::show(ui.ctx(), palette, &mut self.view.quick_open, workspace);
-        let notice = side
-            .or(centre)
-            .or(found)
-            .and_then(|action| action.run(workspace, &mut self.view.dialog));
+        let from_graph = self.view.graph && side.is_none() && centre.is_some();
+        self.run_action(side.or(centre).or(found), from_graph);
+        self.schedule_autosave(ui.ctx());
+        self.apply_bar(bar_outcome);
+    }
+
+    /// Runs what the user asked for and reports a failure. Opening a note ends the graph view;
+    /// a click on a graph node also puts the note in edit mode.
+    fn run_action(&mut self, action: Option<NoteAction>, from_graph: bool) {
+        let (Some(action), Screen::Vault(workspace)) = (action, &mut self.screen) else {
+            return;
+        };
+        let leaves_graph = self.view.graph && action.navigates();
+        let notice = action.run(workspace, &mut self.view.dialog);
+        if leaves_graph && notice.is_none() {
+            self.view.graph = false;
+            self.view.editor.preview &= !from_graph;
+        }
         if let Some(notice) = notice {
             self.notices.post(notice, Instant::now());
         }
-        self.schedule_autosave(ui.ctx());
-        self.apply_bar(bar_outcome);
     }
 
     /// Saves when the autosave delay has passed or the window lost focus; follows the folder.
@@ -465,6 +490,23 @@ fn show_panels(
         inspector::show(ui, palette, workspace, links)
     });
     left.flatten().or(right.flatten())
+}
+
+/// Draws the graph or the note in the document area; returns the note the user asked for.
+fn show_centre(
+    ui: &mut Ui,
+    palette: &Palette,
+    workspace: &mut Workspace,
+    view: &mut VaultView,
+) -> Option<NoteAction> {
+    if !view.graph {
+        return editor::show(ui, palette, workspace, &mut view.editor);
+    }
+    let outcome = view.graph_view.show(ui, palette, workspace);
+    if outcome.list_view {
+        view.quick_open.get_or_insert_with(QuickOpen::default);
+    }
+    outcome.action
 }
 
 fn show_opening(ui: &mut Ui) {

@@ -1,5 +1,6 @@
 //! Application behaviour with no dependency on any UI crate.
 
+pub mod graph_layout;
 pub mod jobs;
 pub mod markup;
 pub mod notice;

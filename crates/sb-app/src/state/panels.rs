@@ -20,6 +20,8 @@ pub enum NoteAction {
     Open(NotePath),
     /// Open the note a link written in the open note points to, creating it if needed.
     Follow(String),
+    /// Create and open the note a graph ghost node (this id) stands for.
+    CreateFromGhost(String),
     /// Ask for a new name for this note.
     Rename(NotePath),
     /// Move this note to the trash.
@@ -29,12 +31,21 @@ pub enum NoteAction {
 }
 
 impl NoteAction {
+    /// True for the actions that put a note in front of the user: they end the graph view.
+    pub fn navigates(&self) -> bool {
+        matches!(
+            self,
+            NoteAction::Open(_) | NoteAction::Follow(_) | NoteAction::CreateFromGhost(_)
+        )
+    }
+
     /// Runs the action on `workspace`. Actions that need a name open `dialog`. The returned
     /// notice tells the user what happened or went wrong.
     pub fn run(self, workspace: &mut Workspace, dialog: &mut Option<NoteDialog>) -> Option<Notice> {
         match self {
             NoteAction::Open(path) => failure(workspace.select(&path)),
             NoteAction::Follow(target) => failure(workspace.follow_link(&target)),
+            NoteAction::CreateFromGhost(id) => failure(workspace.create_from_ghost(&id)),
             NoteAction::Delete(path) => match workspace.delete(&path) {
                 Ok(()) => Some(Notice::info(format!("Moved to trash: {path}"))),
                 Err(error) => Some(Notice::error(error.to_string())),
