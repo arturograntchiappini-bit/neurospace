@@ -316,14 +316,29 @@ fn load_or_create_key(state: &StateDir) -> Result<SecretKey> {
 
 /// Makes sure the device key, the device id and the group secret exist, and returns the device id.
 /// The network takes its key from the same place, so an invitation and a running engine always agree.
+/// It holds the engine lock while it creates anything, so two first-time callers cannot each make a key.
+/// While an engine holds the lock it creates nothing and only reads the key the engine uses.
 ///
 /// # Errors
-/// Failures of the state directory.
+/// Failures of the state directory; `NotConfigured` when an engine holds the lock but has no key yet.
 pub fn ensure_identity(state: &StateDir) -> Result<DeviceId> {
+    match state.lock() {
+        Ok(_lock) => create_identity(state),
+        Err(SyncError::AlreadyRunning) => existing_identity(state),
+        Err(error) => Err(error),
+    }
+}
+
+fn create_identity(state: &StateDir) -> Result<DeviceId> {
     let id = *load_or_create_key(state)?.public().as_bytes();
     state.save_device_id(&id)?;
     state.ensure_secret()?;
     Ok(id)
+}
+
+fn existing_identity(state: &StateDir) -> Result<DeviceId> {
+    let bytes = state.device_key()?.ok_or(SyncError::NotConfigured)?;
+    Ok(*SecretKey::from_bytes(&bytes).public().as_bytes())
 }
 
 /// Binds the endpoint. Local discovery is an optimisation: when binding with mDNS fails (no multicast), it is
@@ -629,6 +644,36 @@ mod tests {
         let (commands, _inbox) = mpsc::channel();
         let network = IrohNetwork::start(commands, &state).unwrap();
         assert_eq!(network.device_id(), id);
+    }
+
+    #[test]
+    fn should_read_the_existing_key_and_create_nothing_while_an_engine_holds_the_lock() {
+        let (_dir, state) = lan_state("{}");
+        let key = SecretKey::generate();
+        state.save_device_key(&key.to_bytes()).unwrap();
+        let _engine = state.lock().unwrap();
+        let id = ensure_identity(&state).unwrap();
+        assert_eq!(id, *key.public().as_bytes());
+        assert_eq!(state.device_key().unwrap(), Some(key.to_bytes()));
+        assert_eq!(state.secret().unwrap(), None);
+    }
+
+    #[test]
+    fn should_not_create_a_key_while_an_engine_that_has_none_yet_holds_the_lock() {
+        let (_dir, state) = lan_state("{}");
+        let _engine = state.lock().unwrap();
+        assert!(matches!(
+            ensure_identity(&state),
+            Err(SyncError::NotConfigured)
+        ));
+        assert_eq!(state.device_key().unwrap(), None);
+    }
+
+    #[test]
+    fn should_release_the_lock_after_creating_the_identity() {
+        let (_dir, state) = lan_state("{}");
+        ensure_identity(&state).unwrap();
+        assert!(state.lock().is_ok());
     }
 
     #[test]

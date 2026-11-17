@@ -27,7 +27,9 @@ pub use plan::{
 pub use protocol::{
     ALPN, FRAME_MAX, HELLO_MAX, Message, PROTOCOL_VERSION, read_frame, write_frame,
 };
-pub use replica::{FRESH_JOIN_WAIT, MAX_PEERS_PER_MESSAGE, Outgoing, Replica, SessionId, Tick};
+pub use replica::{
+    FRESH_JOIN_WAIT, MAX_PEERS_PER_MESSAGE, Outgoing, Replica, SessionId, Tick, unix_now,
+};
 pub use session::{Role, SessionEvent, SessionParams, run_session};
 pub use state::{
     BlockedNote, DeviceId, EngineLock, NetConfig, NetMode, PeerEntry, PeerStatus, PendingCommand,

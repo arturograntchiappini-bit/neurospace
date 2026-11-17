@@ -424,7 +424,8 @@ fn should_pick_up_peers_added_while_running() {
         Message::Peers(ids) => Some(ids.clone()),
         _ => None,
     });
-    assert_eq!(peers.unwrap(), vec![[9; 32]]);
+    // The device that opened the session is recorded first, so it is listed too.
+    assert_eq!(peers.unwrap(), vec![[9; 32], [2; 32]]);
 }
 
 #[test]

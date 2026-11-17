@@ -399,7 +399,8 @@ fn should_store_at_most_sixty_four_foreign_peers_and_never_its_own_id() {
         .on_message(session, Message::Peers(ids))
         .unwrap();
     let stored = nodes[1].replica.local().state.peers().unwrap();
-    assert_eq!(stored.len(), MAX_PEERS_PER_MESSAGE);
+    // The 64 of the message, plus the device that opened the session, which is recorded on its own.
+    assert_eq!(stored.len(), MAX_PEERS_PER_MESSAGE + 1);
     assert!(
         stored
             .iter()

@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use clap::Parser;
+use sb_cli::cli::Cli;
 use sb_sync::{StateDir, Ticket, to_hex};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -40,6 +42,21 @@ fn device(config: Option<&str>) -> Device {
         vault,
         base,
         state,
+    }
+}
+
+/// A device whose state directory has not been created, to see which commands create it.
+fn untouched_device() -> Device {
+    let (vault_dir, base_dir) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let (vault, base) = (
+        vault_dir.path().to_path_buf(),
+        base_dir.path().to_path_buf(),
+    );
+    Device {
+        _dirs: (vault_dir, base_dir),
+        vault,
+        state: base.join("vaults"),
+        base,
     }
 }
 
@@ -178,10 +195,54 @@ fn should_report_engine_not_running() {
 
 #[test]
 fn should_reject_a_malformed_ticket() {
-    let a = device(None);
+    let a = untouched_device();
     let (code, stdout, stderr) = sb_with_state(&a, &["sync", "join", "nonsense"]);
     assert_eq!((code, stdout.as_str()), (1, ""));
     assert!(stderr.contains("invalid ticket"), "{stderr}");
+    assert_eq!(
+        fs::read_dir(&a.base).unwrap().count(),
+        0,
+        "state was created"
+    );
+}
+
+#[test]
+fn should_not_print_the_secret_of_a_ticket_argument_in_debug_output() {
+    let ticket = Ticket {
+        device_id: [9; 32],
+        secret: [8; 32],
+        addrs: Vec::new(),
+    };
+    let args = ["sb", "sync", "join", &ticket.to_string()];
+    let cli = Cli::try_parse_from(args).unwrap();
+    let shown = format!("{cli:?}");
+    assert!(shown.contains("Join"), "{shown}");
+    assert!(!shown.contains(&to_hex(&ticket.secret)), "{shown}");
+}
+
+#[test]
+fn should_print_the_ticket_as_json_when_inviting() {
+    let a = device(Some(LAN_CONFIG));
+    let document: Value = serde_json::from_str(&ok(&a, &["--json", "sync", "invite"])).unwrap();
+    let ticket: Ticket = document["ticket"].as_str().unwrap().parse().unwrap();
+    assert!(ticket.addrs.is_empty());
+}
+
+#[test]
+fn should_queue_a_join_for_the_running_engine() {
+    let a = device(Some(LAN_CONFIG));
+    let _engine = Engine::spawn(&a);
+    wait_for_status(&a);
+    let ticket = Ticket {
+        device_id: [9; 32],
+        secret: [8; 32],
+        addrs: Vec::new(),
+    };
+    let joined = ok(&a, &["--json", "sync", "join", &ticket.to_string()]);
+    assert_eq!(joined, "{\"applied\":\"queued\"}\n");
+    // The engine takes the file on its next tick; by then the join must have taken effect.
+    let taken = a.state.join("command.pending").exists() || a_secret(&a) == [8; 32];
+    assert!(taken);
 }
 
 #[test]
@@ -268,12 +329,15 @@ fn should_sync_two_processes_paired_by_ticket() {
         read_note(&a, "hello.md").filter(|text| text.ends_with("from B"))
     });
 
-    let peers = wait_until(SYNC, "B connected in A's status", || {
-        let peers = status_json(&a)["peers"].clone();
+    wait_until(SYNC, "B connected in A's status", || {
+        let status = status_json(&a);
         let connected = |peer: &Value| peer["id"] == device_b && peer["connected"] == json!(true);
-        peers.as_array()?.iter().any(connected).then_some(peers)
+        status["peers"]
+            .as_array()?
+            .iter()
+            .any(connected)
+            .then_some(())
     });
-    assert!(peers.is_array());
 
     let secret = to_hex(&a_secret(&a));
     for (stdout, stderr) in [engine_a.stop(), engine_b.stop()] {

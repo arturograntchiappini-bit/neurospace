@@ -24,7 +24,7 @@ pub const MAX_PEERS_PER_MESSAGE: usize = 64;
 pub const FRESH_JOIN_WAIT: Duration = Duration::from_secs(20);
 
 /// Seconds since the Unix epoch; 0 when the clock is before it.
-pub(crate) fn unix_now() -> u64 {
+pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -123,8 +123,13 @@ impl Replica {
         self.updates_for_sessions()
     }
 
-    /// Registers a session; the answer is this side's `Version` and `Peers`.
+    /// Registers a session and remembers its peer, so that a device that dialled in is dialled back and
+    /// passed on in `Peers`; the answer is this side's `Version` and `Peers`. A peers file that cannot be
+    /// written is recorded in `last_error` and never fails the session.
     pub fn session_opened(&mut self, session: SessionId, peer: DeviceId) -> Vec<Outgoing> {
+        if let Err(error) = self.remember_peer(&peer) {
+            self.last_error = Some(error.to_string());
+        }
         let version = self.local.doc.version();
         let known = SyncDoc::new().version();
         self.sessions.insert(session, Session { peer, known });
@@ -134,6 +139,17 @@ impl Replica {
         ]
         .map(|message| Outgoing { session, message })
         .into()
+    }
+
+    fn remember_peer(&self, peer: &DeviceId) -> Result<()> {
+        if *peer == self.device_id {
+            return Ok(());
+        }
+        let entry = PeerEntry {
+            id: to_hex(peer),
+            addrs: Vec::new(),
+        };
+        self.local.state.add_peer(entry).map(drop)
     }
 
     /// Forgets a session.
@@ -195,19 +211,10 @@ impl Replica {
         let connected = self.connected_peers();
         // shortcut: an unreadable peers.json shows no peers; the engine meets the same error elsewhere.
         let known = self.local.state.peers().unwrap_or_default();
-        let mut peers: Vec<PeerStatus> = known
+        let peers = known
             .into_iter()
             .map(|entry| peer_status(entry, &connected))
             .collect();
-        // A device that dialled in is a member too, even if no one has told us about it yet.
-        for id in connected.iter().map(|id| to_hex(id)) {
-            if !peers.iter().any(|peer| peer.id == id) {
-                peers.push(PeerStatus {
-                    id,
-                    connected: true,
-                });
-            }
-        }
         Status {
             pid: std::process::id(),
             device_id: to_hex(&self.device_id),
@@ -519,15 +526,38 @@ mod tests {
     }
 
     #[test]
-    fn should_list_a_connected_peer_in_the_status_although_it_is_not_in_peers_json() {
+    fn should_record_a_peer_that_dialled_in() {
         let mut fixture = fixture();
         fixture.replica.session_opened(1, [2; 32]);
-        let peers = fixture.replica.status().peers;
-        let expected = PeerStatus {
+        fixture.replica.session_opened(2, [2; 32]);
+        let state = StateDir::at(fixture.state.path()).unwrap();
+        let recorded = PeerEntry {
+            id: to_hex(&[2; 32]),
+            addrs: Vec::new(),
+        };
+        assert_eq!(state.peers().unwrap(), [recorded]);
+        let listed = PeerStatus {
             id: to_hex(&[2; 32]),
             connected: true,
         };
-        assert_eq!(peers, [expected]);
+        assert_eq!(fixture.replica.status().peers, [listed]);
+    }
+
+    #[test]
+    fn should_not_record_this_device_as_a_peer() {
+        let mut fixture = fixture();
+        fixture.replica.session_opened(1, [1; 32]);
+        let state = StateDir::at(fixture.state.path()).unwrap();
+        assert!(state.peers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn should_open_the_session_and_report_when_peers_json_cannot_be_written() {
+        let mut fixture = fixture();
+        std::fs::create_dir(fixture.state.path().join("peers.json")).unwrap();
+        let outgoing = fixture.replica.session_opened(1, [2; 32]);
+        assert_eq!(outgoing.len(), 2);
+        assert!(fixture.replica.status().last_error.is_some());
     }
 
     #[test]

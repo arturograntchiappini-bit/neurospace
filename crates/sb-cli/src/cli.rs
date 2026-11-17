@@ -1,6 +1,9 @@
 //! The `sb` command line, as declared to `clap`.
 
+use std::convert::Infallible;
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use clap::{Parser, Subcommand};
 
@@ -105,10 +108,29 @@ pub enum SyncAction {
     /// Join the group of a ticket from another device.
     Join {
         /// The ticket printed by `sb sync invite`.
-        ticket: String,
+        ticket: TicketArg,
     },
     /// Leave the group; the notes stay where they are.
     Leave,
     /// Show the running engine's status.
     Status,
+}
+
+/// The ticket argument as typed. Its `Debug` hides it, because a ticket contains the group secret. It is
+/// parsed later, by `sb sync join`, so that a bad ticket is an operation error (exit 1) and not a usage error.
+#[derive(Clone)]
+pub struct TicketArg(pub String);
+
+impl FromStr for TicketArg {
+    type Err = Infallible;
+
+    fn from_str(text: &str) -> Result<Self, Infallible> {
+        Ok(TicketArg(text.to_owned()))
+    }
+}
+
+impl fmt::Debug for TicketArg {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        out.write_str("sb1/…/<redacted>")
+    }
 }

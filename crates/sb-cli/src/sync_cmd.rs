@@ -2,11 +2,13 @@
 
 use std::io;
 use std::sync::mpsc::{self, Sender};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use sb_core::Vault;
 use sb_sync::control::{self, Applied};
-use sb_sync::{EngineEvent, StateDir, Status, Ticket, ensure_identity, start_engine};
+use sb_sync::{
+    EngineEvent, StateDir, Status, SyncError, Ticket, ensure_identity, start_engine, to_hex,
+    unix_now,
+};
 use serde_json::json;
 
 use crate::cli::SyncAction;
@@ -18,17 +20,29 @@ use crate::render;
 /// # Errors
 /// Any `CliError`; the caller prints it and exits with code 1.
 pub fn run(vault: &Vault, action: SyncAction, json: bool) -> Result<(), CliError> {
-    let state = StateDir::for_vault(vault.root())?;
     match action {
-        SyncAction::Run => run_engine(vault, state),
-        SyncAction::Invite => invite(&state, json),
-        SyncAction::Join { ticket } => {
-            let applied = control::join(vault, &state, &ticket.parse::<Ticket>()?)?;
-            report_applied("join", applied, json)
-        }
-        SyncAction::Leave => report_applied("leave", control::leave(vault, &state)?, json),
-        SyncAction::Status => status(&state, json),
+        SyncAction::Run => run_engine(vault, state_of(vault)?),
+        SyncAction::Invite => invite(&state_of(vault)?, json),
+        SyncAction::Join { ticket } => join(vault, &ticket.0, json),
+        SyncAction::Leave => leave(vault, json),
+        SyncAction::Status => status(&state_of(vault)?, json),
     }
+}
+
+fn state_of(vault: &Vault) -> Result<StateDir, CliError> {
+    Ok(StateDir::for_vault(vault.root())?)
+}
+
+/// Parses the ticket first, so that a bad one creates no state.
+fn join(vault: &Vault, ticket: &str, json: bool) -> Result<(), CliError> {
+    let ticket: Ticket = ticket.parse()?;
+    let applied = control::join(vault, &state_of(vault)?, &ticket)?;
+    report_applied("join", applied, json)
+}
+
+fn leave(vault: &Vault, json: bool) -> Result<(), CliError> {
+    let applied = control::leave(vault, &state_of(vault)?)?;
+    report_applied("leave", applied, json)
 }
 
 fn invite(state: &StateDir, json: bool) -> Result<(), CliError> {
@@ -62,15 +76,13 @@ fn status(state: &StateDir, json: bool) -> Result<(), CliError> {
     }
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
-
 fn status_text(status: &Status) -> String {
     let mut text = format!("device {}\n", status.device_id);
-    text += &format!("listening on {}\n", status.addresses.join(", "));
+    if status.addresses.is_empty() {
+        text += "listening on: (no address yet)\n";
+    } else {
+        text += &format!("listening on {}\n", status.addresses.join(", "));
+    }
     text += &format!("notes {}\n", status.notes);
     for peer in &status.peers {
         let state = if peer.connected {
@@ -94,10 +106,12 @@ fn run_engine(vault: &Vault, state: StateDir) -> Result<(), CliError> {
     let (events, inbox) = mpsc::channel();
     watch_for_interrupt(events.clone())?;
     // The network builds its own runtime, so the engine starts here, on a plain thread.
-    let engine = start_engine(vault.root(), state, Some(events))?;
-    let started = engine.status()?;
-    eprintln!("device {}", started.device_id);
-    eprintln!("listening on {}", started.addresses.join(", "));
+    let engine = start_engine(vault.root(), state.clone(), Some(events))?;
+    if let Some(id) = state.device_id()? {
+        eprintln!("device {}", to_hex(&id));
+    }
+    // The engine answers only after its first round, which can take long on a big vault: never fatal.
+    eprintln!("{}", listening_line(engine.status()));
     while let Ok(event) = inbox.recv() {
         eprintln!("{}", describe(&event));
         if event == EngineEvent::Stopped {
@@ -105,6 +119,15 @@ fn run_engine(vault: &Vault, state: StateDir) -> Result<(), CliError> {
         }
     }
     Ok(engine.shutdown()?)
+}
+
+fn listening_line(status: Result<Status, SyncError>) -> String {
+    match status {
+        Ok(status) => format!("listening on {}", status.addresses.join(", ")),
+        Err(_) => {
+            "starting: the engine is still scanning the vault; see `sb sync status`".to_owned()
+        }
+    }
 }
 
 fn describe(event: &EngineEvent) -> String {
@@ -149,4 +172,35 @@ async fn interrupted() -> io::Result<()> {
 #[cfg(not(unix))]
 async fn interrupted() -> io::Result<()> {
     tokio::signal::ctrl_c().await
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    #[test]
+    fn should_print_a_starting_line_when_the_first_status_is_not_available() {
+        let timeout = SyncError::Net("the engine did not answer in time".into());
+        let line = listening_line(Err(timeout));
+        assert!(line.starts_with("starting: the engine is still scanning the vault"));
+        assert!(line.contains("sb sync status"), "{line}");
+    }
+
+    #[test]
+    fn should_list_the_addresses_of_a_status() {
+        let status = Status {
+            addresses: vec!["1.2.3.4:5".into(), "6.7.8.9:10".into()],
+            ..Status::default()
+        };
+        let line = listening_line(Ok(status));
+        assert_eq!(line, "listening on 1.2.3.4:5, 6.7.8.9:10");
+    }
+
+    #[test]
+    fn should_say_so_in_the_text_status_when_there_is_no_address_yet() {
+        let text = status_text(&Status::default());
+        assert!(text.contains("listening on: (no address yet)\n"), "{text}");
+    }
 }
