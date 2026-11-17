@@ -533,7 +533,7 @@ Ogni prompt di dispatch a un implementer contiene, oltre al template della skill
 
 ## Verità assoluta
 
-Ultimo aggiornamento: 2026-11-17
+Ultimo aggiornamento: 2026-11-17 (pianificazione di M3)
 
 **Legenda stati.** **[Confermato]** = detto o approvato dall'utente. **[Proposto — applicato su delega]** = deciso dall'orchestratore in base alla delega totale del 2026-11-15, non approvato voce per voce dall'utente: vale finché l'utente non lo cambia. **[Aperto]** = non deciso. Ciò che non è verificato è scritto come «non verificato».
 
@@ -541,12 +541,15 @@ Ultimo aggiornamento: 2026-11-17
 
 - **[Confermato]** (richiesta dell'utente, 2026-11-15, testo integrale): «crea un'applicazione per prendere appunti, come obsidian, su base markdown e grafi, sincronizzazione p2p serverless tra dispositivi (anche tra os diversi come windows e linux (quasi ogni distro), ma niente mac), come ui per ora falla simile a obsidian non troppo complicata. crea l'applicazione in full rust, e con una porta di accesso nativa per agenti ai, mcp o cli o connettori custom per claude. usa i workflow previsti dal claude.md. procedi in totale completa autonomia fino a completamento, ti ho detto tutto quello che avevo da dirti. prendi ogni decisione in autonomia seguendo le istruzioni date.»
 - **[Confermato]** Delega: l'utente ha delegato ogni decisione e chiesto di procedere senza fermarsi fino al completamento (2026-11-15).
+- **[Confermato]** (richiesta dell'utente, 2026-11-17, testo integrale, arrivata all'inizio della pianificazione di M3): «la UI deve essere molto semplice e minimal ma molto molto ben leggibile e accessibile, polished, un po' stile mac con effetto glass».
+- **[Confermato]** (richiesta dell'utente, 2026-11-17, dopo aver visto le schermate dello spike sul vetro, testo integrale): «i saw the preview of spike glass i kinda like it, but i don't like the purple/pink gradient, get rid of it, plus, the glass effect should be refined better». Quindi: niente sfondi colorati a gradiente, solo fondali neutri; il vetro va rifinito.
 
 ### V.2 Fonti
 
 - Richiesta dell'utente (V.1).
 - **[Proposto — applicato su delega]** Spec di design: `docs/superpowers/specs/2026-11-15-second-brain-design.md`. Letta da un revisore indipendente (builder check) il 2026-11-15; le sue 7 domande sono state risolte come rulings (V.8) e la spec aggiornata.
-- **[Proposto — applicato su delega]** Piano M1: `docs/superpowers/plans/2026-11-15-m1-core-cli-mcp.md`. Piano M2: `docs/superpowers/plans/2026-11-16-m2-sync.md` (12 task, da 0 a 11), riletto contro il codice di M1 il 2026-11-16. I piani di M3 e M4 si scrivono all'inizio di ciascuna milestone — **[Aperto]**.
+- **[Proposto — applicato su delega]** Piano M1: `docs/superpowers/plans/2026-11-15-m1-core-cli-mcp.md`. Piano M2: `docs/superpowers/plans/2026-11-16-m2-sync.md` (12 task, da 0 a 11), riletto contro il codice di M1 il 2026-11-16. Piano M3: `docs/superpowers/plans/2026-11-17-m3-gui.md` (10 task), scritto il 2026-11-17 dopo lo spike sul vetro. Il piano M3b (prestazioni del motore di sync e i cinque minori di stato rinviati da M2) e quello di M4 si scrivono all'inizio di ciascuno — **[Aperto]**.
+- Spike sul vetro del 2026-11-17 (codice usa-e-getta nella scratchpad): materiale Mica di Windows tramite `window-vibrancy` 0.8.1, vetro simulato, font Inter 4.1, contrasto WCAG. I fatti verificati sono nell'appendice A.5 della spec, e la sezione 9.6 contiene l'aspetto scelto.
 - Spike di verifica API del 2026-11-15 (codice usa-e-getta, fuori dal repo): iroh 1.4, eframe 0.37 + egui_commonmark 0.26, rmcp 3.10, loro 1.17 + notify 8.2. Conclusi; i fatti verificati sono nell'appendice A della spec, con accanto ciò che non è stato verificato.
 
 ### V.3 Vincoli non negoziabili
@@ -556,7 +559,7 @@ Da copiare in ogni dispatch a un implementer (§11.4).
 1. **[Confermato]** Tutto in Rust: nessun frontend web/JS, nessun altro linguaggio nel prodotto.
 2. **[Confermato]** Le note sono file Markdown; il prodotto offre una vista a grafo dei collegamenti.
 3. **[Confermato]** Sincronizzazione P2P serverless tra dispositivi, funzionante tra Windows e Linux (quasi ogni distro). macOS escluso.
-4. **[Confermato]** UI simile a Obsidian, non troppo complicata.
+4. **[Confermato]** UI simile a Obsidian, non troppo complicata. Dal 2026-11-17: molto semplice e minimale, molto ben leggibile e accessibile, curata, un po' in stile macOS con effetto vetro (glass).
 5. **[Confermato]** Accesso nativo per agenti AI (MCP, CLI, connettori per Claude).
 6. **[Proposto — applicato su delega]** I file `.md` sul disco sono la fonte di verità. Indice, grafo e stato di sync sono derivati e ricostruibili.
 7. **[Proposto — applicato su delega]** Un solo processo per vault esegue il motore di sync (file di lock). CLI e MCP scrivono solo file, mai lo stato di sync.
@@ -583,7 +586,7 @@ Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nel
 - Fiducia: gruppo di sync = conoscenza di un segreto a 32 byte consegnato in un ticket; prova reciproca a ogni connessione.
 - Stato di sync fuori dal vault, in una cartella dati per utente; nel vault resta solo `.secondbrain/trash/`.
 - Modalità di rete: `internet` (predefinita: DNS e relay pubblici del progetto iroh, che vedono id e indirizzi ma non il contenuto) e `lan` (nessun contatto esterno).
-- Milestone: M1 core + CLI + MCP; M2 sync headless; M3 GUI; M4 Linux, prova Windows↔Linux, documentazione.
+- Milestone: M1 core + CLI + MCP; M2 sync headless; M3 GUI; M3b prestazioni del motore di sync e minori di stato (dal 2026-11-17); M4 Linux, prova Windows↔Linux, documentazione.
 
 ### V.6 Esclusioni dal grafo graphify
 
@@ -616,6 +619,8 @@ Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nel
   - Misura alla scala dichiarata (10 000 note, 103 MB, Windows, `lan`): prima scansione 114 s, copia completa verso un dispositivo vuoto 28 s, una modifica arriva all'altro dispositivo in circa 4,2 s, CPU a riposo trascurabile, stato di sync 108 MB per dispositivo. Il README dice «progettato per», non «dimensionato per». Migliorare la latenza (scansione incrementale) è un compito di M3.
   - Modalità `internet`: nessun difetto nel codice. Su questa macchina un firewall applicativo (simplewall) blocca le connessioni in uscita degli eseguibili che non conosce: una copia identica di `curl.exe` viene bloccata, l'originale no. Per questo `sb` non raggiungeva mai un relay. Nel container Linux sulla stessa macchina due motori senza indirizzi nel ticket si trovano tramite la scoperta pubblica di iroh in 1,4–6 s. `sb sync status` ora mostra il relay raggiunto e, se manca, suggerisce di controllare il firewall.
   - Non verificato: la modalità `internet` tra due reti reali diverse e su Windows (bloccata qui dal firewall); la scoperta mDNS tra due macchine; che errore dà Windows quando il vault viene smontato durante una scansione; mDNS aggiunto all'endpoint già avviato su una rete reale (controllato solo nel sorgente di iroh).
+- 2026-11-17 — `graphify --update` dopo M2 (subagente `haiku`; estrazione semantica dei 5 documenti cambiati in tre blocchi `haiku` lanciati dalla sessione principale): da 728 nodi, 1612 archi e 25 comunità a 2083 nodi, 5651 archi e 120 comunità. La guardia di restringimento non è scattata e nulla è stato forzato. Scompaiono 3 nodi, tutti attesi: `WINDOWS_DEVICE_NAMES`, tolto da `path.rs` nel Task 0 di M2, e due segnaposto della libreria standard. Nessun nodo dalle cartelle escluse (V.6). Non fatto: `cost.json` e la cache semantica dei documenti, quindi il prossimo aggiornamento ri-estrae quei documenti. graphifyy installato 0.9.93, skill 0.9.105: non aggiornato.
+- 2026-11-17 — **Pianificazione di M3.** Spike sul vetro in due versioni: la v1 aveva uno sfondo a gradiente viola/rosa, rifiutato dall'utente; la v2 usa fondali neutri e solo le aree strumenti sono di vetro, con la nota su una superficie piena. Spec aggiornata: 6.1 (link agli allegati), 6.3 (fantasmi dei link ancorati), 6.6 (dove nasce una nota creata da un link), 9 (vetro, tema di sistema, accessibilità, impostazioni, ciclo di vita del motore nella GUI), A.5 (fatti dello spike). Scritto il piano M3 (10 task).
 - Rischio chiuso il 2026-11-17: il preset di rete di iroh che «non risultava mai online» su questa macchina era il firewall applicativo, non il codice né iroh.
 - Non verificabile in questo progetto: uso interattivo della GUI da parte di una persona. La GUI si verifica con test headless e con l'avvio del binario.
 
@@ -664,4 +669,12 @@ Formato: decisione — perché — costo se sbagliata.
   - Modalità `internet`: nessuna correzione del codice; si aggiunge il relay allo stato con un suggerimento sul firewall e un test (ignorato di norma) che collega due motori per solo id. Costo: un campo in più nello stato.
   - Nessun accorpamento degli aggiornamenti in coda: la latenza di circa 4 s per modifica a 10 000 note viene dalle passate complete sul vault, non dalle raffiche; scansione incrementale e vista del documento in cache vanno a M3 (obiettivo: una modifica sotto 1 s), insieme allo stato scritto anche durante i giri lunghi. Costo: fino ad allora, alla scala dichiarata, una modifica impiega circa 4 s e il primo giro circa 2 minuti.
   - Ri-revisione dell'ondata finale: la lunghezza di due funzioni è accettata perché `clippy` (`too_many_lines` a 30) la misura e passa; CHANGELOG e README corretti dove promettevano cose che il codice non fa; rinviati a M3, perché la GUI rifà lo stato, cinque minori senza perdita di dati (avviso «osservazione della cartella spenta» che sparisce dallo stato, avvisi che restano nello stato fino al riavvio, sessioni vecchie dopo un segreto cambiato a mano, `sb sync status` che legge da sé `config.json`, invitante non registrato in silenzio con `peers.json` pieno).
+- 2026-11-17 — **Rulings della pianificazione di M3** (spec 6.1, 6.3, 6.6, 9 e A.5 allineate):
+  - Il lavoro sulle prestazioni del motore (scansione incrementale, vista del documento in cache, stato scritto durante i giri lunghi) e i cinque minori di stato rinviati da M2 passano dal piano M3 a un piano M3b, da eseguire dopo M3 e prima di M4: cambiano il motore, non la GUI, e un piano per sottosistema resta rivedibile. Costo: per tutta M3 la latenza alla scala dichiarata resta circa 4 s.
+  - Vetro: Mica su Windows quando il sistema lo accetta; vetro simulato su fondale neutro su Linux e dove Mica viene rifiutato; «Riduci trasparenza» rende tutto opaco. Acrylic è scartato perché ignora chiaro/scuro e ingrigiva il tema chiaro. Costo: Mica non è stato provato con il trascinamento sentito da una persona né su Windows 10.
+  - I colori sono fissati da una tabella (spec 9.6) e un test controlla il contrasto WCAG ≥ 4,5:1 nel caso peggiore. Con Mica il vetro sale al 76 % (chiaro) e all'82 % (scuro), perché sotto c'è un fondale sconosciuto. Costo: con Mica si vede meno trasparenza di quanta ne mostrava lo spike.
+  - La GUI avvia il motore solo se il vault ha già un gruppo, oppure quando l'utente crea un invito o si unisce: un vault mai sincronizzato non contatta la rete. Costo: nessuno noto.
+  - L'indice della GUI si ricostruisce per intero in background dopo 300 ms di quiete, invece di aggiornarsi un pezzo alla volta: il watcher non dà i percorsi, e così l'elenco dei file ignorati resta giusto. Costo: alla scala dichiarata ogni cambiamento esterno costa una ricostruzione di qualche secondo in background.
+  - Una nota creata da un link con nome semplice nasce nella radice del vault (come in Obsidian); un link `./x` nasce nella cartella della nota di partenza. L'id di un fantasma è la chiave della nota che il clic creerebbe. Costo: i fantasmi dei link `./` cambiano id nell'output di `get_graph`.
+  - Inter 4.1 è incorporato nel binario, con la licenza OFL accanto ai font.
 - 2026-11-15 — **Domanda 7 (chi fa le prove a mano, connettività in M4).** Le prove «a mano» le esegue l'orchestratore con comandi; la GUI non è verificata da una persona e lo si dichiara; la prova Windows↔Linux usa un ticket con indirizzi e porta fissa; `internet` resta la modalità predefinita e il suo stato reale si registra in M2. — Docker è disponibile; mDNS non attraversa la rete di Docker. — Costo: se `internet` non funziona sulle reti dell'utente, il sync tra reti diverse non va finché non si indaga.

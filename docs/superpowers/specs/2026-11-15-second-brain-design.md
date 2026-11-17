@@ -111,6 +111,7 @@ Two binaries because one Windows executable cannot cleanly be both a console pro
 | Sync document | `loro` (CRDT) | Merges concurrent text edits without conflict handling of our own; sync reduces to exchanging missing updates. |
 | Peer transport | `iroh`, `iroh-mdns-address-lookup` | Pure-Rust QUIC connections dialed by public key, encrypted and authenticated, with NAT traversal; the second crate adds LAN discovery. |
 | Folder watching | `notify` | The standard cross-platform watcher. |
+| Windows glass material | `window-vibrancy` (Windows only) | Applies the system Mica backdrop to the eframe window through its raw handle; no own unsafe code (appendix A.5). |
 | Folder picker | `rfd` | Native dialog; on Linux through the desktop portal, with no GTK dependency. |
 | CLI parsing | `clap` | Standard. |
 | MCP server | `rmcp` | The official SDK. It already serves both the `initialize` handshake and its replacement in the 2026-07-28 revision of the protocol; a hand-written loop would have to chase the specification. |
@@ -189,6 +190,8 @@ Extracted with `pulldown-cmark` so that links inside code spans and code blocks 
 
 Each link records: target text as written (without heading), optional heading, optional alias, kind, and 1-based line number.
 
+**Attachment links** (from M3). A link whose target's last component ends, ASCII case-insensitively, with `.` followed by one of `png jpg jpeg gif bmp svg webp avif ico tif tiff pdf mp3 wav ogg m4a flac mp4 webm mov mkv avi` points to an attachment, not a note: `![[image.png]]`, `[[report.pdf]]`. It stays in the note's link list (the CLI and MCP still report it, unresolved), but it produces no graph node and no edge, and the GUI never offers to create a note for it. Version 1 does not display attachments.
+
 ### 6.2 Link resolution (call)
 
 Resolving target `T` written in note `S`. First trim and replace `\` with `/`. Two prefixes anchor the target and switch the general rules off:
@@ -212,7 +215,7 @@ An empty target (`[[#Heading]]`) refers to `S` itself and is not a link between 
 ### 6.3 Graph
 
 - A node for every note: id = note path, label = file stem, `exists = true`.
-- A **ghost node** for every distinct unresolved target: id = `?` followed by the normalised target, label = the target as first written, `exists = false`.
+- A **ghost node** for every distinct unresolved target that is not an attachment: id = `?` followed by the key of the note that clicking it would create (section 6.6) without the trailing `.md`, label = the target as first written, `exists = false`. For an unanchored target this is the normalised target, as before M3; for `./x` written in `a/b.md` it is `?a/x`, so anchored targets in different folders are different ghosts. A target for which section 6.6 yields no valid path produces no ghost and no edge.
 - A directed edge for each (source note, target node) pair, at most one per pair. Self-links produce no edge.
 - **Neighbourhood** of a note at depth `d` (1 ≤ d ≤ 5): the subgraph reachable in at most `d` steps, treating edges as undirected.
 
@@ -229,6 +232,16 @@ An inline tag is `#` followed by one or more of: Unicode letters and digits, `_`
 - Each hit carries up to 3 snippets: the first lines containing any term, with their 1-based line numbers, each trimmed to 200 characters.
 
 This is a linear scan over notes held in memory. It is the right size for vaults of a few thousand notes.
+
+### 6.6 New note from an unresolved link (call, M3)
+
+Clicking an unresolved link (or a ghost node) creates a note at a path computed from the target `T` and the source note `S`. First trim and replace `\` with `/`; then:
+
+- `T` starts with `/`: the rest, from the vault root;
+- `T` starts with `./`: relative to the folder of `S`, `..` components resolved; a path leaving the vault yields nothing;
+- otherwise: `T` from the vault root, whether bare (`Idea` → `Idea.md`) or with folders (`sub/Idea` → `sub/Idea.md`). A note created there is always what the link resolves to (rule 1.1 or rule 2 of section 6.2).
+
+`.md` is appended unless the last component already ends with it (ASCII case-insensitive); the letter case is kept as written. The result must pass section 5.2, otherwise nothing is created and the GUI says why. Creation follows section 5.4: it never replaces anything and adopts the spelling of existing folders. An attachment link (section 6.1) never creates a note.
 
 ## 7. Agent gateway: CLI and MCP
 
@@ -499,7 +512,7 @@ Timing: watcher debounce 300 ms; tick every 5 s; full rescan at least every 60 s
 
 ## 9. GUI
 
-A single window, dark theme, in the spirit of Obsidian. All behaviour lives in a state module that has no dependency on the UI toolkit and is unit-tested; the UI code draws state and forwards input.
+A single window in the spirit of Obsidian: very simple and minimal, very legible and accessible, polished, a little like a macOS app with a glass effect (user's direction, 2026-11-17; visual rules in section 9.6). It follows the system light/dark setting. All behaviour lives in a state module that has no dependency on the UI toolkit and is unit-tested; the UI code draws state and forwards input.
 
 ### 9.1 Start
 
@@ -525,17 +538,20 @@ A single window, dark theme, in the spirit of Obsidian. All behaviour lives in a
 
 - **Left:** a search field; below it the folder tree, or the search results while the field is non-empty. Clicking opens a note. A context menu on a note offers rename and delete; on a folder, «new note here».
 - **Centre:** the open note in **edit** mode (a plain-text editor with light Markdown colouring of headings, links and code) or **preview** mode (rendered Markdown where wikilinks are clickable), or the **graph**.
-- **Right:** backlinks with the linking line, outgoing links (unresolved ones marked; clicking one creates the note), and the note's tags. Both side panels can be hidden.
+- **Right:** backlinks with the linking line, outgoing links (unresolved ones marked; clicking one creates the note, except attachments), and the note's tags. Both side panels can be hidden.
+- **Top bar menu (⋯):** theme (System, Light, Dark), «Reduce transparency», text size (smaller, larger, reset; also Ctrl+Plus, Ctrl+Minus, Ctrl+0), «Open another vault». The drawing above is the arrangement, not the look: the look is section 9.6.
 
 ### 9.3 Behaviour
 
 - **Autosave:** 500 ms after the last keystroke, and whenever the note is closed, switched or the window loses focus. There is no save button.
 - **External change of the open note** (sync, an agent, another editor): if the buffer has no unsaved edits it reloads silently. If it has, the buffer is written to a new note named `<stem> (conflict <8 random hex characters>).md` next to it, and the note reloads. The application's own writes are recognised by content and ignored.
+- **The open note disappears from disk** (deleted or renamed elsewhere): with no unsaved edits the note closes and the status bar says it was removed. With unsaved edits the buffer is written to a conflict note as above, which then opens. Typed text is never lost.
+- **A save fails** (read-only note, disk full, folder gone): the buffer stays as typed and dirty, the status bar shows the error, and the save is retried at the next autosave trigger.
 - **New note:** asks for a name, creates `<name>.md` in the selected folder or the vault root, opens it in edit mode.
 - **Clicking a link** opens the resolved note; an unresolved link creates it first.
 - **Quick open:** a centred popup that filters note names as the user types; Enter opens the first match, Escape closes.
 - **Shortcuts:** Ctrl+N new note, Ctrl+O quick open, Ctrl+E edit/preview, Ctrl+G graph, Ctrl+F focus search.
-- The index is updated incrementally from watcher events; the tree, backlinks and graph follow.
+- The index follows the folder: after a watcher event and 300 ms of quiet, the whole index is rebuilt on a background thread and swapped in; the tree, backlinks and graph follow (call, M3: the watcher gives no paths, and a full rebuild keeps the ignored-file list correct). The application's own saves update the index at once.
 
 ### 9.4 Graph view
 
@@ -553,6 +569,58 @@ The layout is a simple spring-and-repulsion simulation, quadratic in the number 
 Opened from the top bar: whether sync is on; this device's id; **Create invite** (shows the ticket with a copy button); **Join** (paste a ticket, with a note that where a local note differs from the group's both are kept); **Turn sync off** (leave the group); the list of peers with their state; notes the engine could not sync and why; the mode switch (Internet / LAN only).
 
 If another process holds the engine lock, the window says sync is being handled by that process and shows `status.json` read-only.
+
+**Engine lifecycle in the GUI (call, M3).** The GUI starts the engine for the open vault only when sync is configured for it (its state directory holds a group secret), or when the user creates an invite or joins from this window. A vault that never used sync therefore never contacts the network. «Turn sync off» leaves the group and stops the engine. Changing the mode writes `config.json` and restarts the engine, because the engine reads it only at start (section 8.3). Engine calls that can block (start, invite, join, leave, stop) run on a background thread; the window shows that they are in progress and never freezes. Closing the application saves the open note and stops the engine.
+
+### 9.6 Visual design and accessibility (call, M3)
+
+From the glass spike of 2026-11-17 (appendix A.5), refined after the user's feedback on its first screenshots: no coloured gradients, neutral backdrops only, refined glass.
+
+**Surfaces.** The tool areas are glass: the top bar, the left panel, the right panel and a slim status strip. The open note (editor, preview or graph) sits on a **solid, quiet document surface**. No hard separator lines between panels; regions are separated by 8 px gutters and depth. Corner radius 12 px. Each glass panel has a 1 px hairline border and a 1 px highlight along its top edge. The document surface has a soft shadow and no border. The status strip has no border, radius or shadow.
+
+**Material.** One of three, chosen at start and on a settings change:
+
+| Material | When | Behind the glass |
+| --- | --- | --- |
+| `Mica` | Windows, «Reduce transparency» off, and the system accepts the Mica backdrop | the Windows Mica material (desktop-tinted, follows light/dark); the window is transparent |
+| `Simulated` | Linux; Windows when Mica is refused | a neutral vertical gradient painted by the app |
+| `Opaque` | «Reduce transparency» on, any system | the same gradient; every glass panel is drawn fully opaque |
+
+Linux has no portable blur for a window (appendix A.5), so it always gets `Simulated` or `Opaque`.
+
+**Colour tokens.** Hex; a percentage is the alpha. Glass alpha depends on the material because with `Mica` the backdrop is unknown.
+
+| Token | Light | Dark |
+| --- | --- | --- |
+| Glass fill, `Simulated` | `#FFFFFF` 60 % | `#2C2C30` 60 % |
+| Glass fill, `Mica` | `#FFFFFF` 76 % | `#2C2C30` 82 % |
+| Glass fill, `Opaque` | `#FFFFFF` 100 % | `#2C2C30` 100 % |
+| Document surface | `#FFFFFF` | `#232325` |
+| Primary text | `#1C1C1E` | `#F5F5F7` |
+| Secondary text | `#3C3C43` | `#C8C8D2` |
+| Accent text (links, selected item) | `#0A45A8` | `#B4D0FF` |
+| Hairline | white 35 % | white 8 % |
+| Top highlight | white 50 % | white 10 % |
+| Shadow | black 8 %, blur 24, offset y 6 | black 30 %, blur 24, offset y 6 |
+| Hover fill | black 6 % | white 6 % |
+| Selection pill | `#0A84FF` 18 % | `#0A84FF` 18 % |
+| Backdrop gradient (top → bottom) | `#F2F2F4` → `#E9E9EC` | `#1E1E20` → `#18181A` |
+
+**Contrast.** Every text colour on every surface it can appear on has a WCAG 2 contrast ratio of at least 4.5 : 1, computed for the worst case: for `Simulated`, the glass composited over both ends of the backdrop gradient; for `Mica`, the glass composited over pure white and over pure black; for the selected item, the accent text on the selection pill composited over the glass. A unit test computes these ratios from the tokens. If a pair fails, the text colour is darkened (light theme) or lightened (dark theme) until it passes, and the table is corrected.
+
+**Type.** Inter 4.1 (SIL Open Font License 1.1, licence file shipped next to the fonts), Regular and SemiBold, embedded in the binary, first in the proportional family; egui's default fonts stay as fallbacks for symbols and other scripts. Sizes: body 15.5 px, buttons 15 px, small text 13 px, headings 22 px SemiBold, section labels («FILES», «BACKLINKS») 11 px with 1.1 px letter spacing in the secondary colour. Code and the editor use egui's monospace font.
+
+**Theme.** «System» (default) follows the operating system and updates when it changes; where the system reports nothing, dark. «Light» and «Dark» pin it. The native title bar follows the theme where the system allows; this is best-effort.
+
+**Accessibility.**
+- Every action is reachable from the keyboard: the shortcuts of section 9.3, Tab through every control, Enter and Space activate, Escape closes popups.
+- The keyboard-focused control shows a 2 px ring in the accent colour.
+- Every text field has a label or hint text, and every button that shows only a symbol carries an accessible name; screen readers are served through AccessKit (`accesskit` feature).
+- Text size scales from 75 % to 200 % (top bar menu, Ctrl+Plus, Ctrl+Minus, Ctrl+0) and is remembered.
+- «Reduce transparency» removes all translucency.
+- Nothing is conveyed by colour alone: an unresolved link also shows the words «not created yet», a blocked note the word «blocked».
+
+**Settings** are kept in `<state base>/app.json` with the last vault: `{"last_vault": path or null, "theme": "system" | "light" | "dark", "reduce_transparency": bool, "zoom": number}`. A missing, unreadable or invalid file means the defaults (`null`, `"system"`, `false`, `1.0`); a zoom outside 0.75–2.0 is clamped. The application never fails to start because of this file.
 
 ## 10. Cross-platform and distribution
 
@@ -597,7 +665,9 @@ Checks described as «by the orchestrator» are run by the orchestrating session
 
 **M3 — GUI**
 - All tests pass, including headless UI tests that drive the real UI code: open a vault, create, edit, rename and delete a note, follow a link, search, switch to the graph and click a node, see an external edit appear, open the sync window.
-- By the orchestrator on Windows: the binary starts with a sample vault and stays up without errors.
+- The contrast test of section 9.6 passes for every token pair.
+- By the orchestrator on Windows: the binary starts with a sample vault and stays up without errors; screenshots in light and dark, with `Mica` and with «Reduce transparency», are taken and looked at.
+- By the orchestrator on Windows, with a 10 000-note vault: the window opens, search answers while typing, and an external edit of the open note appears.
 
 **M4 — Linux and release**
 - Both binaries build in the Linux container and the full test suite passes there.
@@ -609,7 +679,7 @@ Checks described as «by the orchestrator» are run by the orchestrating session
 
 - Internal module boundaries inside each crate beyond what the plans fix.
 - Exact wording of human-readable CLI output and error messages.
-- Colours, spacing and icon glyphs of the GUI within «dark, Obsidian-like, uncluttered».
+- Icon glyphs, and spacing of the GUI not fixed by section 9.6, within «simple, minimal, legible, a little like macOS with glass». The colour tokens of section 9.6 are fixed; a change needs the contrast test to pass and the table corrected.
 - Constants of the force layout.
 
 ## Appendix A — Verified facts about dependencies
@@ -682,3 +752,17 @@ From API spikes run on 2026-11-15 on Windows 11 with Rust 1.99. Each fact was ve
 **File locking**
 
 - `std::fs::File::try_lock()` is stable since Rust 1.89. A second process gets `TryLockError::WouldBlock` while the first holds the lock, and the lock is released when the holder is killed (**run** on Windows). The lock file must be a dedicated file opened with read and write access.
+
+### A.5 Glass look: `window-vibrancy` 0.8.1, Inter 4.1 (spike of 2026-11-17, Windows 11 build 26200)
+
+- `window-vibrancy` 0.8.1 shares `raw-window-handle` 0.6.2 with eframe 0.37, egui-winit, winit 0.30.13, glutin and accesskit_winit: one node in `cargo tree -i` (**run**). Its unsafe code stays inside the crate; the calls are safe.
+- Real Windows material: `ViewportBuilder::with_transparent(true)`; `eframe::App::clear_color` overridden to return `[0.0; 4]` (the default `rgba(12,12,12,180)` gives a grey wash); `Visuals::panel_fill` transparent and every `Frame` fill with its own alpha. `&CreationContext` and `&eframe::Frame` both implement `HasWindowHandle`, so `window_vibrancy::apply_mica(cc, Some(dark))` works at start and `apply_mica(frame, Some(dark))` / `clear_mica(frame)` work later (**run** at start; later calls **source** only). The native title bar also gets the material (**run**).
+- Mica follows the dark flag (measured mean luminance of the bare title-bar row: 242.5 light, 32 dark). Acrylic does not: on Windows 11 22621+ `apply_acrylic` ignores its colour and gives the same darkened blur in both themes (112.6 in both), which made the light theme's gutters grey. Hence Mica, not Acrylic (**run**).
+- Window drag and corner resize with Mica: the window moved and resized exactly, the frame during resize was fully laid out, a thin black strip shows at the right and bottom edges during a live drag (**run** with synthetic input). Smoothness as a person feels it is not verified; the crate warns of resize lag with Acrylic on some Windows builds.
+- On Linux `window-vibrancy` returns an error («effects are controlled by the compositor»); `winit`'s `set_blur` is KDE-Wayland only and eframe 0.37 does not expose it. Linux uses the simulated glass. Not verified on Linux at all.
+- Simulated glass: an opaque window, a neutral gradient `Mesh` on `LayerId::background()`, `egui::Frame` with a fill alpha, 1 px stroke, `corner_radius`, `shadow` and `outer_margin`; the top highlight drawn with `painter.line_segment`. `Panel::show_separator_line(false)` on every panel and `noninteractive.bg_stroke` set to none remove the separator lines (**run**).
+- Selected labels: egui colours a selected label's text with `selection.stroke.color`; the spike set the stroke width to 0 and the colour to the text colour (**run**). The same stroke draws the focus outline of text fields, so the M3 plan sets it to the 2 px accent ring of section 9.6.
+- Inter 4.1 static TTF from `https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip`, `extras/ttf/Inter-Regular.ttf` (411 640 bytes) and `Inter-SemiBold.ttf` (419 744 bytes), licence `LICENSE.txt` (SIL OFL 1.1). Loaded with `FontData::from_static` wrapped in `Arc`, inserted first in the proportional family, SemiBold as a named family `"bold"`, then `ctx.set_fonts`; sizes through `style.text_styles` (**run**, at 150 % display scale only).
+- Theme: `ctx.system_theme() -> Option<Theme>` is filled from winit at start and updated on a system change; `ThemePreference::System` follows it; `ctx.set_theme(Theme::Light | Theme::Dark)` pins it. `ViewportCommand::SetTheme(SystemTheme::…)` sets the native title bar but only when sent from a frame, not from the creation closure, and it was missed once in four runs (**run**). A live system theme switch was not tested.
+- Screenshots of a GL window: `BitBlt` with `SRCCOPY | CAPTUREBLT` (`0x40CC0020`); a plain screen copy gives a white client area (**run**).
+- Spike code and screenshots (v1 with the rejected gradient, v2 refined) were kept in the session scratchpad only.
