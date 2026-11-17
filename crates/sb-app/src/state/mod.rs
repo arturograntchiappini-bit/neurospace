@@ -6,7 +6,7 @@ pub mod reload;
 pub mod tree;
 pub mod workspace;
 
-pub use jobs::Job;
+pub use jobs::{Job, Poll};
 pub use notice::{Notice, NoticeKind};
 pub use reload::{RELOAD_DEBOUNCE, Reloader};
 pub use tree::{Folder, build_tree};

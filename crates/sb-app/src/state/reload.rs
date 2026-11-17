@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use sb_core::{Index, Result, Vault, VaultWatcher, watch};
 
-use super::jobs::Job;
+use super::jobs::{Job, Poll};
 use super::notice::Notice;
 use super::workspace::{ApplyOutcome, Workspace};
 
@@ -73,14 +73,22 @@ impl Reloader {
     pub fn tick(&mut self, workspace: &mut Workspace, now: Instant) -> Vec<Notice> {
         let notices = self.collect(workspace, now);
         if self.job.is_none() && self.quiet_change_pending(now) {
-            self.spawn_rebuild(workspace.save_generation());
+            self.spawn_rebuild(workspace.write_generation());
         }
         notices
     }
 
     fn collect(&mut self, workspace: &mut Workspace, now: Instant) -> Vec<Notice> {
-        let Some((tag, built)) = self.job.as_ref().and_then(Job::poll) else {
-            return Vec::new();
+        let (tag, built) = match self.job.as_ref().map(Job::poll) {
+            Some(Poll::Ready(done)) => done,
+            Some(Poll::Lost) => {
+                self.job = None;
+                self.mark_changed(now);
+                return vec![Notice::error(
+                    "Could not reload the vault: the reload stopped unexpectedly",
+                )];
+            }
+            Some(Poll::Running) | None => return Vec::new(),
         };
         self.job = None;
         match built {
@@ -105,7 +113,7 @@ impl Reloader {
         last.is_some_and(|at| now.saturating_duration_since(at) >= RELOAD_DEBOUNCE)
     }
 
-    fn spawn_rebuild(&mut self, save_generation: u64) {
+    fn spawn_rebuild(&mut self, write_generation: u64) {
         *self
             .last_change
             .lock()
@@ -114,7 +122,7 @@ impl Reloader {
         let wake = Arc::clone(&self.wake);
         let build = move || {
             (
-                save_generation,
+                write_generation,
                 Vault::open(root).and_then(|v| Index::build(&v)),
             )
         };
@@ -284,7 +292,7 @@ mod tests {
     fn should_drop_stale_reload_when_save_happened_meanwhile() {
         let (dir, mut ws, _reloader) = setup(&[("n.md", "old")]);
         ws.select(&p("n.md")).unwrap();
-        let tag = ws.save_generation();
+        let tag = ws.write_generation();
         let built_before_save = sb_core::Index::build(ws.vault()).unwrap();
         ws.edit("mine".into(), Instant::now());
         ws.save().unwrap();
@@ -297,6 +305,50 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(dir.path().join("n.md")).unwrap(), "mine");
         assert_eq!(ws.index().get(&p("n.md").key()).unwrap().content, "mine");
+    }
+
+    #[test]
+    fn should_drop_stale_reload_when_note_created_meanwhile() {
+        let (dir, mut ws, _reloader) = setup(&[("n.md", "old")]);
+        let tag = ws.write_generation();
+        let built_before = sb_core::Index::build(ws.vault()).unwrap();
+        ws.create("fresh", None).unwrap();
+        ws.edit("typed".into(), Instant::now());
+        assert!(matches!(
+            ws.apply_index(built_before, tag),
+            ApplyOutcome::Stale
+        ));
+        let open = ws.open_note().unwrap();
+        assert_eq!(open.path, p("fresh.md"));
+        assert!(open.is_dirty());
+        assert!(conflict_files(&dir).is_empty());
+        assert!(ws.index().get(&p("fresh.md").key()).is_some());
+    }
+
+    #[test]
+    fn should_drop_stale_reload_when_note_deleted_meanwhile() {
+        let (_dir, mut ws, _reloader) = setup(&[("n.md", "old"), ("gone.md", "x")]);
+        let tag = ws.write_generation();
+        let built_before = sb_core::Index::build(ws.vault()).unwrap();
+        ws.delete(&p("gone.md")).unwrap();
+        assert!(matches!(
+            ws.apply_index(built_before, tag),
+            ApplyOutcome::Stale
+        ));
+        assert!(ws.index().get(&p("gone.md").key()).is_none());
+    }
+
+    #[test]
+    fn should_drop_stale_reload_when_note_renamed_meanwhile() {
+        let (_dir, mut ws, _reloader) = setup(&[("n.md", "old")]);
+        let tag = ws.write_generation();
+        let built_before = sb_core::Index::build(ws.vault()).unwrap();
+        ws.rename(&p("n.md"), "m").unwrap();
+        assert!(matches!(
+            ws.apply_index(built_before, tag),
+            ApplyOutcome::Stale
+        ));
+        assert!(ws.index().get(&p("m.md").key()).is_some());
     }
 
     #[test]
@@ -316,6 +368,35 @@ mod tests {
             reloader.is_reloading(),
             "a stale result must schedule a new reload"
         );
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn should_report_error_and_retry_when_reload_thread_dies() {
+        let (_dir, mut ws, mut reloader) = setup(&[("n.md", "x")]);
+        let t0 = Instant::now();
+        reloader.job = Some(Job::spawn(
+            || -> Reload { panic!("worker failed on purpose") },
+            || {},
+        ));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut notices = Vec::new();
+        while notices.is_empty() {
+            assert!(Instant::now() < deadline, "the lost job was never noticed");
+            std::thread::sleep(Duration::from_millis(20));
+            notices = reloader.tick(&mut ws, t0);
+        }
+        assert_eq!(
+            notices,
+            [Notice::error(
+                "Could not reload the vault: the reload stopped unexpectedly"
+            )]
+        );
+        assert!(!reloader.is_reloading());
+        reloader.tick(&mut ws, t0 + RELOAD_DEBOUNCE);
+        assert!(reloader.is_reloading(), "the change must stay pending");
+        finish_job(&mut ws, &mut reloader, t0 + RELOAD_DEBOUNCE);
+        assert!(!reloader.is_reloading());
     }
 
     #[test]

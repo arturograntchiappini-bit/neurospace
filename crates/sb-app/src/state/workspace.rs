@@ -22,7 +22,7 @@ const CONFLICT_NAME_ATTEMPTS: usize = 5;
 pub enum ApplyOutcome {
     /// The index was swapped in; the notices describe what happened to the open note.
     Applied(Vec<Notice>),
-    /// A save happened since the rebuild started: the index was dropped.
+    /// The workspace wrote something since the rebuild started: the index was dropped.
     Stale,
 }
 
@@ -66,7 +66,7 @@ pub struct Workspace {
     index: Index,
     tree: Folder,
     open: Option<OpenNote>,
-    save_generation: u64,
+    write_generation: u64,
 }
 
 impl Workspace {
@@ -83,7 +83,7 @@ impl Workspace {
             index,
             tree,
             open: None,
-            save_generation: 0,
+            write_generation: 0,
         })
     }
 
@@ -107,9 +107,10 @@ impl Workspace {
         self.open.as_ref()
     }
 
-    /// Counts successful saves, so the window can tell its own writes from foreign ones.
-    pub fn save_generation(&self) -> u64 {
-        self.save_generation
+    /// Counts every write the workspace itself makes: saves, creates, renames, deletes and
+    /// conflict notes. An index built before one of them is stale.
+    pub fn write_generation(&self) -> u64 {
+        self.write_generation
     }
 
     /// Opens a note, saving a dirty open one first; a failed save keeps the current note open.
@@ -180,7 +181,7 @@ impl Workspace {
         open.last_edit = None;
         open.path = stored.clone();
         self.index.upsert(stored, open.buffer.clone());
-        self.save_generation += 1;
+        self.write_generation += 1;
         Ok(Saved::Written)
     }
 
@@ -215,6 +216,7 @@ impl Workspace {
     fn create_at(&mut self, path: &str) -> Result<NotePath> {
         self.save_or_stop()?;
         let created = ops::create_note(&self.vault, path, "")?.path;
+        self.write_generation += 1;
         self.index.upsert(created.clone(), String::new());
         self.refresh_tree();
         self.select(&created)?;
@@ -231,6 +233,7 @@ impl Workspace {
             self.save_or_stop()?;
         }
         let outcome = ops::rename_note(&self.vault, from.as_str(), &to)?;
+        self.write_generation += 1;
         self.index.remove(&outcome.from.key());
         // An unreadable moved note stays out of the index; the next reload re-indexes it.
         if let Ok(text) = self.vault.read(&outcome.to) {
@@ -253,6 +256,7 @@ impl Workspace {
     /// Whatever `ops::delete_note` returns; then nothing changes.
     pub fn delete(&mut self, path: &NotePath) -> Result<()> {
         let outcome = ops::delete_note(&self.vault, path.as_str())?;
+        self.write_generation += 1;
         self.index.remove(&outcome.path.key());
         if self.is_open(path) {
             self.open = None;
@@ -314,10 +318,11 @@ impl Workspace {
     }
 
     /// Swaps in an index rebuilt from disk and reconciles the open note with it. `Stale` (nothing
-    /// changed) when a save happened since `started_at_save`: that index may predate our own
-    /// write, so the caller must rebuild again.
-    pub fn apply_index(&mut self, index: Index, started_at_save: u64) -> ApplyOutcome {
-        if self.save_generation != started_at_save {
+    /// changed) when the workspace wrote something since `started_at_write` (see
+    /// `write_generation`): that index may predate our own write, so the caller must rebuild
+    /// again.
+    pub fn apply_index(&mut self, index: Index, started_at_write: u64) -> ApplyOutcome {
+        if self.write_generation != started_at_write {
             return ApplyOutcome::Stale;
         }
         self.index = index;
@@ -390,6 +395,7 @@ impl Workspace {
                  they stay in the editor"
             ))
         })?;
+        self.write_generation += 1;
         self.index.upsert(created.clone(), buffer);
         self.refresh_tree();
         Ok(Some(created))
@@ -521,7 +527,7 @@ mod tests {
         assert_eq!(ws.tree().notes, [p("a.md")]);
         assert_eq!(ws.tree().folders[0].name, "d");
         assert!(ws.open_note().is_none());
-        assert_eq!(ws.save_generation(), 0);
+        assert_eq!(ws.write_generation(), 0);
     }
 
     #[test]
@@ -536,7 +542,7 @@ mod tests {
         assert_eq!(on_disk(&dir, "a.md"), "new text");
         assert!(!ws.open_note().unwrap().is_dirty());
         assert!(!ws.autosave_due(t0 + Duration::from_secs(60)));
-        assert_eq!(ws.save_generation(), 1);
+        assert_eq!(ws.write_generation(), 1);
         assert_eq!(ws.save().unwrap(), Saved::Nothing);
         let indexed = ws.index().get(&p("a.md").key()).unwrap();
         assert_eq!(indexed.content, "new text");
@@ -565,7 +571,7 @@ mod tests {
         let open = ws.open_note().unwrap();
         assert_eq!(open.buffer, "typed");
         assert!(open.is_dirty());
-        assert_eq!(ws.save_generation(), 0);
+        assert_eq!(ws.write_generation(), 0);
         assert_eq!(ws.save().unwrap(), Saved::Written);
         assert_eq!(on_disk(&dir, "a.md"), "typed");
     }
@@ -579,7 +585,7 @@ mod tests {
         let open = ws.open_note().unwrap();
         assert_eq!(open.buffer, "mine");
         assert!(open.is_dirty());
-        assert_eq!(ws.save_generation(), 0);
+        assert_eq!(ws.write_generation(), 0);
     }
 
     #[test]
