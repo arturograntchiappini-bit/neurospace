@@ -1,5 +1,7 @@
 //! A short message for the status bar.
 
+use std::time::{Duration, Instant};
+
 /// How a notice should be presented.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NoticeKind {
@@ -36,9 +38,79 @@ impl Notice {
     }
 }
 
+/// How long an informational notice stays in the status strip.
+pub const INFO_NOTICE_TTL: Duration = Duration::from_secs(6);
+
+/// The notice the status strip shows: the latest one, informational ones for a while.
+#[derive(Debug, Default)]
+pub struct NoticeBoard {
+    latest: Option<(Notice, Instant)>,
+}
+
+impl NoticeBoard {
+    /// Replaces the shown notice with `notice`, posted at `now`.
+    pub fn post(&mut self, notice: Notice, now: Instant) {
+        self.latest = Some((notice, now));
+    }
+
+    /// The notice to show at `now`; an expired informational one is dropped.
+    pub fn current(&mut self, now: Instant) -> Option<&Notice> {
+        if self.time_left(now) == Some(Duration::ZERO) {
+            self.latest = None;
+        }
+        self.latest.as_ref().map(|(notice, _)| notice)
+    }
+
+    /// Time until the shown informational notice expires; `None` for errors and when empty.
+    pub fn time_left(&self, now: Instant) -> Option<Duration> {
+        let (notice, posted) = self.latest.as_ref()?;
+        if notice.kind != NoticeKind::Info {
+            return None;
+        }
+        Some(INFO_NOTICE_TTL.saturating_sub(now.saturating_duration_since(*posted)))
+    }
+
+    /// Removes the shown notice.
+    pub fn dismiss(&mut self) {
+        self.latest = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
+
+    #[test]
+    fn should_expire_info_but_keep_error_until_dismissed() {
+        let start = Instant::now();
+        let mut board = NoticeBoard::default();
+        board.post(Notice::info("saved"), start);
+        assert_eq!(
+            board.current(start + Duration::from_secs(5)).unwrap().text,
+            "saved"
+        );
+        assert!(board.current(start + INFO_NOTICE_TTL).is_none());
+        board.post(Notice::error("failed"), start);
+        let much_later = start + Duration::from_secs(3600);
+        assert_eq!(board.current(much_later).unwrap().text, "failed");
+        board.dismiss();
+        assert!(board.current(much_later).is_none());
+    }
+
+    #[test]
+    fn should_report_time_left_for_info_notice_only() {
+        let start = Instant::now();
+        let mut board = NoticeBoard::default();
+        board.post(Notice::info("saved"), start);
+        assert_eq!(
+            board.time_left(start + Duration::from_secs(2)),
+            Some(Duration::from_secs(4))
+        );
+        board.post(Notice::error("failed"), start);
+        assert_eq!(board.time_left(start), None);
+    }
 
     #[test]
     fn should_build_notices_of_each_kind() {

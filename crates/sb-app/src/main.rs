@@ -1,40 +1,61 @@
 //! The `secondbrain` desktop binary.
 
-use eframe::egui::{Context, Theme, ViewportBuilder};
-use sb_app::ui::theme::{self, Material};
+use std::path::PathBuf;
+use std::process::ExitCode;
 
-/// Empty window with the backdrop; Task 5 replaces it with the real application.
-struct BlankApp;
+use clap::Parser;
+use eframe::egui::ViewportBuilder;
+use sb_app::app::{AppOptions, SecondBrainApp};
+use sb_app::platform;
 
-impl eframe::App for BlankApp {
-    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx();
-        theme::paint_backdrop(ctx, &theme::palette(ctx.theme(), Material::Simulated));
-    }
+/// Second Brain: Markdown notes with links, graph and peer-to-peer sync.
+#[derive(Parser)]
+#[command(version)]
+struct Cli {
+    /// The vault folder to open; without it the last vault is reopened.
+    vault_dir: Option<PathBuf>,
 }
 
-fn install_theme(ctx: &Context) {
-    theme::install_fonts(ctx);
-    for theme in [Theme::Light, Theme::Dark] {
-        theme::apply(ctx, theme, &theme::palette(theme, Material::Simulated));
-    }
+fn options(cli: Cli) -> Result<AppOptions, sb_sync::SyncError> {
+    let base = sb_sync::base_dir_from(cfg!(windows), &|key| std::env::var(key).ok())?;
+    Ok(AppOptions {
+        settings_path: base.join("app.json"),
+        state_base: base,
+        vault: cli.vault_dir,
+    })
 }
 
-fn main() -> eframe::Result {
+fn native_options() -> eframe::NativeOptions {
     let viewport = ViewportBuilder::default()
         .with_title("Second Brain")
+        .with_app_id("secondbrain")
+        .with_transparent(cfg!(windows))
         .with_inner_size([1200.0, 800.0])
         .with_min_inner_size([720.0, 480.0]);
-    let options = eframe::NativeOptions {
+    eframe::NativeOptions {
         viewport,
         ..Default::default()
+    }
+}
+
+fn main() -> ExitCode {
+    let options = match options(Cli::parse()) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("secondbrain: {error}");
+            return ExitCode::FAILURE;
+        }
     };
-    eframe::run_native(
-        "Second Brain",
-        options,
-        Box::new(|cc| {
-            install_theme(&cc.egui_ctx);
-            Ok(Box::new(BlankApp))
-        }),
-    )
+    let created = Box::new(move |cc: &eframe::CreationContext<'_>| {
+        let mut app = SecondBrainApp::new(&cc.egui_ctx, options);
+        platform::sync_material(cc, cc.egui_ctx.theme(), &mut app);
+        Ok(Box::new(app) as Box<dyn eframe::App>)
+    });
+    match eframe::run_native("Second Brain", native_options(), created) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("secondbrain: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }

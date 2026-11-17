@@ -214,6 +214,7 @@ fn set_visuals(style: &mut Style, p: &Palette) {
         &mut v.widgets.inactive,
         &mut v.widgets.hovered,
         &mut v.widgets.active,
+        &mut v.widgets.open,
     ] {
         widget.fg_stroke = text;
     }
@@ -242,6 +243,11 @@ pub fn glass_frame(p: &Palette) -> Frame {
         .fill(p.glass.to_color32())
         .stroke(Stroke::new(1.0, p.hairline.to_color32()))
         .corner_radius(CornerRadius::same(RADIUS))
+}
+
+/// Frame of the slim status strip: the glass fill, no border, no radius, no shadow.
+pub fn strip_frame(p: &Palette) -> Frame {
+    Frame::NONE.fill(p.glass.to_color32())
 }
 
 /// Frame of the solid document surface: opaque fill, soft shadow, no border.
@@ -351,6 +357,32 @@ mod tests {
             pairs.push((description, p.accent, composite(p.selection, surface)));
         }
         pairs
+    }
+
+    #[test]
+    fn should_draw_every_widget_state_text_in_primary_colour() {
+        let ctx = Context::default();
+        for theme in THEMES {
+            for material in MATERIALS {
+                let p = palette(theme, material);
+                apply(&ctx, theme, &p);
+                let style = ctx.style_of(theme);
+                let widgets = &style.visuals.widgets;
+                for (state, widget) in [
+                    ("noninteractive", &widgets.noninteractive),
+                    ("inactive", &widgets.inactive),
+                    ("hovered", &widgets.hovered),
+                    ("active", &widgets.active),
+                    ("open", &widgets.open),
+                ] {
+                    assert_eq!(
+                        widget.fg_stroke.color,
+                        p.text_primary.to_color32(),
+                        "{theme:?} {material:?}: {state} text is outside the palette"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
