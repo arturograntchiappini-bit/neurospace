@@ -30,7 +30,12 @@ pub struct SyncWindowOutcome {
 }
 
 /// Shows the window over the application.
-pub fn show(ctx: &Context, p: &Palette, panel: &mut SyncPanel) -> SyncWindowOutcome {
+pub fn show(
+    ctx: &Context,
+    p: &Palette,
+    panel: &mut SyncPanel,
+    reduce_motion: bool,
+) -> SyncWindowOutcome {
     let frame = theme::document_frame(p).inner_margin(Margin::same(PADDING));
     let height = ctx.content_rect().height() * MAX_HEIGHT_FRACTION;
     let modal = Modal::new(Id::unique("sync_window"))
@@ -39,7 +44,7 @@ pub fn show(ctx: &Context, p: &Palette, panel: &mut SyncPanel) -> SyncWindowOutc
             ui.set_width(WIDTH);
             ScrollArea::vertical()
                 .max_height(height)
-                .show(ui, |ui| contents(ui, p, panel))
+                .show(ui, |ui| contents(ui, p, panel, reduce_motion))
                 .inner
         });
     let close = modal.should_close();
@@ -49,7 +54,12 @@ pub fn show(ctx: &Context, p: &Palette, panel: &mut SyncPanel) -> SyncWindowOutc
     }
 }
 
-fn contents(ui: &mut Ui, p: &Palette, panel: &mut SyncPanel) -> Option<Request> {
+fn contents(
+    ui: &mut Ui,
+    p: &Palette,
+    panel: &mut SyncPanel,
+    reduce_motion: bool,
+) -> Option<Request> {
     ui.heading("Sync");
     ui.label(state_line(&panel.state));
     if let Some(error) = &panel.error {
@@ -57,7 +67,9 @@ fn contents(ui: &mut Ui, p: &Palette, panel: &mut SyncPanel) -> Option<Request> 
     }
     if let Some(busy) = panel.busy {
         ui.horizontal(|ui| {
-            ui.spinner();
+            if !reduce_motion {
+                ui.spinner();
+            }
             ui.label(busy);
         });
     }

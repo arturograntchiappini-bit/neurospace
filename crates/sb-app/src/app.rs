@@ -366,11 +366,17 @@ impl SecondBrainApp {
         self.view.graph &= !created;
         let found = quick_open::show(ui.ctx(), palette, &mut self.view.quick_open, workspace);
         let from_graph = self.view.graph && side.is_none() && centre.is_some();
-        self.sync.window_open |= strip_opens_sync;
-        self.sync.show_window(ui.ctx(), palette);
+        self.show_sync_window(ui.ctx(), palette, strip_opens_sync);
         self.run_action(side.or(centre).or(found), from_graph);
         self.schedule_autosave(ui.ctx());
         self.apply_bar(bar_outcome);
+    }
+
+    /// Opens the sync window when `opened` and draws it while it is open.
+    fn show_sync_window(&mut self, ctx: &Context, palette: &Palette, opened: bool) {
+        self.sync.window_open |= opened;
+        let motion = self.settings.reduce_motion;
+        self.sync.show_window(ctx, palette, motion);
     }
 
     /// Runs what the user asked for and reports a failure. Opening a note ends the graph view;

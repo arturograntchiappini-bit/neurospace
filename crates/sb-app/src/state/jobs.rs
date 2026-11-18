@@ -46,6 +46,12 @@ impl<T: Send + 'static> Job<T> {
         Job { rx }
     }
 
+    /// Blocks until the work is done: for background threads only, never for the UI thread.
+    /// `None` when the thread ended without a result.
+    pub fn wait(self) -> Option<T> {
+        self.rx.recv().ok()
+    }
+
     /// Checks the job without blocking.
     pub fn poll(&self) -> Poll<T> {
         match self.rx.try_recv() {
@@ -81,6 +87,20 @@ mod tests {
         assert_eq!(wait_until_not_running(&job), Poll::Ready(7));
         assert!(woke.recv_timeout(Duration::from_secs(10)).is_ok());
         assert_eq!(job.poll(), Poll::Lost);
+    }
+
+    #[test]
+    fn should_return_result_when_waiting_for_work() {
+        assert_eq!(Job::spawn(|| 5, || {}).wait(), Some(5));
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn should_return_nothing_when_waiting_for_work_that_panics() {
+        assert_eq!(
+            Job::spawn(|| -> u8 { panic!("on purpose") }, || {}).wait(),
+            None
+        );
     }
 
     #[test]

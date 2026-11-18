@@ -17,8 +17,8 @@ use eframe::egui::{Context, Event, Key, Modifiers, PointerButton};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use sb_app::app::{AppOptions, SecondBrainApp};
-use sb_app::state::sync_panel::{StartOutcome, SyncControl};
-use sb_sync::{NetMode, Status};
+use sb_app::state::sync_panel::{EngineStatus, StartOutcome, SyncControl};
+use sb_sync::NetMode;
 use tempfile::TempDir;
 
 use common::{harness, harness_for, run_until};
@@ -226,11 +226,11 @@ impl SyncControl for QuietControl {
     fn leave(&mut self) -> Result<(), String> {
         Ok(())
     }
-    fn status(&mut self) -> Option<Status> {
-        None
+    fn status(&mut self) -> EngineStatus {
+        EngineStatus::Unknown
     }
-    fn set_mode(&mut self, _mode: NetMode) -> Result<(), String> {
-        Ok(())
+    fn set_mode(&mut self, _mode: NetMode) -> Result<StartOutcome, String> {
+        Ok(StartOutcome::Started)
     }
     fn stop(&mut self) {
         self.0.store(true, Ordering::SeqCst);

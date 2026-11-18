@@ -11,7 +11,8 @@ use eframe::egui::{Context, Key, Role};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use sb_app::app::{AppOptions, SecondBrainApp};
-use sb_app::state::sync_panel::{StartOutcome, SyncControl};
+use sb_app::state::settings::Settings;
+use sb_app::state::sync_panel::{EngineStatus, StartOutcome, SyncControl};
 use sb_sync::{BlockedNote, NetMode, PeerStatus, Status};
 use tempfile::TempDir;
 
@@ -62,13 +63,15 @@ impl SyncControl for FakeControl {
         Ok(())
     }
 
-    fn status(&mut self) -> Option<Status> {
-        self.status.clone()
+    fn status(&mut self) -> EngineStatus {
+        self.status
+            .clone()
+            .map_or(EngineStatus::Unknown, EngineStatus::Running)
     }
 
-    fn set_mode(&mut self, mode: NetMode) -> Result<(), String> {
+    fn set_mode(&mut self, mode: NetMode) -> Result<StartOutcome, String> {
         self.mode = mode;
-        Ok(())
+        Ok(StartOutcome::Started)
     }
 
     fn stop(&mut self) {}
@@ -97,7 +100,15 @@ fn status() -> Status {
 
 /// A harness on a vault whose sync control is `control`; the directories must outlive it.
 fn open_with(control: FakeControl) -> (Harness<'static, SecondBrainApp>, TempDir) {
+    open_with_settings(control, Settings::default())
+}
+
+fn open_with_settings(
+    control: FakeControl,
+    settings: Settings,
+) -> (Harness<'static, SecondBrainApp>, TempDir) {
     let dir = tempfile::tempdir().unwrap();
+    settings.save(&dir.path().join("app.json")).unwrap();
     let vault = dir.path().join("vault");
     fs::create_dir_all(&vault).unwrap();
     fs::write(vault.join("Alpha.md"), "# Alpha\n").unwrap();
@@ -173,14 +184,12 @@ fn should_show_ticket_after_create_invite() {
 #[test]
 fn should_disable_buttons_while_busy() {
     let mut control = FakeControl::off();
-    control.invite_delay = Duration::from_millis(1500);
+    control.invite_delay = Duration::from_secs(4);
     let (mut harness, _dir) = open_with(control);
     wait_for_label(&mut harness, "Sync off");
     open_window(&mut harness);
     harness.get_by_label("Create invite").click();
-    harness.step();
-    harness.step();
-    harness.get_by_label("Creating invite…");
+    wait_for_label(&mut harness, "Creating invite…");
     let disabled = |harness: &Harness<'static, SecondBrainApp>, label: &str| {
         let node = harness.get_by_label(label);
         node.accesskit_node().is_disabled()
@@ -228,4 +237,22 @@ fn should_summarise_peers_in_the_status_strip_when_sync_runs() {
     control.status = Some(status());
     let (mut harness, _dir) = open_with(control);
     wait_for_label(&mut harness, "Sync: 1 of 2 peers online");
+}
+
+#[test]
+fn should_not_animate_a_spinner_when_reduce_motion_is_on() {
+    let mut control = FakeControl::off();
+    control.invite_delay = Duration::from_secs(2);
+    let settings = Settings {
+        reduce_motion: true,
+        ..Settings::default()
+    };
+    let (mut harness, _dir) = open_with_settings(control, settings);
+    wait_for_label(&mut harness, "Sync off");
+    open_window(&mut harness);
+    harness.get_by_label("Create invite").click();
+    wait_for_label(&mut harness, "Creating invite…");
+    // `run` fails when the page keeps asking for frames, as a spinning spinner does.
+    harness.run();
+    harness.get_by_label("Creating invite…");
 }

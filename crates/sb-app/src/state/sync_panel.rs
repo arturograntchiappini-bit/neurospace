@@ -26,6 +26,21 @@ pub enum StartOutcome {
     HandledElsewhere,
 }
 
+/// What a status refresh found out about the engine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EngineStatus {
+    /// The engine's status, or the status file of the process that runs it.
+    Running(Status),
+    /// Nothing new: the engine did not answer, or no fresh status file exists.
+    Unknown,
+    /// The engine this process started has ended without being asked to. `configured` says
+    /// whether the vault still has a sync group.
+    Gone {
+        /// Whether a group secret still exists.
+        configured: bool,
+    },
+}
+
 /// What the sync window needs from the engine. Every call may block, so the window only
 /// reaches an implementation through a `SyncWorker`.
 pub trait SyncControl: Send {
@@ -39,10 +54,11 @@ pub trait SyncControl: Send {
     fn join(&mut self, ticket: &str) -> Result<(), String>;
     /// Leaves the group, then stops the engine.
     fn leave(&mut self) -> Result<(), String>;
-    /// The engine's status, or the status file when another process runs the engine.
-    fn status(&mut self) -> Option<Status>;
-    /// Saves the network mode and restarts the engine if it runs.
-    fn set_mode(&mut self, mode: NetMode) -> Result<(), String>;
+    /// What is known about the engine now; the status file when another process runs it.
+    fn status(&mut self) -> EngineStatus;
+    /// Saves the network mode and restarts the engine if it runs. `HandledElsewhere` when the
+    /// restart lost the lock to another process; `Started` otherwise, also when nothing ran.
+    fn set_mode(&mut self, mode: NetMode) -> Result<StartOutcome, String>;
     /// Stops the engine and waits until it released the vault.
     fn stop(&mut self);
     /// The saved network mode.
@@ -90,10 +106,10 @@ pub enum Reply {
     Joined(Result<(), String>),
     /// Whether leaving worked.
     Left(Result<(), String>),
-    /// Whether the mode was saved and the engine restarted.
-    ModeSet(Result<(), String>),
-    /// The status read by a refresh.
-    Status(Option<Status>),
+    /// Whether the mode was saved and the engine restarted, and who runs the engine now.
+    ModeSet(Result<StartOutcome, String>),
+    /// What a refresh found out.
+    Status(EngineStatus),
     /// The worker ended.
     Stopped,
 }
@@ -320,9 +336,22 @@ impl SyncPanel {
                 panel.status = None;
             }),
             Reply::ModeSet(result) => self.set_mode_done(result),
-            Reply::Status(status) => {
-                self.refreshing = false;
-                self.status = status;
+            Reply::Status(found) => self.status_found(found),
+        }
+    }
+
+    fn status_found(&mut self, found: EngineStatus) {
+        self.refreshing = false;
+        match found {
+            EngineStatus::Running(status) => self.status = Some(status),
+            EngineStatus::Unknown => {}
+            EngineStatus::Gone { configured } => {
+                self.status = None;
+                self.state = if configured {
+                    SyncState::Error("Sync stopped".to_owned())
+                } else {
+                    SyncState::Off
+                };
             }
         }
     }
@@ -331,14 +360,21 @@ impl SyncPanel {
         self.busy = None;
         match result {
             Ok(value) => on_success(self, value),
-            Err(error) => self.error = Some(error),
+            Err(error) => {
+                self.error = Some(error);
+                // A failed request may have ended the engine: find out at once.
+                self.last_refresh = None;
+            }
         }
     }
 
-    fn set_mode_done(&mut self, result: Result<(), String>) {
+    fn set_mode_done(&mut self, result: Result<StartOutcome, String>) {
         let wanted = self.pending_mode.take();
-        self.finish(result, |panel, ()| {
+        self.finish(result, |panel, outcome| {
             panel.mode = wanted.unwrap_or(panel.mode);
+            if outcome == StartOutcome::HandledElsewhere {
+                panel.state = SyncState::HandledElsewhere;
+            }
         });
     }
 
@@ -470,15 +506,17 @@ mod tests {
             Ok(())
         }
 
-        fn status(&mut self) -> Option<Status> {
+        fn status(&mut self) -> EngineStatus {
             self.calls.push("status");
-            self.status.clone()
+            self.status
+                .clone()
+                .map_or(EngineStatus::Unknown, EngineStatus::Running)
         }
 
-        fn set_mode(&mut self, mode: NetMode) -> Result<(), String> {
+        fn set_mode(&mut self, mode: NetMode) -> Result<StartOutcome, String> {
             self.calls.push(format!("set_mode({mode:?})"));
             self.mode = mode;
-            Ok(())
+            Ok(StartOutcome::Started)
         }
 
         fn stop(&mut self) {
@@ -525,6 +563,10 @@ mod tests {
             peers,
             ..Status::default()
         }
+    }
+
+    fn running(connected: &[bool]) -> Reply {
+        Reply::Status(EngineStatus::Running(status_with_peers(connected)))
     }
 
     #[test]
@@ -627,7 +669,7 @@ mod tests {
     fn should_count_online_peers_in_summary() {
         let mut panel = SyncPanel::default();
         panel.apply(Reply::Started(Ok(StartOutcome::Started)));
-        panel.apply(Reply::Status(Some(status_with_peers(&[true, false, true]))));
+        panel.apply(running(&[true, false, true]));
         assert_eq!(panel.summary(), "Sync: 2 of 3 peers online");
     }
 
@@ -706,5 +748,69 @@ mod tests {
             assert!(!text.contains("SECRET"), "{text}");
             assert!(text.contains("<redacted>"), "{text}");
         }
+    }
+
+    fn running_panel() -> SyncPanel {
+        let mut panel = SyncPanel::default();
+        panel.apply(Reply::Started(Ok(StartOutcome::Started)));
+        panel
+    }
+
+    #[test]
+    fn should_turn_off_when_the_engine_is_gone_and_the_group_was_left() {
+        let mut panel = running_panel();
+        panel.apply(Reply::Status(EngineStatus::Gone { configured: false }));
+        assert_eq!(panel.state, SyncState::Off);
+    }
+
+    #[test]
+    fn should_show_a_short_error_when_the_engine_is_gone_but_the_group_remains() {
+        let mut panel = running_panel();
+        panel.apply(running(&[true]));
+        panel.apply(Reply::Status(EngineStatus::Gone { configured: true }));
+        assert_eq!(panel.state, SyncState::Error("Sync stopped".into()));
+        assert_eq!(panel.summary(), "Sync error");
+        assert_eq!(panel.status, None);
+    }
+
+    #[test]
+    fn should_show_handled_elsewhere_when_a_mode_restart_loses_the_lock() {
+        let mut panel = running_panel();
+        panel.apply(Reply::ModeSet(Ok(StartOutcome::HandledElsewhere)));
+        assert_eq!(panel.state, SyncState::HandledElsewhere);
+    }
+
+    #[test]
+    fn should_keep_state_on_when_a_mode_restart_succeeds() {
+        let mut panel = running_panel();
+        panel.apply(Reply::ModeSet(Ok(StartOutcome::Started)));
+        assert_eq!(panel.state, SyncState::On);
+    }
+
+    #[test]
+    fn should_keep_the_last_status_when_a_refresh_learns_nothing() {
+        let mut panel = running_panel();
+        panel.apply(running(&[true]));
+        panel.apply(Reply::Status(EngineStatus::Unknown));
+        assert_eq!(panel.summary(), "Sync: 1 of 1 peer online");
+    }
+
+    #[test]
+    fn should_refresh_at_once_after_a_failed_request() {
+        let (control, _calls) = fake(true);
+        let worker = spawn(control);
+        let mut panel = SyncPanel::default();
+        apply_next(&mut panel, &worker);
+        let t0 = Instant::now();
+        panel.tick(&worker, t0, true);
+        apply_next(&mut panel, &worker);
+        let soon = t0 + Duration::from_millis(100);
+        assert!(panel.tick(&worker, soon, true) < Some(Duration::from_secs(2)));
+        panel.apply(Reply::Left(Err("did not answer".into())));
+        assert_eq!(
+            panel.tick(&worker, soon, true),
+            Some(Duration::from_secs(2))
+        );
+        assert!(panel.refreshing);
     }
 }
