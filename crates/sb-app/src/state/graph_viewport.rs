@@ -8,10 +8,12 @@
 pub const MIN_ZOOM: f32 = 0.05;
 /// Largest zoom.
 pub const MAX_ZOOM: f32 = 5.0;
+/// From this zoom on every node shows its label.
+pub const LABEL_ZOOM: f32 = 1.5;
 /// Free space left around the graph by `Viewport::fit`.
 const FIT_MARGIN: f32 = 24.0;
-/// `Viewport::fit` never zooms in beyond this, so a lone note stays small.
-const FIT_MAX_ZOOM: f32 = 1.0;
+/// `Viewport::fit` cap: high enough that a fitted small graph shows its labels (≥ `LABEL_ZOOM`).
+const FIT_MAX_ZOOM: f32 = 2.0;
 
 type Point = [f32; 2];
 
@@ -163,7 +165,15 @@ mod tests {
     }
 
     #[test]
-    fn should_reset_when_fitting_nothing_and_not_zoom_in_on_one_node() {
+    fn should_fit_a_small_graph_close_enough_to_show_labels() {
+        let mut view = Viewport::default();
+        view.fit(Some(([0.0, 0.0], [10.0, 10.0])), [800.0, 600.0]);
+        assert!(view.zoom >= LABEL_ZOOM, "{}", view.zoom);
+        assert!(view.zoom <= MAX_ZOOM, "{}", view.zoom);
+    }
+
+    #[test]
+    fn should_reset_when_fitting_nothing_and_cap_the_zoom_on_one_node() {
         let mut view = Viewport {
             pan: [9.0, 9.0],
             zoom: 3.0,
@@ -171,6 +181,6 @@ mod tests {
         view.fit(None, [600.0, 400.0]);
         assert_eq!(view, Viewport::default());
         view.fit(Some(([-4.0, -4.0], [4.0, 4.0])), [600.0, 400.0]);
-        assert_eq!(view.zoom, 1.0);
+        assert_eq!(view.zoom, FIT_MAX_ZOOM);
     }
 }

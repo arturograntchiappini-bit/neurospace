@@ -10,7 +10,7 @@ use eframe::egui::{
 use sb_core::{Graph, NotePath};
 
 use crate::state::graph_layout::Layout;
-use crate::state::graph_viewport::Viewport;
+use crate::state::graph_viewport::{LABEL_ZOOM, Viewport};
 use crate::state::{NoteAction, Workspace};
 use crate::ui::theme::Palette;
 
@@ -22,8 +22,6 @@ const STEP_BUDGET: Duration = Duration::from_millis(8);
 /// With «Reduce motion» a frame runs the layout to rest, but still not longer than this.
 const REDUCED_MOTION_BUDGET: Duration = Duration::from_millis(200);
 const SCROLL_ZOOM_RATE: f32 = 0.002;
-/// From this zoom on every node shows its label.
-const LABEL_ZOOM: f32 = 1.5;
 const DIMMED: f32 = 0.25;
 const GHOST_FILL: f32 = 0.5;
 const EDGE_WIDTH: f32 = 1.0;
