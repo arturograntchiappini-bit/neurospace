@@ -152,14 +152,21 @@ fn read_fresh(
         }
         ReadOutcome::Vanished => return None,
     };
-    // A modification time in the future is racy too.
-    let racy = stat.is_none_or(|stat| stat.modified + RACY_WINDOW > read_at);
+    let racy = stat.is_none_or(|stat| is_racy(stat.modified, read_at));
     Some(Entry {
         spelling: path,
         is_note,
         stat,
         racy,
     })
+}
+
+/// Whether a file modified at `modified`, read at `read_at`, must be read again. A modification
+/// time in the future is racy too, and so is a bound the platform cannot represent.
+fn is_racy(modified: SystemTime, read_at: SystemTime) -> bool {
+    modified
+        .checked_add(RACY_WINDOW)
+        .is_none_or(|bound| bound > read_at)
 }
 
 fn not_utf8(path: &NotePath) -> Ignored {
@@ -174,8 +181,9 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use super::{RACY_WINDOW, is_racy};
     use crate::{LoadCache, LoadDelta, MAX_NOTE_BYTES, NoteKey, NotePath, Vault};
 
     type State = BTreeMap<NoteKey, (NotePath, String)>;
@@ -225,6 +233,9 @@ mod tests {
 
     fn assert_matches_full_load(vault: &Vault, cache: &mut LoadCache, state: &mut State) {
         let delta = vault.load_changes(cache).unwrap();
+        for key in &delta.removed {
+            assert!(delta.changed.iter().all(|(path, _)| path.key() != *key));
+        }
         apply(state, &delta);
         let full = vault.load().unwrap();
         let expected: State = full
@@ -302,6 +313,30 @@ mod tests {
             assert_matches_full_load(&vault, &mut cache, &mut state);
         }
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The latest whole second the platform can represent, if one more `RACY_WINDOW` overflows it.
+    fn unrepresentable_racy_bound() -> Option<SystemTime> {
+        let (mut ok, mut bad) = (0_u64, u64::MAX);
+        while bad - ok > 1 {
+            let mid = ok + (bad - ok) / 2;
+            match UNIX_EPOCH.checked_add(Duration::from_secs(mid)) {
+                Some(_) => ok = mid,
+                None => bad = mid,
+            }
+        }
+        let time = UNIX_EPOCH.checked_add(Duration::from_secs(ok))?;
+        time.checked_add(RACY_WINDOW).is_none().then_some(time)
+    }
+
+    #[test]
+    fn should_treat_an_unrepresentable_racy_bound_as_racy() {
+        let read_at = SystemTime::now();
+        assert!(is_racy(read_at + Duration::from_secs(60), read_at));
+        assert!(!is_racy(read_at - Duration::from_secs(10), read_at));
+        if let Some(time) = unrepresentable_racy_bound() {
+            assert!(is_racy(time, read_at));
+        }
     }
 
     #[test]
