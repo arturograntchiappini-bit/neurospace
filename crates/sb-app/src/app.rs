@@ -23,6 +23,7 @@ use crate::sync_control::EngineControl;
 use crate::sync_host::{ControlFactory, SyncHost};
 use crate::ui::editor::{self, EditorState};
 use crate::ui::graph_view::{GraphView, StepBudgets};
+use crate::ui::logo::Logo;
 use crate::ui::menu::{self, MenuOutcome};
 use crate::ui::shell::{self, Sidebars, Strip, TopBar, TopBarOutcome};
 use crate::ui::theme::{self, Material, Palette};
@@ -85,6 +86,7 @@ pub struct SecondBrainApp {
     state_base: PathBuf,
     screen: Screen,
     welcome: WelcomeForm,
+    logo: Logo,
     notices: NoticeBoard,
     view: VaultView,
     mica_available: bool,
@@ -134,6 +136,7 @@ impl SecondBrainApp {
             state_base: options.state_base,
             screen: Screen::Welcome,
             welcome: WelcomeForm::default(),
+            logo: Logo::default(),
             notices: NoticeBoard::default(),
             view: VaultView::default(),
             mica_available: false,
@@ -359,7 +362,7 @@ impl SecondBrainApp {
     }
 
     fn show_welcome(&mut self, ui: &mut Ui, palette: &Palette) {
-        if let Some(path) = welcome::show(ui, palette, &mut self.welcome) {
+        if let Some(path) = welcome::show(ui, palette, &mut self.welcome, &self.logo) {
             self.open_vault(path);
         }
     }

@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use eframe::egui::ViewportBuilder;
 use sb_app::app::{AppOptions, SecondBrainApp};
+use sb_app::ui::logo;
 
 /// Second Brain: Markdown notes with links, graph and peer-to-peer sync.
 #[derive(Parser)]
@@ -25,12 +26,15 @@ fn options(cli: Cli) -> Result<AppOptions, sb_sync::SyncError> {
 }
 
 fn native_options() -> eframe::NativeOptions {
-    let viewport = ViewportBuilder::default()
+    let mut viewport = ViewportBuilder::default()
         .with_title("Second Brain")
         .with_app_id("secondbrain")
         .with_transparent(cfg!(windows))
         .with_inner_size([1200.0, 800.0])
         .with_min_inner_size([720.0, 480.0]);
+    if let Some(icon) = logo::window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     eframe::NativeOptions {
         viewport,
         ..Default::default()

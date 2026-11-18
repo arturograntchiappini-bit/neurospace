@@ -57,6 +57,16 @@ fn should_show_welcome_when_no_vault_known() {
 }
 
 #[test]
+fn should_show_named_logo_above_folder_picker_when_on_welcome() {
+    let (mut harness, _dir) = harness(None);
+    harness.run();
+    let logo = harness.get_by_role_and_label(Role::Image, "Second Brain");
+    let picker = harness.get_by_label("Open a folder");
+    assert!(logo.rect().bottom() <= picker.rect().top());
+    assert_eq!(logo.rect().height(), 96.0);
+}
+
+#[test]
 fn should_open_vault_from_path_field() {
     let scratch = tempfile::tempdir().unwrap();
     let vault = make_vault(scratch.path());

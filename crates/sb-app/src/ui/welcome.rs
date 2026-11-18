@@ -2,17 +2,20 @@
 
 use std::path::PathBuf;
 
-use eframe::egui::{Button, CentralPanel, Key, Margin, RichText, TextEdit, Ui};
+use eframe::egui::load::SizedTexture;
+use eframe::egui::{Button, CentralPanel, Image, Key, Margin, RichText, TextEdit, Ui, vec2};
 
 use crate::state::welcome::WelcomeForm;
+use crate::ui::logo::Logo;
 use crate::ui::theme::{self, Palette};
 
 const CARD_WIDTH: f32 = 420.0;
-const CARD_HEIGHT: f32 = 240.0;
+const LOGO_SIZE: f32 = 96.0;
+const CARD_HEIGHT: f32 = 344.0;
 const CARD_PADDING: i8 = 24;
 
 /// Draws the welcome card; returns the folder the user asked to open, if any.
-pub fn show(ui: &mut Ui, p: &Palette, form: &mut WelcomeForm) -> Option<PathBuf> {
+pub fn show(ui: &mut Ui, p: &Palette, form: &mut WelcomeForm, logo: &Logo) -> Option<PathBuf> {
     let mut chosen = form.poll_picker();
     CentralPanel::no_frame().show(ui, |ui| {
         ui.add_space(((ui.available_height() - CARD_HEIGHT) / 2.0).max(0.0));
@@ -20,11 +23,27 @@ pub fn show(ui: &mut Ui, p: &Palette, form: &mut WelcomeForm) -> Option<PathBuf>
             let card = theme::glass_frame(p).inner_margin(Margin::same(CARD_PADDING));
             card.show(ui, |ui| {
                 ui.set_width(CARD_WIDTH);
+                show_logo(ui, logo);
                 chosen = card_contents(ui, p, form).or(chosen.take());
             });
         });
     });
     chosen
+}
+
+fn show_logo(ui: &mut Ui, logo: &Logo) {
+    let Some(texture) = logo.texture(ui.ctx()) else {
+        return;
+    };
+    ui.vertical_centered(|ui| {
+        let image = Image::from_texture(SizedTexture::from(texture));
+        ui.add(
+            image
+                .fit_to_exact_size(vec2(LOGO_SIZE, LOGO_SIZE))
+                .alt_text("Second Brain"),
+        );
+    });
+    ui.add_space(8.0);
 }
 
 fn card_contents(ui: &mut Ui, p: &Palette, form: &mut WelcomeForm) -> Option<PathBuf> {
