@@ -5,3 +5,6 @@ target/
 .worktrees/
 graphify-out/
 dist/
+assets/logo/*.png
+assets/logo/*.ico
+crates/sb-app/assets/*.ttf
