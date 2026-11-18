@@ -1,0 +1,7 @@
+//! Command line of Neurospace: argument parsing, command execution and output rendering.
+
+pub mod cli;
+pub mod commands;
+pub mod mcp;
+pub mod render;
+pub mod sync_cmd;

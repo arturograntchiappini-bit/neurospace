@@ -3937,6 +3937,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "ns-app"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "eframe",
+ "egui_commonmark",
+ "egui_kittest",
+ "ns-core",
+ "ns-sync",
+ "pulldown-cmark",
+ "raw-window-handle",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "window-vibrancy",
+ "winresource",
+]
+
+[[package]]
+name = "ns-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ns-core",
+ "ns-sync",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "ns-core"
+version = "0.1.0"
+dependencies = [
+ "notify",
+ "pulldown-cmark",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "ns-sync"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "getrandom 0.3.4",
+ "iroh",
+ "iroh-mdns-address-lookup",
+ "loro",
+ "ns-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5430,71 +5495,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
-]
-
-[[package]]
-name = "sb-app"
-version = "0.1.0"
-dependencies = [
- "clap",
- "eframe",
- "egui_commonmark",
- "egui_kittest",
- "pulldown-cmark",
- "raw-window-handle",
- "rfd",
- "sb-core",
- "sb-sync",
- "serde",
- "serde_json",
- "tempfile",
- "window-vibrancy",
- "winresource",
-]
-
-[[package]]
-name = "sb-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "rmcp",
- "sb-core",
- "sb-sync",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "sb-core"
-version = "0.1.0"
-dependencies = [
- "notify",
- "pulldown-cmark",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "sb-sync"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "getrandom 0.3.4",
- "iroh",
- "iroh-mdns-address-lookup",
- "loro",
- "sb-core",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
 ]
 
 [[package]]

@@ -1,0 +1,24 @@
+[package]
+name = "ns-sync"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ns-core = { path = "../ns-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+getrandom.workspace = true
+loro.workspace = true
+tokio = { version = "1", features = ["io-util", "sync", "macros", "rt", "rt-multi-thread", "time"] }
+iroh = "1.4"
+iroh-mdns-address-lookup = "0.6"
+
+[dev-dependencies]
+tempfile.workspace = true

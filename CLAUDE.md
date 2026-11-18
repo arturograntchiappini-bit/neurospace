@@ -533,7 +533,7 @@ Ogni prompt di dispatch a un implementer contiene, oltre al template della skill
 
 ## Verità assoluta
 
-Ultimo aggiornamento: 2026-11-18 (chiusura di M3)
+Ultimo aggiornamento: 2026-11-18 (cambio di nome in Neurospace)
 
 **Legenda stati.** **[Confermato]** = detto o approvato dall'utente. **[Proposto — applicato su delega]** = deciso dall'orchestratore in base alla delega totale del 2026-11-15, non approvato voce per voce dall'utente: vale finché l'utente non lo cambia. **[Aperto]** = non deciso. Ciò che non è verificato è scritto come «non verificato».
 
@@ -543,7 +543,8 @@ Ultimo aggiornamento: 2026-11-18 (chiusura di M3)
 - **[Confermato]** Delega: l'utente ha delegato ogni decisione e chiesto di procedere senza fermarsi fino al completamento (2026-11-15).
 - **[Confermato]** (richiesta dell'utente, 2026-11-17, testo integrale, arrivata all'inizio della pianificazione di M3): «la UI deve essere molto semplice e minimal ma molto molto ben leggibile e accessibile, polished, un po' stile mac con effetto glass».
 - **[Confermato]** (richiesta dell'utente, 2026-11-17, dopo aver visto le schermate dello spike sul vetro, testo integrale): «i saw the preview of spike glass i kinda like it, but i don't like the purple/pink gradient, get rid of it, plus, the glass effect should be refined better». Quindi: niente sfondi colorati a gradiente, solo fondali neutri; il vetro va rifinito.
-- **[Confermato]** (richiesta dell'utente, 2026-11-18, testo integrale): «as logo and icon use assets/logo/second-brain.svg». L'SVG è la sola fonte del logo e dell'icona (spec 9.6, «Logo and icon»).
+- **[Confermato]** (richiesta dell'utente, 2026-11-18, testo integrale): «as logo and icon use assets/logo/second-brain.svg». L'SVG è la sola fonte del logo e dell'icona (spec 9.6, «Logo and icon»); dal cambio di nome si chiama `assets/logo/neurospace.svg`.
+- **[Confermato]** (richiesta dell'utente, 2026-11-18, testo integrale, arrivata durante l'aggiornamento del grafo dopo M3): «change the name of the app/project to "neurospace"». Le voci datate di V.7 e V.8, i piani M1–M3 e i ledger restano con il vecchio nome «Second Brain», perché registrano ciò che è successo.
 
 ### V.2 Fonti
 
@@ -573,15 +574,17 @@ Da copiare in ogni dispatch a un implementer (§11.4).
 
 Per §11.5: se un task tocca questi moduli, l'orchestratore legge anche il diff.
 
-- **[Proposto — applicato su delega]** In `crates/sb-core/src/`: `path.rs` (validazione dei percorsi), `vault.rs` (operazioni sul disco, confinamento, cestino), `index.rs` (risoluzione dei link), `graph.rs`, `ops.rs` (confine con CLI, MCP e GUI).
-- **[Proposto — applicato su delega]** In `crates/sb-sync/src/` (da M2): documento di sync e regola «viva/lapide», risoluzione delle rivendicazioni di percorso, riconciliazione disco ↔ documento, protocollo e autenticazione tra peer. File (piano M2): `doc.rs` (documento, lapidi, rivendicazioni di percorso), `plan.rs` (pianificatore della riconciliazione), `local.rs` (esecuzione su disco), `store.rs` (persistenza di documento e base), `auth.rs`, `protocol.rs`, `session.rs`, `replica.rs`.
+- I percorsi qui sotto usano i nomi dei crate dopo il cambio di nome del 2026-11-18 (`sb-*` → `ns-*`).
+- **[Proposto — applicato su delega]** In `crates/ns-core/src/`: `path.rs` (validazione dei percorsi), `vault.rs` (operazioni sul disco, confinamento, cestino), `index.rs` (risoluzione dei link), `graph.rs`, `ops.rs` (confine con CLI, MCP e GUI).
+- **[Proposto — applicato su delega]** In `crates/ns-sync/src/` (da M2): documento di sync e regola «viva/lapide», risoluzione delle rivendicazioni di percorso, riconciliazione disco ↔ documento, protocollo e autenticazione tra peer. File (piano M2): `doc.rs` (documento, lapidi, rivendicazioni di percorso), `plan.rs` (pianificatore della riconciliazione), `local.rs` (esecuzione su disco), `store.rs` (persistenza di documento e base), `auth.rs`, `protocol.rs`, `session.rs`, `replica.rs`.
 
 ### V.5 Decisioni
 
 Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nella spec.
 
-- Nome prodotto «Second Brain». Due binari: `secondbrain` (GUI) e `sb` (console: CLI, server MCP stdio, sync headless).
-- Workspace Cargo con quattro crate: `sb-core`, `sb-sync`, `sb-cli`, `sb-app`.
+- Nome prodotto «Neurospace» (fino al 2026-11-18 «Second Brain»; il nome lo ha scelto l'utente). Due binari: `neurospace` (GUI) e `ns` (console: CLI, server MCP stdio, sync headless).
+- Workspace Cargo con quattro crate: `ns-core`, `ns-sync`, `ns-cli`, `ns-app`.
+- Identificatori del nome (2026-11-18): cartella nel vault `.neurospace/`, cartella di stato `neurospace`, variabili `NS_STATE_DIR` e `NS_VAULT`, protocollo `neurospace/sync/1`, contesti di autenticazione `ns-sync-*`, ticket `ns1/`, schema dei link `ns-note:`, server MCP `neurospace`, logo `assets/logo/neurospace*`. Nessuna migrazione dal vecchio nome: non c'è mai stato un rilascio. La cartella del repository sul Desktop («SECOND BRAIN») resta com'è: rinominarla romperebbe i percorsi dei worktree; può farlo l'utente.
 - Stack: GUI `eframe`/`egui` 0.37 con renderer OpenGL; anteprima `egui_commonmark` 0.26; parser `pulldown-cmark` 0.13; documento di sync `loro` 1.17 (CRDT, fusione per righe); trasporto `iroh` 1.4 con scoperta in LAN via `iroh-mdns-address-lookup`; osservazione cartella `notify` 8.2; server MCP `rmcp` 3.10; CLI `clap` 4.
 - Identità delle note nel sync: id casuale per nota, il percorso è una proprietà. Due note sullo stesso percorso si separano con una regola deterministica (duplicato eliminato oppure copia di conflitto).
 - Fiducia: gruppo di sync = conoscenza di un segreto a 32 byte consegnato in un ticket; prova reciproca a ogni connessione.
@@ -651,6 +654,14 @@ Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nel
     - l'icona sul pulsante della barra delle applicazioni: si cattura solo la finestra;
     - un bordo nero sottile nelle catture opache, probabilmente il bordo di ridimensionamento reso da PrintWindow.
     - Visto una volta e non riprodotto: con la finestra ridotta a icona il processo è salito a 1 GB per poi scendere a 533 MB; tre prove successive sono rimaste a circa 228 MB.
+- 2026-11-18 — **Cambio di nome in Neurospace completato** (richiesta dell'utente): branch `refactor/rename-neurospace`, da `main` `6c417f6`, commit `268fd7c` (codice, test, asset), `769b56b` (README, CHANGELOG), più i documenti dell'orchestratore. Ledger: `.superpowers/sdd/2026-11-18-rename-neurospace/progress.md`.
+  - Solo nomi: il controllo riga per riga dell'orchestratore non trova cambi di logica.
+  - Windows: 713 test passati, 2 ignorati, conteggi per suite identici a prima; `fmt`, `clippy` e build di release puliti.
+  - Linux `rust:1-bullseye`: `fmt`, `clippy` e ogni suite puliti, 11 test sui permessi passati da `nobody`.
+  - Binari: titolo e benvenuto «Neurospace», logo e icona intatti, `NS_STATE_DIR` e `NS_VAULT` letti, `ns delete` sposta in `.neurospace/trash/`, il server MCP si chiama `neurospace`.
+  - Prima del lavoro il disco C: era pieno: con il consenso dell'utente sono state cancellate le cartelle `target/` dei worktree di M1, M2 e M3 (circa 95 GB, solo file compilati).
+  - L'aggiornamento di graphify dopo M3, sospeso dopo l'estrazione AST, si rifà per intero dopo il merge.
+  - Non verificato: aprire un vault cliccando nell'app rinominata (coperto solo dai test UI); i vault di prova con `.secondbrain/` non sono più riconosciuti, per scelta.
 - Rischio chiuso il 2026-11-17: il preset di rete di iroh che «non risultava mai online» su questa macchina era il firewall applicativo, non il codice né iroh.
 - Non verificabile in questo progetto: uso interattivo della GUI da parte di una persona. La GUI si verifica con test headless e con l'avvio del binario.
 
