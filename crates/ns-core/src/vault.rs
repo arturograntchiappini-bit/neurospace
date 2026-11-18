@@ -342,17 +342,24 @@ impl Vault {
     }
 }
 
+/// A `.md` file found by the walk, with the metadata of its directory entry when available.
+pub(crate) struct Candidate {
+    pub(crate) path: NotePath,
+    pub(crate) full: PathBuf,
+    pub(crate) meta: Option<fs::Metadata>,
+}
+
 #[derive(Default)]
-struct Scan {
-    files: Vec<(NotePath, PathBuf)>,
-    ignored: Vec<Ignored>,
+pub(crate) struct Scan {
+    files: Vec<Candidate>,
+    pub(crate) ignored: Vec<Ignored>,
 }
 
 impl Scan {
     /// `prefix` is the relative path of `dir` with a trailing `/`; `unicode` is false
     /// when any name on the way was not valid Unicode. Fails when `dir` or one of its
     /// entries cannot be listed.
-    fn walk(&mut self, dir: &Path, prefix: &str, unicode: bool) -> io::Result<()> {
+    pub(crate) fn walk(&mut self, dir: &Path, prefix: &str, unicode: bool) -> io::Result<()> {
         for entry in fs::read_dir(dir)? {
             self.visit(&entry?, prefix, unicode);
         }
@@ -370,7 +377,7 @@ impl Scan {
         match entry.file_type() {
             Ok(kind) if kind.is_dir() => self.walk_folder(&entry.path(), relative, unicode),
             Ok(kind) if kind.is_file() && has_markdown_extension(&file_name) => {
-                self.classify(entry.path(), relative, unicode);
+                self.classify(entry, relative, unicode);
             }
             Err(_) if has_markdown_extension(&file_name) => self.ignore_unreadable(relative),
             _ => {}
@@ -392,9 +399,13 @@ impl Scan {
         });
     }
 
-    fn classify(&mut self, full: PathBuf, relative: String, unicode: bool) {
+    fn classify(&mut self, entry: &fs::DirEntry, relative: String, unicode: bool) {
         match NotePath::parse(&relative) {
-            Ok(path) if unicode => self.files.push((path, full)),
+            Ok(path) if unicode => self.files.push(Candidate {
+                path,
+                full: entry.path(),
+                meta: entry.metadata().ok(),
+            }),
             _ => self.ignored.push(Ignored {
                 path: relative,
                 reason: IgnoreReason::InvalidPath,
@@ -402,23 +413,30 @@ impl Scan {
         }
     }
 
-    fn read_notes(self) -> Loaded {
-        let Scan {
-            mut files,
-            mut ignored,
-        } = self;
-        files.sort();
+    /// One candidate per note key, ordered by path; the others are ignored as `CaseCollision`.
+    pub(crate) fn winners(&mut self) -> Vec<Candidate> {
         let mut seen = HashSet::new();
-        let mut notes = Vec::new();
-        for (path, full) in files {
-            let outcome = if seen.insert(path.key()) {
-                read_content(&full)
+        let mut winners = Vec::new();
+        self.files.sort_by(|a, b| a.path.cmp(&b.path));
+        for candidate in std::mem::take(&mut self.files) {
+            if seen.insert(candidate.path.key()) {
+                winners.push(candidate);
             } else {
-                ReadOutcome::Ignore(IgnoreReason::CaseCollision)
-            };
-            match outcome {
+                self.ignored.push(Ignored {
+                    path: candidate.path.to_string(),
+                    reason: IgnoreReason::CaseCollision,
+                });
+            }
+        }
+        winners
+    }
+
+    fn read_notes(mut self) -> Loaded {
+        let mut notes = Vec::new();
+        for Candidate { path, full, meta } in self.winners() {
+            match read_content(&full, meta.as_ref().map(fs::Metadata::len)) {
                 ReadOutcome::Content(content) => notes.push((path, content)),
-                ReadOutcome::Ignore(reason) => ignored.push(Ignored {
+                ReadOutcome::Ignore(reason) => self.ignored.push(Ignored {
                     path: path.to_string(),
                     reason,
                 }),
@@ -426,12 +444,15 @@ impl Scan {
             }
         }
         notes.sort_by_key(|(path, _)| path.key());
-        ignored.sort_by(|a, b| a.path.cmp(&b.path));
-        Loaded { notes, ignored }
+        self.ignored.sort_by(|a, b| a.path.cmp(&b.path));
+        Loaded {
+            notes,
+            ignored: self.ignored,
+        }
     }
 }
 
-fn io_error(path: &Path) -> impl FnOnce(io::Error) -> CoreError + '_ {
+pub(crate) fn io_error(path: &Path) -> impl FnOnce(io::Error) -> CoreError + '_ {
     move |source| CoreError::Io {
         path: path.to_path_buf(),
         source,
@@ -454,22 +475,24 @@ fn has_markdown_extension(file_name: &std::ffi::OsStr) -> bool {
 }
 
 /// What reading one scanned file yielded.
-enum ReadOutcome {
+pub(crate) enum ReadOutcome {
     Content(String),
     Ignore(IgnoreReason),
     /// The file disappeared between the walk and the read.
     Vanished,
 }
 
-fn read_content(full: &Path) -> ReadOutcome {
-    let size = match fs::metadata(full) {
-        Ok(meta) => meta.len(),
+/// Reads a scanned file; `listed_size` is the size the directory listing reported, if any.
+pub(crate) fn read_content(full: &Path, listed_size: Option<u64>) -> ReadOutcome {
+    let size = match listed_size.map_or_else(|| fs::metadata(full).map(|meta| meta.len()), Ok) {
+        Ok(size) => size,
         Err(error) => return read_failure(&error),
     };
     if size > MAX_NOTE_BYTES as u64 {
         return ReadOutcome::Ignore(IgnoreReason::TooLarge);
     }
     match fs::read(full) {
+        Ok(bytes) if bytes.len() > MAX_NOTE_BYTES => ReadOutcome::Ignore(IgnoreReason::TooLarge),
         Ok(bytes) => String::from_utf8(bytes).map_or(
             ReadOutcome::Ignore(IgnoreReason::NotUtf8),
             ReadOutcome::Content,
