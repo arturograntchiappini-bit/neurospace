@@ -22,7 +22,8 @@ pub use error::{Result, SyncError};
 pub use local::{LocalReplica, MAX_PASSES, Outcome};
 pub use net::{DIAL_TIMEOUT, IrohNetwork, ensure_identity, start_engine};
 pub use plan::{
-    BaseChange, DiskAction, DiskEntry, DiskScan, DiskState, DocAction, PlanInput, Step, plan, scan,
+    BaseChange, DiskAction, DiskCache, DiskEntry, DiskScan, DiskState, DocAction, PlanInput, Step,
+    plan, scan,
 };
 pub use protocol::{
     ALPN, FRAME_MAX, HELLO_MAX, Message, PROTOCOL_VERSION, read_frame, write_frame,

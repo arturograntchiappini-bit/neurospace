@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use ns_core::{IgnoreReason, Ignored, NoteKey, NotePath, Vault};
+use ns_core::{IgnoreReason, Ignored, LoadCache, NoteKey, NotePath, Vault};
 
 use crate::doc::{Hash32, NoteId, NoteView, content_hash};
 use crate::error::Result;
@@ -62,17 +62,87 @@ pub fn scan(vault: &Vault) -> Result<DiskScan> {
         })
         .collect();
     let mut blocked_folders = Vec::new();
-    for ignored in &loaded.ignored {
-        if ignored.path.ends_with('/') {
-            blocked_folders.push(ignored.path.to_lowercase());
-        } else if let Some((key, entry)) = blocked_entry(ignored) {
-            disk.insert(key, entry);
-        }
-    }
+    block_ignored(&loaded.ignored, &mut disk, &mut blocked_folders);
     Ok(DiskScan {
         disk,
         blocked_folders,
     })
+}
+
+/// Blocks every ignored file in `disk` and records every unlistable folder in `folders`. Returns
+/// each blocked key with the note its entry displaced, if any.
+fn block_ignored(
+    ignored: &[Ignored],
+    disk: &mut DiskState,
+    folders: &mut Vec<String>,
+) -> Vec<(NoteKey, Option<DiskEntry>)> {
+    let mut blocked = Vec::new();
+    for ignored in ignored {
+        if ignored.path.ends_with('/') {
+            folders.push(ignored.path.to_lowercase());
+        } else if let Some((key, entry)) = blocked_entry(ignored) {
+            let displaced = disk
+                .insert(key.clone(), entry)
+                .filter(|old| matches!(old, DiskEntry::Present { .. }));
+            blocked.push((key, displaced));
+        }
+    }
+    blocked
+}
+
+/// The disk state kept between scans; each refresh hashes only the notes the delta names.
+#[derive(Debug, Default)]
+pub struct DiskCache {
+    load: LoadCache,
+    scan: DiskScan,
+    /// The blocked keys of the last refresh with the notes they displaced, in insertion order.
+    blocked: Vec<(NoteKey, Option<DiskEntry>)>,
+}
+
+impl DiskCache {
+    /// Scans through the load cache and returns the full scan (spec 8.5 step 1).
+    ///
+    /// # Errors
+    /// Whatever `Vault::load_changes` returns; the cache is then unchanged.
+    pub fn refresh(&mut self, vault: &Vault) -> Result<&DiskScan> {
+        let delta = vault.load_changes(&mut self.load)?;
+        self.unblock();
+        for key in &delta.removed {
+            self.scan.disk.remove(key);
+        }
+        for (path, content) in delta.changed {
+            let hash = content_hash(&content);
+            let entry = DiskEntry::Present {
+                path: path.clone(),
+                content,
+                hash,
+            };
+            self.scan.disk.insert(path.key(), entry);
+        }
+        let DiskScan {
+            disk,
+            blocked_folders,
+        } = &mut self.scan;
+        self.blocked = block_ignored(&delta.ignored, disk, blocked_folders);
+        Ok(&self.scan)
+    }
+
+    /// The next refresh reads this key's file again.
+    pub fn forget(&mut self, key: &NoteKey) {
+        self.load.forget(key);
+    }
+
+    /// Undoes the last refresh's blocking: a displaced note is back, and the delta then updates
+    /// it. Reversed, so a key blocked twice ends with the note it first displaced.
+    fn unblock(&mut self) {
+        self.scan.blocked_folders.clear();
+        for (key, displaced) in self.blocked.drain(..).rev() {
+            match displaced {
+                Some(note) => self.scan.disk.insert(key, note),
+                None => self.scan.disk.remove(&key),
+            };
+        }
+    }
 }
 
 /// `InvalidPath` cannot be a note. A `CaseCollision` blocks its key: neither case variant may
@@ -722,6 +792,104 @@ mod tests {
         let (blocked_key, entry) = blocked_entry(&ignored).unwrap();
         assert_eq!(blocked_key, key("note.md"));
         assert!(matches!(entry, DiskEntry::Blocked { .. }));
+    }
+
+    fn set_time(path: &std::path::Path, time: std::time::SystemTime) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(time).unwrap();
+    }
+
+    fn age(path: &std::path::Path, seconds: u64) {
+        set_time(
+            path,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(seconds),
+        );
+    }
+
+    fn assert_refresh_equals_scan(vault: &Vault, cache: &mut DiskCache) {
+        let refreshed = cache.refresh(vault).unwrap().clone();
+        assert_eq!(refreshed, scan(vault).unwrap());
+    }
+
+    #[test]
+    fn should_refresh_to_the_same_scan_as_a_full_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).unwrap();
+        let mut cache = DiskCache::default();
+        assert_refresh_equals_scan(&vault, &mut cache);
+        std::fs::write(tmp.path().join("a.md"), "one").unwrap();
+        std::fs::write(tmp.path().join("b.md"), "two").unwrap();
+        age(&tmp.path().join("a.md"), 20);
+        age(&tmp.path().join("b.md"), 20);
+        assert_refresh_equals_scan(&vault, &mut cache);
+        std::fs::write(tmp.path().join("a.md"), "one, edited").unwrap();
+        age(&tmp.path().join("a.md"), 10);
+        assert_refresh_equals_scan(&vault, &mut cache);
+        std::fs::remove_file(tmp.path().join("b.md")).unwrap();
+        std::fs::write(tmp.path().join("bin.md"), [0xff]).unwrap();
+        assert_refresh_equals_scan(&vault, &mut cache);
+        std::fs::remove_file(tmp.path().join("bin.md")).unwrap();
+        assert_refresh_equals_scan(&vault, &mut cache);
+    }
+
+    #[test]
+    fn should_forget_one_file_so_the_next_refresh_reads_it_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).unwrap();
+        let file = tmp.path().join("a.md");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(20);
+        std::fs::write(&file, "abcd").unwrap();
+        set_time(&file, old);
+        let mut cache = DiskCache::default();
+        cache.refresh(&vault).unwrap();
+        std::fs::write(&file, "wxyz").unwrap();
+        set_time(&file, old);
+        let stale = cache.refresh(&vault).unwrap().disk.clone();
+        assert_eq!(stale.get(&key("a.md")), Some(&present("a.md", "abcd")));
+        cache.forget(&key("a.md"));
+        let fresh = cache.refresh(&vault).unwrap();
+        assert_eq!(fresh.disk.get(&key("a.md")), Some(&present("a.md", "wxyz")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_refresh_a_case_collision_away_to_the_surviving_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).unwrap();
+        let mut cache = DiskCache::default();
+        std::fs::write(tmp.path().join("Note.md"), "new").unwrap();
+        std::fs::write(tmp.path().join("note.md"), "synced").unwrap();
+        age(&tmp.path().join("Note.md"), 20);
+        age(&tmp.path().join("note.md"), 20);
+        assert_refresh_equals_scan(&vault, &mut cache);
+        std::fs::remove_file(tmp.path().join("note.md")).unwrap();
+        assert_refresh_equals_scan(&vault, &mut cache);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_refresh_an_unlistable_folder_in_and_out_of_the_scan() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let (vault, private) = (Vault::open(tmp.path()).unwrap(), tmp.path().join("Private"));
+        std::fs::create_dir(&private).unwrap();
+        std::fs::write(private.join("a.md"), "inside").unwrap();
+        let mode =
+            |bits: u32| std::fs::set_permissions(&private, std::fs::Permissions::from_mode(bits));
+        let mut cache = DiskCache::default();
+        assert_refresh_equals_scan(&vault, &mut cache);
+        mode(0o000).unwrap();
+        if std::fs::read_dir(&private).is_ok() {
+            mode(0o755).unwrap();
+            eprintln!("running as root: permissions are not enforced, test skipped");
+            return;
+        }
+        let locked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_refresh_equals_scan(&vault, &mut cache);
+        }));
+        mode(0o755).unwrap();
+        locked.unwrap();
+        assert_refresh_equals_scan(&vault, &mut cache);
     }
 
     #[cfg(unix)]

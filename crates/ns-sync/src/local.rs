@@ -9,7 +9,7 @@ use ns_core::{CoreError, NotePath, Vault};
 use crate::doc::{Hash32, SyncDoc, content_hash};
 use crate::error::{Result, SyncError};
 use crate::plan::{
-    BaseChange, DiskAction, DiskEntry, DiskScan, DocAction, PlanInput, Step, plan, scan,
+    BaseChange, DiskAction, DiskCache, DiskEntry, DiskScan, DocAction, PlanInput, Step, plan,
 };
 use crate::state::{
     BlockedNote, StateDir, from_hex, io_error, read_optional, remove_if_exists, to_hex,
@@ -85,6 +85,8 @@ pub struct LocalReplica {
     /// The document's durable storage.
     pub store: DocStore,
     stage: StageRecord,
+    /// The disk as the last scan left it; it describes the vault, not the document.
+    disk: DiskCache,
     /// The version last written to `base.version`, if any.
     base_version: Option<Vec<u8>>,
     /// What `open` repaired, for the host to show once in the status.
@@ -109,6 +111,7 @@ impl LocalReplica {
             base,
             store,
             stage: StageRecord::default(),
+            disk: DiskCache::default(),
             base_version,
             notice,
         })
@@ -144,21 +147,21 @@ impl LocalReplica {
     /// Stops before touching anything when the vault lost its marker folder (spec 8.5 rule 5):
     /// an unmounted vault looks like a vault whose notes were all deleted.
     pub(crate) fn run_doc_stage(&mut self) -> Result<Vec<Step>> {
-        self.doc_stage_reading(scan)
+        self.doc_stage_reading(|_| ())
     }
 
-    /// `run_doc_stage` with the scan injected, so a test can make the vault vanish during it.
-    fn doc_stage_reading(
-        &mut self,
-        read: impl FnOnce(&Vault) -> Result<DiskScan>,
-    ) -> Result<Vec<Step>> {
+    /// `run_doc_stage` with a hook that runs just before the scan, so a test can make the vault
+    /// vanish during it.
+    fn doc_stage_reading(&mut self, before_scan: impl FnOnce(&Vault)) -> Result<Vec<Step>> {
         require_marker(&self.vault)?;
         let before = self.doc.version();
-        let scan = read(&self.vault)?;
+        before_scan(&self.vault);
+        let scan = self.disk.refresh(&self.vault)?;
         // A drive that goes away during the read phase turns unread notes into «deleted».
         require_marker(&self.vault)?;
         let resolved = self.doc.resolve_claims()?;
-        let (steps, notes) = self.plan_steps(&scan);
+        let (steps, notes) = plan_steps(&self.doc, &self.base, scan);
+        let scan_blocked = blocked_notes(scan);
         for action in steps.iter().filter_map(|step| step.doc.as_ref()) {
             apply_doc_action(&mut self.doc, action)?;
         }
@@ -168,7 +171,7 @@ impl LocalReplica {
         self.stage = StageRecord {
             doc_changed: version != before,
             version,
-            scan_blocked: blocked_notes(&scan),
+            scan_blocked,
             notes,
             rejected_entries: self.doc.rejected_entries(),
             notice: (!resolved.settled)
@@ -234,31 +237,22 @@ impl LocalReplica {
         Ok(())
     }
 
-    /// The steps, and how many notes the document holds before they are applied.
-    fn plan_steps(&self, scan: &DiskScan) -> (Vec<Step>, usize) {
-        let view = self.doc.view();
-        let doc = &self.doc;
-        let steps = plan(&PlanInput {
-            disk: &scan.disk,
-            view: &view,
-            base: &self.base,
-            tombstoned: &|id, hash| doc.is_tombstoned(id, hash),
-            blocked_folders: &scan.blocked_folders,
-        });
-        (steps, view.len())
-    }
-
-    /// Whether a file was changed; a refused action becomes a blocked note.
-    fn carry_out(&self, step: &Step) -> std::result::Result<bool, BlockedNote> {
+    /// A file that no longer has the content the scan saw makes the cache read it again.
+    fn carry_out(&mut self, step: &Step) -> std::result::Result<bool, BlockedNote> {
         let Some(action) = &step.disk else {
             return Ok(false);
         };
-        apply_disk_action(&self.vault, action)
-            .map(|()| true)
-            .map_err(|reason| BlockedNote {
-                path: action_path(action).to_string(),
-                reason,
-            })
+        let path = action_path(action);
+        let Err(reason) = apply_disk_action(&self.vault, action) else {
+            return Ok(true);
+        };
+        if reason == CHANGED_WHILE_SYNCING {
+            self.disk.forget(&path.key());
+        }
+        Err(BlockedNote {
+            path: path.to_string(),
+            reason,
+        })
     }
 
     fn apply_base(&mut self, step: &Step) {
@@ -270,6 +264,19 @@ impl LocalReplica {
             self.base.remove(old);
         }
     }
+}
+
+/// The steps, and how many notes the document holds before they are applied.
+fn plan_steps(doc: &SyncDoc, base: &Base, scan: &DiskScan) -> (Vec<Step>, usize) {
+    let view = doc.view();
+    let steps = plan(&PlanInput {
+        disk: &scan.disk,
+        view: &view,
+        base,
+        tombstoned: &|id, hash| doc.is_tombstoned(id, hash),
+        blocked_folders: &scan.blocked_folders,
+    });
+    (steps, view.len())
 }
 
 fn marker_path(vault: &Vault) -> PathBuf {
@@ -590,13 +597,12 @@ mod tests {
         let dirs = Dirs::new(&[("a.md", "A\n"), ("b.md", "B\n")]);
         let mut replica = dirs.open();
         replica.reconcile().unwrap();
-        let vanishing_scan = |vault: &Vault| {
+        let vanish = |_: &Vault| {
             dirs.remove("a.md");
             dirs.remove("b.md");
             std::fs::remove_dir(dirs.path(".neurospace")).unwrap();
-            scan(vault)
         };
-        let error = replica.doc_stage_reading(vanishing_scan).unwrap_err();
+        let error = replica.doc_stage_reading(vanish).unwrap_err();
         assert!(
             matches!(error, SyncError::VaultMarkerMissing(_)),
             "{error:?}"
@@ -886,6 +892,47 @@ mod tests {
         let mut contents: Vec<&str> = found.values().map(String::as_str).collect();
         contents.sort_unstable();
         assert_eq!(contents, ["late\n", "remote\n"]);
+    }
+
+    fn set_modified(dirs: &Dirs, relative: &str, time: std::time::SystemTime) {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dirs.path(relative))
+            .unwrap();
+        file.set_modified(time).unwrap();
+    }
+
+    #[test]
+    fn should_take_a_missed_local_edit_after_a_refused_overwrite() {
+        let dirs = Dirs::new(&[("x.md", "abcd")]);
+        let mut replica = dirs.open();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        set_modified(&dirs, "x.md", old);
+        replica.reconcile().unwrap();
+        dirs.write("x.md", "wxyz");
+        set_modified(&dirs, "x.md", old);
+        let x = note(&replica, "x.md").unwrap();
+        replica.doc.update_note(&x.id, "new text").unwrap();
+        let steps = replica.run_doc_stage().unwrap();
+        let refused = replica.run_disk_stage(steps).unwrap();
+        assert_eq!(dirs.read("x.md"), "wxyz");
+        assert_eq!(refused.blocked.len(), 1);
+        let mut last = replica.reconcile().unwrap();
+        for _ in 0..3 {
+            last = replica.reconcile().unwrap();
+        }
+        assert!(settled(&last) && last.blocked.is_empty(), "{last:?}");
+        let mut texts: Vec<String> = files(&replica).into_values().collect();
+        texts.sort_unstable();
+        assert_eq!(texts, ["new text", "wxyz"]);
+        let mut in_doc: Vec<String> = replica
+            .doc
+            .alive_notes()
+            .into_iter()
+            .map(|n| n.text)
+            .collect();
+        in_doc.sort_unstable();
+        assert_eq!(in_doc, texts);
     }
 
     #[test]
