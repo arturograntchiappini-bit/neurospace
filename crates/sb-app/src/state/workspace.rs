@@ -1,10 +1,12 @@
 //! The open vault and open note, with every operation the window needs and no UI in sight.
 
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
+use std::{fs, io, mem};
 
 use sb_core::{
     CoreError, DEFAULT_SEARCH_LIMIT, Index, NotePath, Result, SearchHit, Vault, new_note_path, ops,
+    utc_compact,
 };
 
 use super::notice::Notice;
@@ -16,6 +18,7 @@ pub const AUTOSAVE_DELAY: Duration = Duration::from_millis(500);
 pub const QUICK_OPEN_LIMIT: usize = 50;
 
 const CONFLICT_NAME_ATTEMPTS: usize = 5;
+const RECOVERED_STEM_CHARS: usize = 50;
 
 /// What `Workspace::apply_index` did with a rebuilt index.
 #[derive(Debug)]
@@ -73,6 +76,7 @@ pub struct Workspace {
     write_generation: u64,
     index_swaps: u64,
     buffer_generation: u64,
+    notices: Vec<Notice>,
 }
 
 impl Workspace {
@@ -92,7 +96,14 @@ impl Workspace {
             write_generation: 0,
             index_swaps: 0,
             buffer_generation: 0,
+            notices: Vec::new(),
         })
+    }
+
+    /// What the workspace has to tell the user about things it did on its own (text moved to a
+    /// conflict note); the caller shows them.
+    pub fn take_notices(&mut self) -> Vec<Notice> {
+        mem::take(&mut self.notices)
     }
 
     /// The vault on disk.
@@ -136,13 +147,13 @@ impl Workspace {
         self.write_generation + self.index_swaps
     }
 
-    /// Opens a note, saving a dirty open one first; a failed save keeps the current note open.
+    /// Opens a note, saving a dirty open one first (or keeping its text in a conflict note, see
+    /// `save_or_keep`).
     ///
     /// # Errors
-    /// The save error, `InvalidInput` when the open note changed on disk, or the read error for
-    /// `path`.
+    /// The `save_or_keep` error, or the read error for `path`.
     pub fn select(&mut self, path: &NotePath) -> Result<()> {
-        self.save_or_stop()?;
+        self.save_or_keep()?;
         let text = ops::read_note(&self.vault, path.as_str())?;
         // This read is newer than any rebuild already running.
         self.write_generation += 1;
@@ -203,23 +214,43 @@ impl Workspace {
         Ok(Saved::Written)
     }
 
-    /// Saves, and turns `ChangedOnDisk` into an error so the caller stops what it was doing.
-    fn save_or_stop(&mut self) -> Result<()> {
-        if self.save()? != Saved::ChangedOnDisk {
-            return Ok(());
-        }
+    /// Saves the open note before it is left. When the file cannot be written, or changed on
+    /// disk, the typed text goes to a conflict note instead (see `take_notices`) and the caller
+    /// carries on: typed text is never lost, nor is the user trapped on a note.
+    ///
+    /// # Errors
+    /// `InvalidInput` when the note can be neither saved nor kept in a conflict note; the buffer
+    /// stays open and dirty and the caller must stop.
+    pub fn save_or_keep(&mut self) -> Result<()> {
+        let failure = match self.save() {
+            Ok(Saved::Nothing | Saved::Written) => return Ok(()),
+            Ok(Saved::ChangedOnDisk) => None,
+            Err(error) => Some(error),
+        };
         let path = self.open.as_ref().map(|open| open.path.to_string());
-        Err(CoreError::InvalidInput(format!(
-            "{} changed on disk; it will reload in a moment",
-            path.unwrap_or_default()
-        )))
+        let path = path.unwrap_or_default();
+        match self.keep_unsaved_as_conflict() {
+            Ok(Some(conflict)) => {
+                self.notices.push(kept_notice(&path, failure, &conflict));
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(kept) => {
+                let cause =
+                    failure.map_or_else(|| format!("{path} changed on disk"), |e| e.to_string());
+                Err(CoreError::InvalidInput(format!(
+                    "{cause}; your text could not be kept in a conflict note either ({kept})"
+                )))
+            }
+        }
     }
 
     /// Creates an empty note called `name` (`.md` added when missing) in `folder` or the vault
     /// root, and opens it.
     ///
     /// # Errors
-    /// `InvalidInput` for a blank name, `AlreadyExists`, `InvalidPath`, or a save or write error.
+    /// `InvalidInput` for a blank name, `AlreadyExists`, `InvalidPath`, the `save_or_keep` error
+    /// or a write error.
     pub fn create(&mut self, name: &str, folder: Option<&str>) -> Result<NotePath> {
         let file = with_markdown_extension(name)?;
         let folder = folder
@@ -232,7 +263,7 @@ impl Workspace {
     }
 
     fn create_at(&mut self, path: &str) -> Result<NotePath> {
-        self.save_or_stop()?;
+        self.save_or_keep()?;
         let created = ops::create_note(&self.vault, path, "")?.path;
         self.write_generation += 1;
         self.index.upsert(created.clone(), String::new());
@@ -244,11 +275,12 @@ impl Workspace {
     /// Moves `from` to `to` (`.md` added when missing). An open note keeps its buffer and follows.
     ///
     /// # Errors
-    /// The save error, `InvalidInput` for a blank name, or what `ops::rename_note` returns.
+    /// The `save_or_keep` error, `InvalidInput` for a blank name, or what `ops::rename_note`
+    /// returns.
     pub fn rename(&mut self, from: &NotePath, to: &str) -> Result<NotePath> {
         let to = with_markdown_extension(to)?;
         if self.is_open(from) {
-            self.save_or_stop()?;
+            self.save_or_keep()?;
         }
         let outcome = ops::rename_note(&self.vault, from.as_str(), &to)?;
         self.write_generation += 1;
@@ -272,11 +304,10 @@ impl Workspace {
     /// typed text, and then closed.
     ///
     /// # Errors
-    /// The save error, `InvalidInput` when the open note changed on disk, or whatever
-    /// `ops::delete_note` returns; then nothing is deleted.
+    /// The `save_or_keep` error, or whatever `ops::delete_note` returns; then nothing is deleted.
     pub fn delete(&mut self, path: &NotePath) -> Result<()> {
         if self.is_open(path) {
-            self.save_or_stop()?;
+            self.save_or_keep()?;
         }
         let outcome = ops::delete_note(&self.vault, path.as_str())?;
         self.write_generation += 1;
@@ -467,6 +498,24 @@ impl Workspace {
         Ok(Some(created))
     }
 
+    /// Last resort for a buffer that can neither be saved nor kept in a conflict note: writes it
+    /// to `<state_base>/recovered/<utc time> <stem>.md`. `None` when nothing is unsaved. The stem
+    /// is cut so the name fits the file system, and a second write in the same second replaces
+    /// the first (same note, newer text).
+    pub fn write_recovered(&self, state_base: &Path) -> Option<io::Result<PathBuf>> {
+        let open = self.open.as_ref().filter(|open| open.is_dirty())?;
+        let folder = state_base.join("recovered");
+        let stem: String = open
+            .path
+            .stem()
+            .chars()
+            .take(RECOVERED_STEM_CHARS)
+            .collect();
+        let file = folder.join(format!("{} {stem}.md", utc_compact(SystemTime::now())));
+        let written = fs::create_dir_all(&folder).and_then(|()| fs::write(&file, &open.buffer));
+        Some(written.map(|()| file))
+    }
+
     fn is_open(&self, path: &NotePath) -> bool {
         self.open
             .as_ref()
@@ -475,6 +524,17 @@ impl Workspace {
 
     fn refresh_tree(&mut self) {
         self.tree = build_tree(self.index.notes().map(|entry| &entry.path));
+    }
+}
+
+fn kept_notice(path: &str, failure: Option<CoreError>, conflict: &NotePath) -> Notice {
+    match failure {
+        None => Notice::info(format!(
+            "Your unsaved edits to {path} were kept in {conflict}"
+        )),
+        Some(error) => Notice::error(format!(
+            "{path} could not be saved ({error}); your text is in {conflict}"
+        )),
     }
 }
 
@@ -577,6 +637,24 @@ mod tests {
         fs::set_permissions(file, permissions).unwrap();
     }
 
+    /// Makes `file` read-only; false (and the file writable again) when this user can write to
+    /// it anyway, as root can.
+    fn lock_note(file: &Path) -> bool {
+        set_readonly(file, true);
+        if fs::OpenOptions::new().append(true).open(file).is_err() {
+            return true;
+        }
+        set_readonly(file, false);
+        eprintln!("skipped: read-only files are not enforced for this user");
+        false
+    }
+
+    fn conflict_names(dir: &TempDir) -> Vec<String> {
+        let names = fs::read_dir(dir.path()).unwrap();
+        let names = names.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned());
+        names.filter(|name| name.contains("(conflict ")).collect()
+    }
+
     fn open_dirty(files: &[(&str, &str)], open: &str, typed: &str) -> (TempDir, Workspace) {
         let (dir, mut ws) = workspace(files);
         ws.select(&p(open)).unwrap();
@@ -654,9 +732,8 @@ mod tests {
         let file = dir.path().join("a.md");
         set_readonly(&file, true);
         let failed = ws.save();
-        let switched = ws.select(&p("a.md"));
         set_readonly(&file, false);
-        assert!(failed.is_err() && switched.is_err());
+        assert!(failed.is_err());
         let open = ws.open_note().unwrap();
         assert_eq!(open.buffer, "typed");
         assert!(open.is_dirty());
@@ -713,39 +790,84 @@ mod tests {
     }
 
     #[test]
-    fn should_refuse_switch_when_open_note_changed_on_disk() {
+    fn should_keep_text_in_a_conflict_note_and_switch_when_open_note_changed_on_disk() {
         let files = [("a.md", "old"), ("b.md", "other")];
         let (dir, mut ws) = open_dirty(&files, "a.md", "mine");
         fs::write(dir.path().join("a.md"), "theirs").unwrap();
-        let refused = ws.select(&p("b.md"));
-        assert!(matches!(refused, Err(CoreError::InvalidInput(_))));
-        let open = ws.open_note().unwrap();
-        assert_eq!((open.path.as_str(), open.buffer.as_str()), ("a.md", "mine"));
-        assert!(open.is_dirty());
+        ws.select(&p("b.md")).unwrap();
+        assert_eq!(ws.open_note().unwrap().path, p("b.md"));
+        assert_eq!(on_disk(&dir, "a.md"), "theirs");
+        let notices = ws.take_notices();
+        let kept = conflict_names(&dir).pop().unwrap();
+        assert_eq!(on_disk(&dir, &kept), "mine");
+        let text = format!("Your unsaved edits to a.md were kept in {kept}");
+        assert_eq!(notices, [Notice::info(text)]);
+        assert!(ws.take_notices().is_empty());
     }
 
     #[test]
-    fn should_stop_create_follow_and_rename_when_save_fails() {
-        let files = [("a.md", "[[b]]"), ("b.md", "")];
+    fn should_keep_text_in_a_conflict_note_and_switch_when_the_save_fails() {
+        let files = [("a.md", "old"), ("b.md", "other")];
         let (dir, mut ws) = open_dirty(&files, "a.md", "typed");
         let file = dir.path().join("a.md");
-        set_readonly(&file, true);
+        if !lock_note(&file) {
+            return;
+        }
+        let switched = ws.select(&p("b.md"));
+        set_readonly(&file, false);
+        switched.unwrap();
+        assert_eq!(ws.open_note().unwrap().path, p("b.md"));
+        let kept = conflict_names(&dir).pop().unwrap();
+        assert_eq!(on_disk(&dir, &kept), "typed");
+        let notices = ws.take_notices();
+        assert_eq!(notices.len(), 1);
+        let text = &notices[0].text;
+        assert!(text.starts_with("a.md could not be saved ("), "{text}");
+        assert!(
+            text.ends_with(&format!("); your text is in {kept}")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn should_stop_every_leaving_action_when_neither_save_nor_conflict_note_works() {
+        let stem = "n".repeat(245);
+        let name = format!("{stem}.md");
+        let files = [(name.as_str(), "[[b]]"), ("b.md", "")];
+        let (dir, mut ws) = open_dirty(&files, &name, "typed");
+        let file = dir.path().join(&name);
+        if !lock_note(&file) {
+            return;
+        }
+        let from = p(&name);
         let results = [
+            ws.select(&p("b.md")),
             ws.create("New", None).map(drop),
             ws.follow_link("b").map(drop),
             ws.follow_link("missing").map(drop),
-            ws.rename(&p("a.md"), "z").map(drop),
+            ws.rename(&from, "z").map(drop),
+            ws.delete(&from),
         ];
         set_readonly(&file, false);
         assert!(results.iter().all(Result::is_err), "{results:?}");
-        assert_eq!(note_names(&ws), ["a.md", "b.md"]);
+        let message = results[0].as_ref().unwrap_err().to_string();
+        assert!(message.contains("conflict note either"), "{message}");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
         let open = ws.open_note().unwrap();
-        assert_eq!(
-            (open.path.as_str(), open.buffer.as_str()),
-            ("a.md", "typed")
-        );
-        assert!(open.is_dirty());
+        let shown = (open.path.as_str(), open.buffer.as_str());
+        assert_eq!(shown, (name.as_str(), "typed"));
+        assert!(open.is_dirty() && ws.take_notices().is_empty());
+    }
+
+    #[test]
+    fn should_not_stop_when_the_text_was_already_kept() {
+        let files = [("a.md", "old"), ("b.md", "other")];
+        let (dir, mut ws) = open_dirty(&files, "a.md", "typed");
+        fs::write(dir.path().join("a.md"), "theirs").unwrap();
+        ws.keep_unsaved_as_conflict().unwrap();
+        ws.select(&p("b.md")).unwrap();
+        assert_eq!(conflict_names(&dir).len(), 1);
+        assert!(ws.take_notices().is_empty());
     }
 
     #[test]
@@ -845,16 +967,14 @@ mod tests {
     }
 
     #[test]
-    fn should_refuse_delete_when_open_note_changed_on_disk() {
+    fn should_trash_the_new_file_and_keep_the_text_when_deleting_a_note_changed_on_disk() {
         let (dir, mut ws) = open_dirty(&[("a.md", "old")], "a.md", "mine");
         fs::write(dir.path().join("a.md"), "theirs").unwrap();
-        assert!(matches!(
-            ws.delete(&p("a.md")),
-            Err(CoreError::InvalidInput(_))
-        ));
-        assert_eq!(on_disk(&dir, "a.md"), "theirs");
-        let open = ws.open_note().unwrap();
-        assert_eq!((open.path.as_str(), open.buffer.as_str()), ("a.md", "mine"));
+        ws.delete(&p("a.md")).unwrap();
+        assert!(ws.open_note().is_none());
+        let kept = conflict_names(&dir).pop().unwrap();
+        assert_eq!(on_disk(&dir, &kept), "mine");
+        assert!(!dir.path().join("a.md").exists());
     }
 
     #[test]
@@ -1029,9 +1149,7 @@ mod tests {
     }
 
     fn conflict_count(dir: &TempDir) -> usize {
-        let names = fs::read_dir(dir.path()).unwrap();
-        let names = names.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned());
-        names.filter(|name| name.contains("(conflict ")).count()
+        conflict_names(dir).len()
     }
 
     #[test]

@@ -81,6 +81,7 @@ pub struct SecondBrainApp {
     ctx: Context,
     settings: Settings,
     settings_path: PathBuf,
+    state_base: PathBuf,
     screen: Screen,
     welcome: WelcomeForm,
     notices: NoticeBoard,
@@ -129,6 +130,7 @@ impl SecondBrainApp {
             ctx: ctx.clone(),
             settings,
             settings_path: options.settings_path,
+            state_base: options.state_base,
             screen: Screen::Welcome,
             welcome: WelcomeForm::default(),
             notices: NoticeBoard::default(),
@@ -371,6 +373,18 @@ impl SecondBrainApp {
         self.run_action(side.or(centre).or(found), from_graph);
         self.schedule_autosave(ui.ctx());
         self.apply_bar(bar_outcome);
+        self.post_workspace_notices();
+    }
+
+    /// Shows what the workspace did on its own (text moved to a conflict note).
+    fn post_workspace_notices(&mut self) {
+        let Screen::Vault(workspace) = &mut self.screen else {
+            return;
+        };
+        let now = Instant::now();
+        for notice in workspace.take_notices() {
+            self.notices.post(notice, now);
+        }
     }
 
     /// Opens the sync window when `opened` and draws it while it is open.
@@ -464,17 +478,22 @@ impl SecondBrainApp {
         }
     }
 
-    /// The window is closing: save, or keep what cannot be saved in a conflict note. A failure
-    /// cancels the close and says so; asking again while that notice shows quits without saving.
+    /// The window is closing: save, or keep what cannot be saved in a conflict note. If neither
+    /// works the close is cancelled and says so; asking again while that notice shows quits, after
+    /// writing the text to a recovery file as a last resort.
     fn handle_close_request(&mut self, ctx: &Context) {
         let now = Instant::now();
         let warned = self.close_warning.take();
         let shown = self.notices.current(now).map(|notice| &notice.text);
         if warned.as_ref().is_some_and(|text| Some(text) == shown) {
+            if self.save_for_close().is_err() {
+                self.write_recovered_text();
+            }
             return;
         }
         if let Err(text) = self.save_for_close() {
-            let text = format!("{text}. Close again to quit without saving");
+            let text =
+                format!("{text}. Close again to quit; your text is then saved to a recovery file");
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.notices.post(Notice::error(text.clone()), now);
             self.close_warning = Some(text);
@@ -494,17 +513,29 @@ impl SecondBrainApp {
             return Ok(());
         };
         let path = workspace.open_note().map(|open| open.path.to_string());
-        let failed = |error: sb_core::CoreError| {
-            let path = path.clone().unwrap_or_default();
+        let saved = workspace.save_or_keep().map_err(|error| {
+            let path = path.unwrap_or_default();
             format!("Could not save {path}: {error}")
+        });
+        self.post_workspace_notices();
+        saved
+    }
+
+    /// Last resort of a close that could neither save nor keep the text: a file in the state
+    /// folder. Nothing is drawn any more, so the outcome goes to stderr.
+    fn write_recovered_text(&self) {
+        let Screen::Vault(workspace) = &self.screen else {
+            return;
         };
-        match workspace.save() {
-            Ok(Saved::Nothing | Saved::Written) => Ok(()),
-            Ok(Saved::ChangedOnDisk) => workspace
-                .keep_unsaved_as_conflict()
-                .map(drop)
-                .map_err(failed),
-            Err(error) => Err(failed(error)),
+        match workspace.write_recovered(&self.state_base) {
+            None => {}
+            Some(Ok(path)) => eprintln!(
+                "secondbrain: your unsaved text was written to {}",
+                path.display()
+            ),
+            Some(Err(error)) => {
+                eprintln!("secondbrain: your unsaved text could not be kept: {error}")
+            }
         }
     }
 

@@ -48,8 +48,16 @@ struct Fixture {
 }
 
 fn open_fixture() -> Fixture {
+    open_fixture_with(&[])
+}
+
+/// The standard vault plus the notes in `extra`.
+fn open_fixture_with(extra: &[(&str, &str)]) -> Fixture {
     let scratch = tempfile::tempdir().unwrap();
     let vault = make_vault(scratch.path());
+    for (name, text) in extra {
+        fs::write(vault.join(name), text).unwrap();
+    }
     let (mut harness, dir) = harness(Some(&vault));
     run_until(&mut harness, "vault screen", |app| {
         app.screen_name() == "vault"
@@ -64,7 +72,11 @@ fn open_fixture() -> Fixture {
 
 /// A fixture with `a.md` open and both side panels closed, so a link text is unique on screen.
 fn open_note_fixture(name: &str) -> Fixture {
-    let mut f = open_fixture();
+    open_note_fixture_with(name, &[])
+}
+
+fn open_note_fixture_with(name: &str, extra: &[(&str, &str)]) -> Fixture {
+    let mut f = open_fixture_with(extra);
     f.harness.get_by_label(name).click();
     f.harness.run();
     f.harness.get_by_label("Toggle sidebar").click();
@@ -88,6 +100,24 @@ fn type_into(harness: &mut Harness<'static, SecondBrainApp>, field: &str, text: 
     harness.run();
     harness.get_by_label(field).type_text(text);
     harness.run();
+}
+
+/// Makes `file` read-only; false (and writable again) when this user can write to it anyway, as
+/// root can: the test must then return.
+fn lock_note(file: &Path) -> bool {
+    set_readonly(file, true);
+    if fs::OpenOptions::new().append(true).open(file).is_err() {
+        return true;
+    }
+    set_readonly(file, false);
+    eprintln!("skipped: read-only files are not enforced for this user");
+    false
+}
+
+/// A note whose conflict note cannot be created: «<stem> (conflict xxxxxxxx).md» is over 255 bytes.
+fn long_note() -> (String, String) {
+    let stem = "n".repeat(245);
+    (format!("{stem}.md"), stem)
 }
 
 fn conflict_copies(vault: &Path) -> Vec<String> {
@@ -335,22 +365,52 @@ fn should_keep_typed_text_in_conflict_note_and_close_when_file_changed_before_cl
 }
 
 #[test]
-fn should_cancel_close_when_save_fails_and_close_on_second_request() {
+fn should_keep_the_text_in_a_conflict_note_when_the_close_cannot_save() {
     let mut f = open_note_fixture("a");
     let file = f.vault.join("a.md");
-    set_readonly(&file, true);
+    if !lock_note(&file) {
+        return;
+    }
+    type_into(&mut f.harness, EDITOR, " mine");
+    let cancelled = request_close(&mut f.harness);
+    set_readonly(&file, false);
+    assert!(
+        !cancelled,
+        "the close was cancelled although the text was kept"
+    );
+    let kept = conflict_copies(&f.vault);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let text = fs::read_to_string(f.vault.join(&kept[0])).unwrap();
+    assert_eq!(text, "# A\n\n[[b]] [[new one]] ![[p.png]] mine");
+}
+
+#[test]
+fn should_cancel_close_then_write_a_recovered_file_when_nothing_can_keep_the_text() {
+    let (name, stem) = long_note();
+    let mut f = open_note_fixture_with(&stem, &[(&name, "old")]);
+    let file = f.vault.join(&name);
+    if !lock_note(&file) {
+        return;
+    }
     type_into(&mut f.harness, EDITOR, " mine");
     let cancelled = request_close(&mut f.harness);
     f.harness
-        .get_by_label_contains("Close again to quit without saving");
+        .get_by_label_contains("your text could not be kept in a conflict note either");
     let second = request_close(&mut f.harness);
     set_readonly(&file, false);
     assert!(cancelled, "the first close was not cancelled");
     assert!(!second, "the second close was cancelled too");
-    assert_eq!(
-        buffer(&f.harness),
-        "# A\n\n[[b]] [[new one]] ![[p.png]] mine"
+    assert_eq!(buffer(&f.harness), "old mine");
+    let recovered = f._dirs.1.path().join("state").join("recovered");
+    let files: Vec<_> = fs::read_dir(recovered).unwrap().collect();
+    assert_eq!(files.len(), 1);
+    let path = files[0].as_ref().unwrap().path();
+    let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        file_name.ends_with(&format!(" {}.md", &stem[..50])),
+        "{file_name}"
     );
+    assert_eq!(fs::read_to_string(path).unwrap(), "old mine");
 }
 
 #[test]
@@ -446,20 +506,41 @@ fn should_tell_the_user_and_reload_when_a_save_finds_the_file_changed() {
     assert_eq!(fs::read_to_string(f.vault.join("a.md")).unwrap(), "theirs");
 }
 
-#[test]
-fn should_stay_on_the_vault_when_leaving_and_the_save_fails() {
-    let mut f = open_note_fixture("a");
-    let file = f.vault.join("a.md");
-    set_readonly(&file, true);
-    type_into(&mut f.harness, EDITOR, " mine");
+fn choose_open_another_vault(f: &mut Fixture) {
     f.harness.get_by_label("Menu").click();
     f.harness.run();
     f.harness.get_by_label("Open another vault").click();
     f.harness.run();
+}
+
+#[test]
+fn should_leave_the_vault_and_keep_the_text_when_the_save_fails() {
+    let mut f = open_note_fixture("a");
+    let file = f.vault.join("a.md");
+    if !lock_note(&file) {
+        return;
+    }
+    type_into(&mut f.harness, EDITOR, " mine");
+    choose_open_another_vault(&mut f);
+    set_readonly(&file, false);
+    assert_eq!(f.harness.state().screen_name(), "welcome");
+    assert_eq!(conflict_copies(&f.vault).len(), 1);
+}
+
+#[test]
+fn should_stay_on_the_vault_when_leaving_and_nothing_can_keep_the_text() {
+    let (name, stem) = long_note();
+    let mut f = open_note_fixture_with(&stem, &[(&name, "old")]);
+    let file = f.vault.join(&name);
+    if !lock_note(&file) {
+        return;
+    }
+    type_into(&mut f.harness, EDITOR, " mine");
+    choose_open_another_vault(&mut f);
     set_readonly(&file, false);
     assert_eq!(f.harness.state().screen_name(), "vault");
-    f.harness.get_by_label_contains("Could not save a.md");
-    assert!(buffer(&f.harness).ends_with(" mine"));
+    f.harness.get_by_label_contains("conflict note either");
+    assert_eq!(buffer(&f.harness), "old mine");
 }
 
 #[test]
