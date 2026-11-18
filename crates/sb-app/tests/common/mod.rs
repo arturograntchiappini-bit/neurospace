@@ -14,8 +14,12 @@ const DEADLINE: Duration = Duration::from_secs(10);
 
 /// A harness over `options`; the caller keeps the temporary directories alive.
 pub fn harness_from(options: AppOptions) -> Harness<'static, SecondBrainApp> {
-    let app = SecondBrainApp::new(&Context::default(), options);
-    // `new` prepared its own context; the harness renders with another one.
+    harness_for(SecondBrainApp::new(&Context::default(), options))
+}
+
+/// A harness that shows `app`.
+pub fn harness_for(app: SecondBrainApp) -> Harness<'static, SecondBrainApp> {
+    // The app prepared its own context when it was made; the harness renders with another one.
     Harness::builder()
         .with_size([1200.0, 800.0])
         .with_context_setup(prepare_context)

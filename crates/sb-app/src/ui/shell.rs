@@ -86,6 +86,8 @@ pub struct TopBarOutcome {
     pub toggle_graph: bool,
     /// «Edit» or «Preview» was pressed.
     pub toggle_preview: bool,
+    /// «Sync» was pressed.
+    pub open_sync: bool,
 }
 
 /// The top bar: sidebar toggle, actions, vault name, sync, the «Menu» menu and inspector toggle.
@@ -161,7 +163,7 @@ fn top_bar_row(ui: &mut Ui, bar: TopBar<'_>) -> TopBarOutcome {
     outcome.toggle_preview = flat_button(ui, mode).clicked();
     outcome.menu = right_aligned(ui, |ui| {
         ui.label(bar.vault_name);
-        flat_button(ui, "Sync");
+        outcome.open_sync = flat_button(ui, "Sync").clicked();
         let menu = menu::menu_button(ui, bar.settings);
         if panel_toggle(ui, false, "Toggle inspector").clicked() {
             bar.sidebars.right = !bar.sidebars.right;
@@ -171,8 +173,17 @@ fn top_bar_row(ui: &mut Ui, bar: TopBar<'_>) -> TopBarOutcome {
     outcome
 }
 
+/// What the status strip reports besides the notice.
+pub struct Strip<'a> {
+    /// The open vault: word count and ignored files.
+    pub workspace: &'a Workspace,
+    /// The sync summary, shown as a button that opens the sync window.
+    pub sync_summary: &'a str,
+}
+
 /// The slim glass strip at the bottom: word count, ignored files, the notice, sync summary.
-pub fn status_strip(ui: &mut Ui, p: &Palette, notices: &mut NoticeBoard, workspace: &Workspace) {
+/// True when the sync summary was pressed.
+pub fn status_strip(ui: &mut Ui, p: &Palette, notices: &mut NoticeBoard, strip: Strip<'_>) -> bool {
     let now = Instant::now();
     let outer = Margin {
         left: GAP,
@@ -186,16 +197,19 @@ pub fn status_strip(ui: &mut Ui, p: &Palette, notices: &mut NoticeBoard, workspa
     if let Some(left) = notices.time_left(now) {
         ui.ctx().request_repaint_after(left);
     }
-    Panel::bottom("status_strip")
+    let panel = Panel::bottom("status_strip")
         .show_separator_line(false)
-        .frame(frame)
+        .frame(frame);
+    panel
         .show(ui, |ui| {
             ui.set_min_height(ui.spacing().interact_size.y);
-            ui.horizontal(|ui| strip_row(ui, p, workspace, notices));
-        });
+            ui.horizontal(|ui| strip_row(ui, p, strip, notices)).inner
+        })
+        .inner
 }
 
-fn strip_row(ui: &mut Ui, p: &Palette, workspace: &Workspace, notices: &mut NoticeBoard) {
+fn strip_row(ui: &mut Ui, p: &Palette, strip: Strip<'_>, notices: &mut NoticeBoard) -> bool {
+    let workspace = strip.workspace;
     if workspace.open_note().is_some() {
         ui.label(panels::counted(workspace.word_count(), "word", "words"));
     }
@@ -203,10 +217,9 @@ fn strip_row(ui: &mut Ui, p: &Palette, workspace: &Workspace, notices: &mut Noti
     if let Some(notice) = notices.current(Instant::now()).cloned() {
         notice_row(ui, p, &notice, notices);
     }
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        // The sync engine (a later task) replaces this with its summary.
-        ui.label(RichText::new("Sync off").color(p.text_secondary.to_color32()));
-    });
+    let layout = Layout::right_to_left(Align::Center);
+    ui.with_layout(layout, |ui| flat_button(ui, strip.sync_summary).clicked())
+        .inner
 }
 
 fn ignored_label(ui: &mut Ui, workspace: &Workspace) {

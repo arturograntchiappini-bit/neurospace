@@ -9,6 +9,7 @@ pub mod panels;
 pub mod quick_open;
 pub mod reload;
 pub mod settings;
+pub mod sync_panel;
 pub mod tree;
 pub mod welcome;
 pub mod workspace;

@@ -2,6 +2,7 @@
 
 use std::mem;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use eframe::egui::{
@@ -11,15 +12,18 @@ use eframe::egui::{
 use sb_core::Result as CoreResult;
 
 use crate::platform;
+use crate::state::sync_panel::SyncControl;
 use crate::state::welcome::WelcomeForm;
 use crate::state::{
     AUTOSAVE_DELAY, InspectorCache, Job, NoteAction, NoteDialog, Notice, NoticeBoard, Poll,
     QuickOpen, RELOAD_DEBOUNCE, Reloader, Saved, SearchBox, Settings, ThemeChoice, Workspace,
 };
+use crate::sync_control::EngineControl;
+use crate::sync_host::{ControlFactory, SyncHost};
 use crate::ui::editor::{self, EditorState};
 use crate::ui::graph_view::GraphView;
 use crate::ui::menu::{self, MenuOutcome};
-use crate::ui::shell::{self, Sidebars, TopBar, TopBarOutcome};
+use crate::ui::shell::{self, Sidebars, Strip, TopBar, TopBarOutcome};
 use crate::ui::theme::{self, Material, Palette};
 use crate::ui::welcome;
 use crate::ui::{dialogs, inspector, quick_open, sidebar};
@@ -42,7 +46,7 @@ pub fn prepare_context(ctx: &Context) {
 pub struct AppOptions {
     /// Where `app.json` lives.
     pub settings_path: PathBuf,
-    /// Base directory of sync state; the sync window (a later task) reads it.
+    /// Base directory of sync state: the sync engine keeps each vault's state under it.
     pub state_base: PathBuf,
     /// The vault named on the command line, if any.
     pub vault: Option<PathBuf>,
@@ -84,11 +88,40 @@ pub struct SecondBrainApp {
     mica_available: bool,
     mica_key: Option<(bool, bool)>,
     close_warning: Option<String>,
+    sync: SyncHost,
+}
+
+/// The engine control of a vault: built on the opening thread, never on the UI thread.
+fn engine_factory(state_base: PathBuf) -> ControlFactory {
+    Arc::new(move |root| {
+        let control = EngineControl::new(root, &state_base).map_err(|error| error.to_string())?;
+        Ok(Box::new(control) as Box<dyn SyncControl>)
+    })
 }
 
 impl SecondBrainApp {
     /// Loads the settings and starts opening `options.vault` or else the last vault.
     pub fn new(ctx: &Context, options: AppOptions) -> SecondBrainApp {
+        let factory = engine_factory(options.state_base.clone());
+        Self::with_factory(ctx, options, factory)
+    }
+
+    /// Like `new`, but the first vault opened gets `control` instead of the real sync engine.
+    /// For tests, which never start the engine or touch the network.
+    pub fn with_sync_control(
+        ctx: &Context,
+        options: AppOptions,
+        control: Box<dyn SyncControl>,
+    ) -> SecondBrainApp {
+        let slot = Mutex::new(Some(control));
+        let factory: ControlFactory = Arc::new(move |_| {
+            let taken = slot.lock().ok().and_then(|mut slot| slot.take());
+            taken.ok_or_else(|| "this test gave sync control to one vault only".to_owned())
+        });
+        Self::with_factory(ctx, options, factory)
+    }
+
+    fn with_factory(ctx: &Context, options: AppOptions, factory: ControlFactory) -> SecondBrainApp {
         prepare_context(ctx);
         let settings = Settings::load(&options.settings_path);
         let start = options.vault.or_else(|| settings.last_vault.clone());
@@ -103,6 +136,7 @@ impl SecondBrainApp {
             mica_available: false,
             mica_key: None,
             close_warning: None,
+            sync: SyncHost::new(factory),
         };
         app.sync_context(ctx);
         if let Some(path) = start {
@@ -203,6 +237,7 @@ impl SecondBrainApp {
             self.handle_close_request(&ctx);
         }
         self.poll_opening();
+        self.sync.poll(&ctx);
         if matches!(self.screen, Screen::Vault(_)) {
             self.handle_note_keys(&ctx);
         }
@@ -242,6 +277,7 @@ impl SecondBrainApp {
             },
             move || ctx.request_repaint(),
         );
+        self.sync.switch_to(&path, &self.ctx);
         self.screen = Screen::Opening { path, job };
     }
 
@@ -294,6 +330,7 @@ impl SecondBrainApp {
 
     fn fail_opening(&mut self, reason: &str) {
         self.welcome.error = Some(format!("Could not open the vault: {reason}"));
+        self.sync.stop_for_leaving();
         self.screen = Screen::Welcome;
     }
 
@@ -316,11 +353,12 @@ impl SecondBrainApp {
             preview: self.view.editor.preview,
         };
         let bar_outcome = shell::top_bar(ui, palette, bar);
-        shell::status_strip(ui, palette, &mut self.notices, workspace);
+        let strip = Strip {
+            workspace,
+            sync_summary: &self.sync.panel.summary(),
+        };
+        let strip_opens_sync = shell::status_strip(ui, palette, &mut self.notices, strip);
         let side = show_panels(ui, palette, workspace, &mut self.view);
-        self.view
-            .graph_view
-            .set_reduce_motion(self.settings.reduce_motion);
         let centre = shell::document_area(ui, palette, |ui| {
             show_centre(ui, palette, workspace, &mut self.view)
         });
@@ -328,6 +366,8 @@ impl SecondBrainApp {
         self.view.graph &= !created;
         let found = quick_open::show(ui.ctx(), palette, &mut self.view.quick_open, workspace);
         let from_graph = self.view.graph && side.is_none() && centre.is_some();
+        self.sync.window_open |= strip_opens_sync;
+        self.sync.show_window(ui.ctx(), palette);
         self.run_action(side.or(centre).or(found), from_graph);
         self.schedule_autosave(ui.ctx());
         self.apply_bar(bar_outcome);
@@ -350,9 +390,12 @@ impl SecondBrainApp {
         }
     }
 
-    /// Saves when the autosave delay has passed or the window lost focus; follows the folder.
+    /// Saves when the autosave delay has passed or the window lost focus; follows the folder;
+    /// hands the motion setting to the graph.
     fn tick_vault(&mut self, ctx: &Context) {
         let now = Instant::now();
+        let reduce_motion = self.settings.reduce_motion;
+        self.view.graph_view.set_reduce_motion(reduce_motion);
         let focused = ctx.input(|input| input.focused);
         let lost_focus = mem::replace(&mut self.view.window_focused, focused) && !focused;
         let due = self.workspace().is_some_and(|w| w.autosave_due(now));
@@ -458,6 +501,7 @@ impl SecondBrainApp {
         }
         self.view.editor.preview ^= outcome.toggle_preview;
         self.view.graph ^= outcome.toggle_graph;
+        self.sync.window_open |= outcome.open_sync;
         self.apply_menu(outcome.menu);
     }
 
@@ -476,7 +520,8 @@ impl SecondBrainApp {
     /// The shortcuts of spec 9.3, taken before the editor can see them. A popup in front keeps
     /// them to itself.
     fn handle_note_keys(&mut self, ctx: &Context) {
-        if self.view.dialog.is_some() || self.view.quick_open.is_some() {
+        let popup = self.view.dialog.is_some() || self.view.quick_open.is_some();
+        if popup || self.sync.window_open {
             return;
         }
         if pressed(ctx, Key::N) {
@@ -520,6 +565,7 @@ impl SecondBrainApp {
             Ok(()) => {
                 self.screen = Screen::Welcome;
                 self.view.reloader = None;
+                self.sync.stop_for_leaving();
             }
             Err(error) => {
                 let notice = Notice::error(format!("Could not close the note: {error}"));
@@ -596,6 +642,7 @@ impl eframe::App for SecondBrainApp {
     /// A window closed within the autosave delay must not lose what was typed.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_open_note();
+        self.sync.shut_down();
     }
 
     fn clear_color(&self, visuals: &Visuals) -> [f32; 4] {
