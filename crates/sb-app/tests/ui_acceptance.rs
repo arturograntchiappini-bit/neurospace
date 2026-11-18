@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use eframe::App;
-use eframe::egui::{Context, Event, Key, Modifiers, PointerButton};
+use eframe::egui::{
+    Context, Event, Key, Modifiers, PointerButton, ViewportEvent, ViewportId,
+};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use sb_app::app::{AppOptions, SecondBrainApp};
@@ -300,6 +302,23 @@ fn should_keep_unsaved_text_in_conflict_note_on_exit_when_the_file_changed() {
         fs::read_to_string(f.vault.join("first.md")).unwrap(),
         "theirs"
     );
+}
+
+#[test]
+fn should_write_one_conflict_note_when_the_window_closes_and_the_app_exits() {
+    let mut f = fixture(&[("first.md", "Hello")]);
+    click_label(&mut f.harness, "first");
+    f.harness.get_by_label(EDITOR).type_text(" mine");
+    f.harness.run();
+    fs::write(f.vault.join("first.md"), "theirs").unwrap();
+    let root = f.harness.input_mut().viewports.get_mut(&ViewportId::ROOT);
+    root.unwrap().events.push(ViewportEvent::Close);
+    f.harness.step();
+    f.harness.state_mut().on_exit(None);
+    let copies = conflict_copies(&f.vault);
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    let kept = fs::read_to_string(f.vault.join(&copies[0])).unwrap();
+    assert_eq!(kept, "Hello mine");
 }
 
 #[test]

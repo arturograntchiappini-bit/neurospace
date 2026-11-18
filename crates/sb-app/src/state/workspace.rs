@@ -41,6 +41,8 @@ pub struct OpenNote {
     pub autosave_paused: bool,
     /// Words in `buffer`, recounted whenever the buffer is replaced (never per frame).
     words: usize,
+    /// The buffer is already in a conflict note; cleared by the next edit.
+    kept: bool,
 }
 
 /// What `Workspace::save` did.
@@ -156,6 +158,7 @@ impl Workspace {
         };
         open.last_edit = (text != open.saved).then_some(now);
         open.autosave_paused = false;
+        open.kept = false;
         open.words = count_words(&text);
         open.buffer = text;
     }
@@ -445,17 +448,19 @@ impl Workspace {
     }
 
     /// Writes the unsaved buffer to `<stem> (conflict <id>).md` next to the note and leaves the
-    /// open note as it is. `None` when nothing is unsaved. For a window that is closing and can
-    /// no longer save over a file that changed.
+    /// open note as it is. `None` when nothing is unsaved or this text was kept already (a window
+    /// close and the exit after it keep it once). For a window that is closing and can no longer
+    /// save over a file that changed.
     ///
     /// # Errors
     /// Whatever creating the conflict note returns.
     pub fn keep_unsaved_as_conflict(&mut self) -> Result<Option<NotePath>> {
-        let Some(open) = self.open.as_ref().filter(|open| open.is_dirty()) else {
+        let Some(open) = self.open.as_mut().filter(|o| o.is_dirty() && !o.kept) else {
             return Ok(None);
         };
         let (path, buffer) = (open.path.clone(), open.buffer.clone());
         let created = create_conflict_note(&self.vault, &path, &buffer)?;
+        open.kept = true;
         self.write_generation += 1;
         self.index.upsert(created.clone(), buffer);
         self.refresh_tree();
@@ -481,6 +486,7 @@ fn clean_note(path: NotePath, text: String) -> OpenNote {
         saved: text,
         last_edit: None,
         autosave_paused: false,
+        kept: false,
     }
 }
 
@@ -1006,6 +1012,26 @@ mod tests {
         assert_eq!(on_disk(&dir, kept.as_str()), "typed");
         assert_eq!(on_disk(&dir, "a.md"), "theirs");
         assert!(ws.index().get(&kept.key()).is_some());
+    }
+
+    #[test]
+    fn should_keep_the_same_text_once_and_a_later_edit_again() {
+        let (dir, mut ws) = open_dirty(&[("a.md", "old")], "a.md", "typed");
+        fs::write(dir.path().join("a.md"), "theirs").unwrap();
+        assert!(ws.keep_unsaved_as_conflict().unwrap().is_some());
+        assert_eq!(ws.keep_unsaved_as_conflict().unwrap(), None);
+        assert_eq!(ws.save().unwrap(), Saved::ChangedOnDisk);
+        assert_eq!(ws.keep_unsaved_as_conflict().unwrap(), None);
+        assert_eq!(conflict_count(&dir), 1);
+        ws.edit("typed more".into(), Instant::now());
+        assert!(ws.keep_unsaved_as_conflict().unwrap().is_some());
+        assert_eq!(conflict_count(&dir), 2);
+    }
+
+    fn conflict_count(dir: &TempDir) -> usize {
+        let names = fs::read_dir(dir.path()).unwrap();
+        let names = names.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned());
+        names.filter(|name| name.contains("(conflict ")).count()
     }
 
     #[test]
