@@ -284,6 +284,15 @@ fn build_link(dest: &str, kind: LinkKind, line: u32) -> Option<Link> {
     })
 }
 
+/// The note a Markdown link destination names (heading removed, percent-decoded), or `None`
+/// when it has a URL scheme or does not end in `.md`: the same rule `parse` applies (spec 6.1).
+pub fn markdown_note_target(dest: &str) -> Option<String> {
+    if !is_note_destination(dest) {
+        return None;
+    }
+    build_link(dest, LinkKind::Markdown, 0).map(|link| link.target)
+}
+
 fn is_note_destination(dest: &str) -> bool {
     let path = dest.split_once('#').map_or(dest, |(path, _)| path);
     !has_url_scheme(dest) && percent_decode(path).to_ascii_lowercase().ends_with(".md")
@@ -502,6 +511,18 @@ MD: [text](other/Note%20D.md#h) and [ext](https://example.com/x.md) and [img](pi
             parse("[z](A.MD#H%23x)").links,
             vec![link("A.MD", Some("H#x"), None, LinkKind::Markdown, 1)]
         );
+    }
+
+    #[test]
+    fn should_name_the_note_of_a_markdown_destination_the_way_parse_does() {
+        assert_eq!(
+            markdown_note_target("My%20Note.md#H").as_deref(),
+            Some("My Note.md")
+        );
+        assert_eq!(markdown_note_target("a/b.MD").as_deref(), Some("a/b.MD"));
+        for dest in ["https://e.com/a.md", "mailto:x.md", "pic.png", "note", "#h"] {
+            assert_eq!(markdown_note_target(dest), None, "{dest}");
+        }
     }
 
     #[test]

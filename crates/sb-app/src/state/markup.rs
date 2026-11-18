@@ -67,9 +67,17 @@ pub fn note_link_destination(target: &str) -> String {
     dest
 }
 
-/// The note a `sb-note:` destination names, or `None` for any other destination.
+/// The note a link destination names, or `None` for any other destination: a `sb-note:`
+/// destination (a rewritten wikilink) or a Markdown link to a `.md` file (spec 6.1).
 pub fn note_link_target(dest: &str) -> Option<String> {
-    let bytes = dest.strip_prefix(NOTE_LINK_SCHEME)?.as_bytes();
+    match dest.strip_prefix(NOTE_LINK_SCHEME) {
+        Some(encoded) => decode_note_target(encoded),
+        None => sb_core::markdown_note_target(dest),
+    }
+}
+
+fn decode_note_target(encoded: &str) -> Option<String> {
+    let bytes = encoded.as_bytes();
     let hex = |at: usize| bytes.get(at).and_then(|&b| char::from(b).to_digit(16));
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut at = 0;
@@ -85,10 +93,10 @@ pub fn note_link_target(dest: &str) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
-/// Every `sb-note:` destination in `markdown`, each once, in order of appearance.
+/// Every destination in `markdown` that names a note, each once, in order of appearance.
 pub fn note_link_destinations(markdown: &str) -> Vec<String> {
     let mut destinations = link_destinations(markdown);
-    destinations.retain(|dest| dest.starts_with(NOTE_LINK_SCHEME));
+    destinations.retain(|dest| note_link_target(dest).is_some());
     destinations
 }
 
@@ -123,12 +131,13 @@ fn link_destinations(markdown: &str) -> Vec<String> {
         .collect()
 }
 
-/// Only web links open outside the app; `sb-note:` is the exact scheme our own rewrite writes.
+/// Only web links open outside the app, and note links open inside it; `sb-note:` is the exact
+/// scheme our own rewrite writes.
 fn is_openable(dest: &str) -> bool {
     let lower = dest.to_ascii_lowercase();
     lower.starts_with("http://")
         || lower.starts_with("https://")
-        || dest.starts_with(NOTE_LINK_SCHEME)
+        || note_link_target(dest).is_some()
 }
 
 /// Alternating stretches that cover `text`: `true` for code (fenced blocks and inline spans).
@@ -446,7 +455,7 @@ mod tests {
                         [e](sb-note:n) <mailto:m@x.org> [f](file:///z) `[g](file:///h)`";
         assert_eq!(
             blocked_link_destinations(markdown),
-            ["file:///z", "other.md", "mailto:m@x.org"]
+            ["file:///z", "mailto:m@x.org"]
         );
     }
 
@@ -481,6 +490,17 @@ mod tests {
         assert_eq!(note_link_target("sb-note:%zz"), None);
         assert_eq!(note_link_target("sb-note:%FF"), None);
         assert_eq!(note_link_target("https://x.org"), None);
+    }
+
+    #[test]
+    fn should_treat_markdown_links_to_md_files_as_note_links() {
+        assert_eq!(
+            note_link_target("My%20Note.md#H").as_deref(),
+            Some("My Note.md")
+        );
+        assert_eq!(note_link_target("pic.png"), None);
+        let markdown = wikilinks_to_markdown("[a](b.md#h) [[c]] [d](file:///x.md) [e](b.md#h)");
+        assert_eq!(note_link_destinations(&markdown), ["b.md#h", "sb-note:c"]);
     }
 
     #[test]

@@ -562,18 +562,40 @@ fn should_leave_shortcuts_alone_while_a_popup_is_open() {
     assert!(f.harness.state().is_previewing());
 }
 
+fn follow_from_preview(label: &str) -> Option<String> {
+    let links = "[go](b.md#top) [space](My%20Note.md)";
+    let mut f = open_note_fixture_with("m", &[("m.md", links), ("My Note.md", "N")]);
+    press_command(&mut f.harness, Key::E);
+    f.harness.get_by_label(label).click();
+    f.harness.step();
+    assert!(
+        !opened_url(&f.harness),
+        "{label} was opened outside the app"
+    );
+    f.harness.run();
+    open_path(&f.harness)
+}
+
+#[test]
+fn should_follow_a_markdown_link_to_a_note_from_the_preview() {
+    assert_eq!(follow_from_preview("go").as_deref(), Some("b.md"));
+}
+
+#[test]
+fn should_decode_the_destination_of_a_markdown_link_to_a_note() {
+    assert_eq!(follow_from_preview("space").as_deref(), Some("My Note.md"));
+}
+
 #[test]
 fn should_not_open_links_that_are_not_web_links() {
     let mut f = open_note_fixture("d");
     press_command(&mut f.harness, Key::E);
-    for label in ["x", "rel"] {
-        f.harness.get_by_label(label).click();
-        f.harness.step();
-        assert!(!opened_url(&f.harness), "{label} was opened");
-        f.harness.run();
-        f.harness
-            .get_by_label_contains("Only web links open from a note");
-    }
+    f.harness.get_by_label("x").click();
+    f.harness.step();
+    assert!(!opened_url(&f.harness), "x was opened");
+    f.harness.run();
+    f.harness
+        .get_by_label_contains("Only web links open from a note");
     f.harness.get_by_label("web").click();
     f.harness.step();
     assert!(opened_url(&f.harness));

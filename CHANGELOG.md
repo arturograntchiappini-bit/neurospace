@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Desktop app: a Markdown link to a note (`[text](Other.md#heading)`, percent-decoded) now opens that note from the preview instead of saying only web links open; «Turn sync off» is also offered when the engine failed to start or ended, and the window says «Sync is not running: …»; when another process released the engine (for example `sb sync run` was stopped) the app takes it over at the next status refresh; the folder watcher starts before the index is built, so a change made during opening is not missed.
 - Desktop app: saving the open note no longer recomputes its backlinks or reruns the search (at 10 000 notes that was a visible hitch at every pause in typing); only the note's own links and tags are refreshed, and backlinks and search results update when another note may have changed (create, rename, delete, conflict note, rebuilt index) or the open note changes. Search results for the open note itself are therefore refreshed at the next such change or query.
 - Attachment links (`![[image.png]]`, `[[report.pdf]]`) are no longer ghost notes in the graph: they produce no node and no edge.
 - The ghost of a `./` or `/` link is named by the note a click would create, so `[[./new]]` in two folders gives two ghosts; ghosts of plain names are unchanged. A link for which no valid note path exists produces no ghost.
