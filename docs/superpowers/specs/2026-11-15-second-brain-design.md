@@ -162,6 +162,18 @@ Scanning walks the vault and returns the notes plus a list of ignored files with
 
 Ignored files are never indexed and never synced, and the sync engine never modifies or replaces them. The GUI and `ns list` show how many were ignored and why.
 
+**Incremental scanning (call, M3b).** A long-running process (the sync engine, the GUI) keeps a *load cache* and asks for changes instead of loading the whole vault each time. The walk still lists every folder on every scan, so the set of files, the `InvalidPath` and `CaseCollision` rules and the unlistable folders are always current. Only the reading is skipped:
+
+- For each note file the cache remembers its path spelling, size, modification time, the time it was read, and whether it was a note or `NotUtf8`. Size and time come from the directory listing (`DirEntry::metadata`), which costs no extra system call on Windows.
+- A file is read again when its spelling, size or modification time differs from the cache, when it is new, or when it is **racy**: its modification time was less than 3 seconds before the time it was read. A write that lands in the same tick as the read, or on a file system with 2-second time resolution (FAT, exFAT), can leave size and time unchanged; a racy file is therefore re-read at every scan until 3 seconds have passed since its last change. This is the rule `git` uses for its index.
+- `TooLarge` is decided from the size without reading. `Unreadable` is never cached: such a file is tried again at every scan.
+- A scan returns a **delta**: the notes that are new or whose content may have changed, with their content and on-disk spelling; the notes of the previous scan that are no longer notes; and the complete list of ignored files. Applying the deltas in order to an empty set gives exactly what a full load would return at the time of the last scan. A unit test checks this against a full load after every step of a sequence of file operations.
+- An empty cache returns every note, so the first scan of a process is a full load. Nothing is persisted: each process starts with a full load.
+- A caller can make the cache forget one file, so the next scan reads it again. The sync engine does this for every file whose replace, rename or trash was refused because the file no longer had the content seen in the scan (section 8.5, rule 2): otherwise a change the cache missed would keep that key blocked for ever.
+- A scan that fails (the vault root cannot be listed) leaves the cache as it was and reports the error; it never reports every note as removed.
+
+The accepted limit: a program that rewrites a file keeping exactly its size and setting its modification time back to the old value is not seen until the file changes again. Editors, `ns`, MCP, the GUI and the sync engine never do that.
+
 ### 5.4 Reading and writing
 
 - Content is UTF-8 text. Bytes are preserved exactly: no line-ending normalisation, no trailing-newline fixing.
@@ -336,7 +348,7 @@ All sync state lives **outside** the vault, so copying or sharing the vault fold
 | `base.json` | per note key, the content hash at the last point disk and document agreed |
 | `base.version` | the document version the base was last saved against, hex. Written after `base.json`. |
 | `engine.lock` | exclusive lock held by the running engine |
-| `status.json` | written by the engine every tick: process id, device id, addresses, peers and their connection state, note count, blocked notes, last error, timestamp |
+| `status.json` | written by the engine every tick, and at least every 5 seconds during a long round (M3b): process id, device id, network mode, addresses, peers and their connection state, note count, blocked notes, last error, standing notices, whether a round is running, timestamp |
 | `fresh-join` | marker: this replica joined a group and has not reconciled since (section 8.6) |
 | `command.pending` | a command for the running engine: `{"join": "<ticket>"}` or `{"leave": true}` |
 
@@ -374,11 +386,13 @@ The outcome depends only on the document's content, so replicas that hold the sa
 
 The editing identity inside the document is a fresh random one each time the document is loaded. Nothing has to be kept unique across copies and restores of the state directory.
 
+**Cached view (call, M3b).** Reading the alive notes means copying and hashing the text of every note. The document keeps a cache of, per note id, its text, the text's hash and whether a tombstone matches it, together with the document version (frontiers) the cache reflects. Before each use, the document asks the CRDT library for the difference between that version and the current one (`LoroDoc::diff`) and recomputes only the notes it names: a changed text `t:<id>`, or a changed `tombs` entry `<id>:<hash>`. `paths` is small and is read in full each time. When the difference cannot be computed, the cache is rebuilt in full. Texts are shared (`Arc<str>`), so handing out the view copies no text. A unit test checks, after every step of a sequence of local edits, imports, renames, tombstones and claim resolutions, that the cached view equals a view computed from scratch.
+
 ### 8.5 Reconciliation
 
 Reconciliation is one idempotent function. It runs at start-up, after watcher events (debounced), after every imported remote update and on a periodic tick. One round has four steps.
 
-**Step 1 — scan.** Read the vault. Every note key is in one of three disk states:
+**Step 1 — scan.** Read the vault, through the engine's load cache (section 5.3, M3b): only files that may have changed are read and hashed again; the others keep the content and hash of their last read. Every note key is in one of three disk states:
 
 - **present** with its content;
 - **absent**: the scan completed and nothing occupies that location;
@@ -499,7 +513,7 @@ Commands:
 | `ns sync invite` | Creates the device key and secret if missing and prints a ticket. Includes address hints when a running engine has published them in `status.json`. |
 | `ns sync join <TICKET>` | Validates the ticket, then joins (section 8.6). |
 | `ns sync leave` | Leaves the group (section 8.6). |
-| `ns sync status` | Prints `status.json`; reports «engine not running» when the file is missing or older than 30 seconds. |
+| `ns sync status` | Prints `status.json`, including the network mode the engine runs with and «a sync round is running» while one is; reports «engine not running» when the file is missing or older than 30 seconds. It never reads `config.json` (M3b). |
 
 `join` and `leave` act directly when no engine is running (they take the lock for the duration). When one is running they write `command.pending`, and the engine carries the command out on its next tick and removes the file.
 
@@ -510,6 +524,13 @@ Timing: watcher debounce 300 ms; tick every 5 s; full rescan at least every 60 s
 - One **actor** thread owns the document, the base and the vault handle, and processes commands from a queue: reconcile, remote update, peer version, session opened or closed, tick, join, leave, shutdown. Nothing else touches the document. Its first command after start-up is a reconciliation (or the fresh-join wait).
 - Network sessions run on an async runtime and talk to the actor through channels. Session logic is written against generic byte streams, so the whole protocol is tested in memory; the network adapter only opens streams and reports device ids.
 - The engine reports events (peer connected, peer disconnected, synced, error) to its host through a channel. The GUI shows them; `ns sync run` logs them to stderr.
+
+**Status (M3b).**
+- *Long rounds.* A round can take minutes (the first round of a large vault, a large import). While the actor is inside a round, a small keeper thread rewrites `status.json` every 5 seconds with the status of the moment the round began, `"busy": true` and a fresh timestamp, so readers never take a busy engine for a stopped one. A round is any actor call that can reconcile: a scheduled round, a received `Updates`, a tick (it can end a fresh-join wait). When the actor leaves one, it clears the busy flag under the keeper's lock and then writes its own status, so the last write after a round is always the actor's.
+- *Errors and notices are separate.* `last_error` is the last error and is cleared by the next successful round, as before. `notices` is a list of standing conditions, each shown exactly while it holds: «watching the folder is off; changes are found by the periodic rescan» while there is no watcher; the notice of the last round (claims that did not settle, a failed compaction), replaced at every round; what opening the state repaired (an unreadable `base.json` that was reset), for the life of the engine; «the device list is full (256): new devices are not remembered» once a `Peers` message brought a device that could not be stored, until the list has room.
+- *Mode.* `status.json` carries the network mode the engine was started with (`"mode": "internet" | "lan"`).
+- *A secret changed by hand.* When the `secret` read at a tick differs from the one the open sessions authenticated with, every open session is closed at that tick.
+- *A full device list.* A join whose inviting device cannot be stored because `peers.json` is full fails with an error that says so; nothing is changed.
 
 ## 9. GUI
 
@@ -552,7 +573,8 @@ A single window in the spirit of Obsidian: very simple and minimal, very legible
 - **Clicking a link** opens the resolved note; an unresolved link creates it first.
 - **Quick open:** a centred popup that filters note names as the user types; Enter opens the first match, Escape closes.
 - **Shortcuts:** Ctrl+N new note, Ctrl+O quick open, Ctrl+E edit/preview, Ctrl+G graph, Ctrl+F focus search.
-- The index follows the folder: after a watcher event and 300 ms of quiet, the whole index is rebuilt on a background thread and swapped in; the tree, backlinks and graph follow (call, M3: the watcher gives no paths, and a full rebuild keeps the ignored-file list correct). The application's own saves update the index at once.
+- The index follows the folder: after a watcher event and 300 ms of quiet, a background thread scans the vault through the GUI's load cache (section 5.3) and parses the changed notes; the UI thread applies that delta to the index. A note whose text equals what the index already holds is not a change. Only a delta that changes something refreshes the tree, backlinks, search and graph, so the echo of the application's own save, which already updated the index at once, causes no recomputation (call, M3b; it replaces the full rebuild of M3). A delta computed before one of the application's own writes is discarded together with the cache it produced, and the scan is repeated from the previous cache, so no change is ever skipped.
+- The file tree draws only the rows that are visible: the expanded folders and their notes are flattened into one list of rows and drawn with a virtualised scroll area (M3b). Which folders are expanded is remembered while the vault is open. Tab moves through the drawn rows as before; quick open (Ctrl+O) reaches every note.
 
 ### 9.4 Graph view
 
@@ -563,13 +585,15 @@ A force-directed layout of the whole vault graph drawn in the centre pane:
 - hovering a node highlights it and its neighbours and shows its label; labels of all nodes appear when zoomed in;
 - clicking a node opens the note (creating it for a ghost node).
 
-The layout is a simple spring-and-repulsion simulation, quadratic in the number of nodes. It is the right size for a few thousand notes.
+The layout is a spring-and-repulsion simulation. From M3b the repulsion is computed with a Barnes–Hut quadtree (opening angle θ = 0.8), so a step costs about n·log n, and the layout simulates graphs up to 10 000 nodes; above that it shows the simplified layout of M3. An edge whose bounding box does not meet the visible area is not drawn (M3b).
 
 ### 9.5 Sync window
 
 Opened from the top bar: whether sync is on; this device's id; **Create invite** (shows the ticket with a copy button); **Join** (paste a ticket, with a note that where a local note differs from the group's both are kept); **Turn sync off** (leave the group); the list of peers with their state; notes the engine could not sync and why; the mode switch (Internet / LAN only).
 
 If another process holds the engine lock, the window says sync is being handled by that process and shows `status.json` read-only.
+
+The window reads the status of the GUI's own engine from `status.json` too, never by asking the engine and waiting (M3b): during a long round the actor cannot answer, and the keeper keeps the file fresh (section 8.9). The status shown is therefore up to 5 seconds old.
 
 **Engine lifecycle in the GUI (call, M3).** The GUI starts the engine for the open vault only when sync is configured for it (its state directory holds a group secret), or when the user creates an invite or joins from this window. A vault that never used sync therefore never contacts the network. «Turn sync off» leaves the group and stops the engine. Changing the mode writes `config.json` and restarts the engine, because the engine reads it only at start (section 8.3). Engine calls that can block (start, invite, join, leave, stop) run on a background thread; the window shows that they are in progress and never freezes. Closing the application saves the open note and stops the engine.
 
@@ -677,6 +701,12 @@ Checks described as «by the orchestrator» are run by the orchestrating session
 - The contrast test of section 9.6 passes for every token pair.
 - By the orchestrator on Windows: the binary starts with a sample vault and stays up without errors; screenshots in light and dark, with `Mica` and with «Reduce transparency», are taken and looked at.
 - By the orchestrator on Windows, with a 10 000-note vault: the window opens, search answers while typing, and an external edit of the open note appears.
+
+**M3b — scale (performance of the sync engine and of the GUI at the declared size, and the minors parked in M2 and M3)**
+- All tests pass on Windows and in a Linux container, including: the load-cache delta test of section 5.3; the cached-view test of section 8.4; the existing scenario suite unchanged; engine tests that wait at most 30 seconds for a condition and never sleep a fixed time.
+- A timing test (ignored by default, run in release) on a generated vault of 10 000 notes and about 100 MB: a reconciliation with nothing to do takes under 300 ms, and one with a single changed note under 500 ms, on the orchestrator's Windows machine. The numbers are recorded.
+- By the orchestrator, the M2 two-process measurement repeated on the same vault (release, `lan`): single-change latency A→B median under 1 second over at least 10 changes; idle CPU of each engine no higher than in M2; `ns sync status` on the receiving side never says «engine not running» during its first import; results recorded next to the M2 numbers.
+- By the orchestrator in the GUI with the 10 000-note vault: saving the open note causes no index swap (a unit test pins this too); the graph view simulates (not the simplified layout) and the window stays responsive while it settles; the file tree with a folder of several thousand notes expanded scrolls without visible stalls.
 
 **M4 — Linux and release**
 - Both binaries build in the Linux container and the full test suite passes there.
