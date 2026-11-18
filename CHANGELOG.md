@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Second Brain logo (`assets/logo/second-brain.svg`) as the window and taskbar icon, the icon of `secondbrain.exe` on Windows and the logo of the welcome screen.
 - `sb` command line: `list`, `read`, `write`, `append`, `delete`, `rename`, `search`, `links`, `graph` and `tags`, with text or `--json` output.
 - `sb mcp`: an MCP stdio server exposing the note operations as ten tools (`list_notes`, `read_note`, `write_note`, `append_to_note`, `delete_note`, `rename_note`, `search_notes`, `get_links`, `get_graph`, `list_tags`) for AI agents.
 - Sync engine (`sb-sync`): peer-to-peer sync of a vault between devices over `iroh`, with no server of its own; a CRDT document merges edits line by line, concurrent differences become conflict copies, removals go to the vault's trash, and a file that cannot be read is blocked instead of deleted. Modes `internet` (default) and `lan`.

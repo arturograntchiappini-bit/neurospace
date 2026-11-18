@@ -34,6 +34,9 @@ serde_json.workspace = true
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.8.1"
 
+[build-dependencies]
+winresource = "0.1.34"
+
 [dev-dependencies]
 egui_kittest = "0.37"
 tempfile.workspace = true
