@@ -75,6 +75,7 @@ pub struct Workspace {
     open: Option<OpenNote>,
     write_generation: u64,
     index_swaps: u64,
+    other_note_writes: u64,
     buffer_generation: u64,
     notices: Vec<Notice>,
 }
@@ -95,6 +96,7 @@ impl Workspace {
             open: None,
             write_generation: 0,
             index_swaps: 0,
+            other_note_writes: 0,
             buffer_generation: 0,
             notices: Vec::new(),
         })
@@ -145,6 +147,13 @@ impl Workspace {
     /// derive data from the index key their caches on it.
     pub fn index_revision(&self) -> u64 {
         self.write_generation + self.index_swaps
+    }
+
+    /// Changes whenever a note other than the one being edited may have changed (create, rename,
+    /// delete, conflict note, swapped-in rebuild), but not on a save of the open note or a
+    /// `select`. Backlinks and search results depend on other notes, so they key on it.
+    pub fn cross_note_revision(&self) -> u64 {
+        self.other_note_writes + self.index_swaps
     }
 
     /// Opens a note, saving a dirty open one first (or keeping its text in a conflict note, see
@@ -266,6 +275,7 @@ impl Workspace {
         self.save_or_keep()?;
         let created = ops::create_note(&self.vault, path, "")?.path;
         self.write_generation += 1;
+        self.other_note_writes += 1;
         self.index.upsert(created.clone(), String::new());
         self.refresh_tree();
         self.select(&created)?;
@@ -284,6 +294,7 @@ impl Workspace {
         }
         let outcome = ops::rename_note(&self.vault, from.as_str(), &to)?;
         self.write_generation += 1;
+        self.other_note_writes += 1;
         self.index.remove(&outcome.from.key());
         // An unreadable moved note stays out of the index; the next reload re-indexes it.
         if let Ok(text) = self.vault.read(&outcome.to) {
@@ -311,6 +322,7 @@ impl Workspace {
         }
         let outcome = ops::delete_note(&self.vault, path.as_str())?;
         self.write_generation += 1;
+        self.other_note_writes += 1;
         self.index.remove(&outcome.path.key());
         if self.is_open(path) {
             self.open = None;
@@ -493,6 +505,7 @@ impl Workspace {
         let created = create_conflict_note(&self.vault, &path, &buffer)?;
         open.kept = true;
         self.write_generation += 1;
+        self.other_note_writes += 1;
         self.index.upsert(created.clone(), buffer);
         self.refresh_tree();
         Ok(Some(created))
@@ -694,6 +707,37 @@ mod tests {
             ApplyOutcome::Applied(_)
         ));
         assert_ne!(ws.index_revision(), after_create);
+    }
+
+    #[test]
+    fn should_change_cross_note_revision_only_when_other_notes_may_have_changed() {
+        let (dir, mut ws) = workspace(&[("a.md", "x"), ("b.md", "y"), ("c.md", "z")]);
+        ws.select(&p("a.md")).unwrap();
+        let start = ws.cross_note_revision();
+        ws.edit("typed".into(), Instant::now());
+        ws.save().unwrap();
+        ws.select(&p("b.md")).unwrap();
+        assert_eq!(ws.cross_note_revision(), start, "own save and select");
+        let mut last = start;
+        let mut changed = |ws: &Workspace| {
+            let moved = ws.cross_note_revision() != last;
+            last = ws.cross_note_revision();
+            moved
+        };
+        ws.create("new", None).unwrap();
+        assert!(changed(&ws), "create");
+        ws.rename(&p("c.md"), "d").unwrap();
+        assert!(changed(&ws), "rename");
+        ws.delete(&p("d.md")).unwrap();
+        assert!(changed(&ws), "delete");
+        ws.edit("typed".into(), Instant::now());
+        fs::write(dir.path().join("new.md"), "theirs").unwrap();
+        ws.keep_unsaved_as_conflict().unwrap();
+        assert!(changed(&ws), "conflict note");
+        let rebuilt = Index::from_notes(vec![(p("a.md"), "typed".into())]);
+        let generation = ws.write_generation();
+        ws.apply_index(rebuilt, generation);
+        assert!(changed(&ws), "index swap");
     }
 
     #[test]

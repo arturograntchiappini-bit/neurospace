@@ -1,6 +1,7 @@
 //! What the file panel, the links panel, the note dialogs and the status strip show, and what
 //! their actions do. No UI here: the UI draws these values and forwards input.
 
+use std::mem;
 use std::time::{Duration, Instant};
 
 use sb_core::{Backlink, IgnoreReason, Ignored, NotePath, OutLink, SearchHit};
@@ -92,7 +93,7 @@ impl SearchBox {
             self.seen.clone_from(&self.text);
             self.changed_at = Some(now);
         }
-        let revision = workspace.index_revision();
+        let revision = workspace.cross_note_revision();
         if self.is_settled(revision) {
             return None;
         }
@@ -133,12 +134,21 @@ pub struct InspectorData {
     pub tags: Vec<String>,
 }
 
-/// `InspectorData`, recomputed only when the open note or the index changes.
+/// `InspectorData`: the backlinks are recomputed only when the open note changes or another note
+/// may have changed (they cost a scan of every note); the open note's own links and tags are
+/// refreshed after each save of it.
 #[derive(Debug, Default)]
 pub struct InspectorCache {
-    key: Option<(NotePath, u64)>,
+    key: Option<InspectorKey>,
     data: InspectorData,
     computed: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct InspectorKey {
+    path: NotePath,
+    cross_note: u64,
+    revision: u64,
 }
 
 impl InspectorCache {
@@ -149,32 +159,51 @@ impl InspectorCache {
             self.data = InspectorData::default();
             return &self.data;
         };
-        let revision = workspace.index_revision();
-        let fresh = self.key.as_ref();
-        if !fresh.is_some_and(|(path, at)| *path == open.path && *at == revision) {
-            self.data = compute(workspace, &open.path);
-            self.key = Some((open.path.clone(), revision));
-            self.computed += 1;
+        let key = InspectorKey {
+            path: open.path.clone(),
+            cross_note: workspace.cross_note_revision(),
+            revision: workspace.index_revision(),
+        };
+        match self.key.as_ref() {
+            Some(seen) if *seen == key => {}
+            Some(seen) if seen.path == key.path && seen.cross_note == key.cross_note => {
+                let (outgoing, tags) = own_links(workspace, &key.path);
+                let backlinks = mem::take(&mut self.data.backlinks);
+                self.data = InspectorData {
+                    backlinks,
+                    outgoing,
+                    tags,
+                };
+            }
+            _ => {
+                self.data = compute(workspace, &key.path);
+                self.computed += 1;
+            }
         }
+        self.key = Some(key);
         &self.data
     }
 
-    /// How many times the lists were computed; stays put while the open note and index do.
+    /// How many times the backlinks were computed; stays put while the open note and the other
+    /// notes do.
     pub fn computations(&self) -> usize {
         self.computed
     }
 }
 
 fn compute(workspace: &Workspace, path: &NotePath) -> InspectorData {
-    let (index, key) = (workspace.index(), path.key());
+    let (outgoing, tags) = own_links(workspace, path);
     InspectorData {
-        backlinks: index.backlinks(&key),
-        outgoing: index.outgoing(&key),
-        tags: index
-            .get(&key)
-            .map(|entry| entry.tags.clone())
-            .unwrap_or_default(),
+        backlinks: workspace.index().backlinks(&path.key()),
+        outgoing,
+        tags,
     }
+}
+
+fn own_links(workspace: &Workspace, path: &NotePath) -> (Vec<OutLink>, Vec<String>) {
+    let (index, key) = (workspace.index(), path.key());
+    let tags = index.get(&key).map(|entry| entry.tags.clone());
+    (index.outgoing(&key), tags.unwrap_or_default())
 }
 
 /// What a note dialog does when confirmed.
@@ -381,6 +410,43 @@ mod tests {
         let data = cache.data(&ws);
         assert_eq!(data.backlinks[0].from, p("c.md"));
         assert_eq!(cache.computations(), computed + 1);
+    }
+
+    #[test]
+    fn should_not_recompute_backlinks_when_the_open_note_is_saved() {
+        let (_dir, mut ws) = workspace(&[("a.md", "[[b]] #old"), ("b.md", "back to [[a]]")]);
+        let mut cache = InspectorCache::default();
+        ws.select(&p("a.md")).unwrap();
+        cache.data(&ws);
+        let computed = cache.computations();
+        ws.edit("[[b]] [[ghost]] #new".into(), Instant::now());
+        ws.save().unwrap();
+        let data = cache.data(&ws);
+        assert_eq!(data.tags, ["new"]);
+        assert_eq!(data.outgoing.len(), 2);
+        assert_eq!(data.backlinks[0].from, p("b.md"));
+        assert_eq!(cache.computations(), computed);
+    }
+
+    #[test]
+    fn should_search_again_only_when_another_note_may_have_changed() {
+        let (_dir, mut ws) = workspace(&[("a.md", "needle")]);
+        let t0 = Instant::now();
+        let mut search = searching("needle");
+        ws.select(&p("a.md")).unwrap();
+        search.update(&ws, t0);
+        search.update(&ws, t0 + ms(150));
+        ws.edit("other".into(), t0);
+        ws.save().unwrap();
+        search.update(&ws, t0 + ms(160));
+        assert_eq!(
+            search.hits().len(),
+            1,
+            "an own save must not rerun the search"
+        );
+        ws.create("z", None).unwrap();
+        search.update(&ws, t0 + ms(170));
+        assert!(search.hits().is_empty());
     }
 
     #[test]
