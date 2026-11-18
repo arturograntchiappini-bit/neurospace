@@ -272,11 +272,10 @@ impl SecondBrainApp {
         let wake = ctx.clone();
         let job = Job::spawn(
             move || {
-                let workspace = Workspace::open(&root)?;
-                let reloader = Reloader::start(workspace.vault().root(), move || {
-                    wake.request_repaint();
-                });
-                Ok((workspace, reloader))
+                // Watching starts before the index is built: a change made during the build
+                // then triggers the normal debounced rebuild.
+                let reloader = Reloader::start(&root, move || wake.request_repaint());
+                Ok((Workspace::open(&root)?, reloader))
             },
             move || ctx.request_repaint(),
         );

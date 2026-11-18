@@ -284,6 +284,16 @@ mod tests {
     }
 
     #[test]
+    fn should_report_the_start_error_and_expect_no_engine_when_an_operation_cannot_start_it() {
+        // The branch that stops an engine started for a failing operation needs a real
+        // `EngineHandle`, which no test may start; this covers the failing start.
+        let (mut control, _dir) = control();
+        let error = control.invite().unwrap_err();
+        assert!(error.contains("no engine in this test"), "{error}");
+        assert_eq!(control.status(), EngineStatus::Unknown);
+    }
+
+    #[test]
     fn should_not_report_gone_after_an_explicit_stop() {
         let (mut control, _dir) = control();
         control.engine_expected = true;

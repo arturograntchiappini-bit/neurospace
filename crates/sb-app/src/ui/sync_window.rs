@@ -93,7 +93,7 @@ fn state_line(state: &SyncState) -> String {
         SyncState::Starting => "Sync is starting…".to_owned(),
         SyncState::On => "Sync is on".to_owned(),
         SyncState::HandledElsewhere => ELSEWHERE_NOTE.to_owned(),
-        SyncState::Error(error) => format!("Sync could not start: {error}"),
+        SyncState::Error(error) => format!("Sync is not running: {error}"),
     }
 }
 
@@ -187,7 +187,8 @@ fn mode_section(ui: &mut Ui, p: &Palette, current: NetMode) -> Option<Request> {
 }
 
 fn turn_off_section(ui: &mut Ui, state: &SyncState) -> Option<Request> {
-    if *state != SyncState::On {
+    // An engine that failed to start or ended still leaves a group the user may want to leave.
+    if !matches!(state, SyncState::On | SyncState::Error(_)) {
         return None;
     }
     ui.add_space(4.0);

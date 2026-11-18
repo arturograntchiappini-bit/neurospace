@@ -5,6 +5,7 @@
 //! messages that carry it, and every `Debug` impl below prints `<redacted>` in its place.
 
 use std::fmt;
+use std::mem;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -67,6 +68,8 @@ pub trait SyncControl: Send {
 
 /// Something the window asks the worker to do.
 pub enum Request {
+    /// Try to start the engine again (the lock decides who runs it).
+    Start,
     /// Create a ticket.
     Invite,
     /// Join the group of this ticket.
@@ -84,6 +87,7 @@ pub enum Request {
 impl fmt::Debug for Request {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Request::Start => out.write_str("Start"),
             Request::Invite => out.write_str("Invite"),
             Request::Join(_) => out.write_str("Join(<redacted>)"),
             Request::Leave => out.write_str("Leave"),
@@ -219,6 +223,7 @@ fn first_reply(control: &mut dyn SyncControl) -> Reply {
 
 fn answer(control: &mut dyn SyncControl, request: Request) -> Option<Reply> {
     Some(match request {
+        Request::Start => Reply::Started(control.start()),
         Request::Invite => Reply::Invited(control.invite()),
         Request::Join(ticket) => Reply::Joined(control.join(&ticket)),
         Request::Leave => Reply::Left(control.leave()),
@@ -261,6 +266,7 @@ pub struct SyncPanel {
     pub error: Option<String>,
     pending_mode: Option<NetMode>,
     refreshing: bool,
+    retry_start: bool,
     last_refresh: Option<Instant>,
 }
 
@@ -276,6 +282,7 @@ impl Default for SyncPanel {
             error: None,
             pending_mode: None,
             refreshing: false,
+            retry_start: false,
             last_refresh: None,
         }
     }
@@ -302,7 +309,7 @@ fn busy_text(request: &Request) -> Option<&'static str> {
         Request::Join(_) => Some("Joining…"),
         Request::Leave => Some("Turning sync off…"),
         Request::SetMode(_) => Some("Switching mode…"),
-        Request::RefreshStatus | Request::Stop => None,
+        Request::Start | Request::RefreshStatus | Request::Stop => None,
     }
 }
 
@@ -321,7 +328,10 @@ impl SyncPanel {
     pub fn apply(&mut self, reply: Reply) {
         match reply {
             Reply::NotConfigured | Reply::Stopped => self.state = SyncState::Off,
-            Reply::Started(result) => self.state = started_state(result),
+            Reply::Started(result) => {
+                self.refreshing = false;
+                self.state = started_state(result);
+            }
             Reply::Invited(result) => self.finish(result, |panel, ticket| {
                 panel.ticket = Some(ticket);
                 panel.state = SyncState::On;
@@ -344,11 +354,12 @@ impl SyncPanel {
         self.refreshing = false;
         match found {
             EngineStatus::Running(status) => self.status = Some(status),
-            EngineStatus::Unknown => {}
+            // The other process may have stopped: ask the lock again, it decides.
+            EngineStatus::Unknown => self.retry_start = self.state == SyncState::HandledElsewhere,
             EngineStatus::Gone { configured } => {
                 self.status = None;
                 self.state = if configured {
-                    SyncState::Error("Sync stopped".to_owned())
+                    SyncState::Error("the engine ended on its own".to_owned())
                 } else {
                     SyncState::Off
                 };
@@ -406,6 +417,11 @@ impl SyncPanel {
         if !watching || self.busy.is_some() || self.refreshing {
             return None;
         }
+        if mem::take(&mut self.retry_start) {
+            worker.send(Request::Start);
+            self.refreshing = true;
+            return None;
+        }
         let interval = if window_open {
             WINDOW_REFRESH
         } else {
@@ -459,6 +475,7 @@ mod tests {
     struct FakeControl {
         configured: bool,
         start: Result<StartOutcome, String>,
+        later_start: Option<Result<StartOutcome, String>>,
         invite: Result<String, String>,
         invite_delay: Duration,
         status: Option<Status>,
@@ -471,6 +488,7 @@ mod tests {
         let control = FakeControl {
             configured,
             start: Ok(StartOutcome::Started),
+            later_start: None,
             invite: Ok("sb1/SECRET-TICKET".into()),
             invite_delay: Duration::ZERO,
             status: None,
@@ -487,7 +505,11 @@ mod tests {
 
         fn start(&mut self) -> Result<StartOutcome, String> {
             self.calls.push("start");
-            self.start.clone()
+            let answer = self.start.clone();
+            if let Some(next) = self.later_start.take() {
+                self.start = next;
+            }
+            answer
         }
 
         fn invite(&mut self) -> Result<String, String> {
@@ -768,7 +790,10 @@ mod tests {
         let mut panel = running_panel();
         panel.apply(running(&[true]));
         panel.apply(Reply::Status(EngineStatus::Gone { configured: true }));
-        assert_eq!(panel.state, SyncState::Error("Sync stopped".into()));
+        assert_eq!(
+            panel.state,
+            SyncState::Error("the engine ended on its own".into())
+        );
         assert_eq!(panel.summary(), "Sync error");
         assert_eq!(panel.status, None);
     }
@@ -793,6 +818,40 @@ mod tests {
         panel.apply(running(&[true]));
         panel.apply(Reply::Status(EngineStatus::Unknown));
         assert_eq!(panel.summary(), "Sync: 1 of 1 peer online");
+    }
+
+    #[test]
+    fn should_try_to_start_again_when_the_other_process_left_no_fresh_status() {
+        let (mut control, calls) = fake(true);
+        control.start = Ok(StartOutcome::HandledElsewhere);
+        control.later_start = Some(Ok(StartOutcome::Started));
+        let worker = spawn(control);
+        let mut panel = SyncPanel::default();
+        apply_next(&mut panel, &worker);
+        assert_eq!(panel.state, SyncState::HandledElsewhere);
+        let t0 = Instant::now();
+        panel.tick(&worker, t0, true);
+        apply_next(&mut panel, &worker);
+        assert_eq!(panel.state, SyncState::HandledElsewhere);
+        panel.tick(&worker, t0, true);
+        apply_next(&mut panel, &worker);
+        assert_eq!(panel.state, SyncState::On);
+        assert_eq!(calls.all(), ["start", "status", "start"]);
+    }
+
+    #[test]
+    fn should_not_start_again_while_the_other_process_reports_a_status() {
+        let (mut control, calls) = fake(true);
+        control.start = Ok(StartOutcome::HandledElsewhere);
+        control.status = Some(status_with_peers(&[true]));
+        let worker = spawn(control);
+        let mut panel = SyncPanel::default();
+        apply_next(&mut panel, &worker);
+        let t0 = Instant::now();
+        panel.tick(&worker, t0, true);
+        apply_next(&mut panel, &worker);
+        assert_eq!(panel.tick(&worker, t0, true), Some(Duration::from_secs(2)));
+        assert_eq!(calls.all(), ["start", "status"]);
     }
 
     #[test]

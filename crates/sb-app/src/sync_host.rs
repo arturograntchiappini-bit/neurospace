@@ -43,7 +43,9 @@ impl SyncHost {
 
     /// Stops the engine of the previous vault, then starts the worker of the vault at `path`,
     /// both on one background thread so that two engines never race for a lock. A worker the
-    /// previous switch is still making is waited for there and stopped too.
+    /// previous switch is still making is waited for there and stopped too. Each stop waits at
+    /// most `STOP_TIMEOUT`; an old engine that has not stopped by then is given up on, and the new
+    /// worker may find the lock taken.
     pub fn switch_to(&mut self, path: &Path, ctx: &Context) {
         let pending = self.starting.take();
         let (previous, factory, path) = (self.worker.take(), self.factory.clone(), path.to_owned());
@@ -77,7 +79,9 @@ impl SyncHost {
     }
 
     /// The window is closing; nothing is drawn any more, so waiting is fine. A worker still being
-    /// made is waited for and stopped too; the whole wait is bounded by `STOP_TIMEOUT`.
+    /// made is waited for and stopped too; the whole wait is bounded by `STOP_TIMEOUT`. A job still
+    /// running at the bound ends with the process, and the engine's lock is a file lock the
+    /// operating system releases then.
     pub fn shut_down(&mut self) {
         let deadline = Instant::now() + STOP_TIMEOUT;
         self.await_starting(deadline);
@@ -250,10 +254,10 @@ mod tests {
         let ctx = Context::default();
         host.switch_to(Path::new("slow-stop"), &ctx);
         wait_for_worker(&mut host, &ctx);
-        let asked = Instant::now();
         host.switch_to(Path::new("b"), &ctx);
+        // The old stop sleeps SLOW before it logs: a switch that waited for it would see it here.
         assert!(
-            asked.elapsed() < SLOW / 2,
+            !entries(&log).contains(&"stop slow-stop".to_owned()),
             "the switch waited for the old stop"
         );
         wait_for_worker(&mut host, &ctx);

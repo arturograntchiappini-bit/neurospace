@@ -24,6 +24,7 @@ const DEADLINE: Duration = Duration::from_secs(10);
 struct FakeControl {
     configured: bool,
     start: StartOutcome,
+    start_error: Option<&'static str>,
     invite_delay: Duration,
     status: Option<Status>,
     mode: NetMode,
@@ -34,6 +35,7 @@ impl FakeControl {
         FakeControl {
             configured: false,
             start: StartOutcome::Started,
+            start_error: None,
             invite_delay: Duration::ZERO,
             status: None,
             mode: NetMode::Internet,
@@ -47,7 +49,8 @@ impl SyncControl for FakeControl {
     }
 
     fn start(&mut self) -> Result<StartOutcome, String> {
-        Ok(self.start)
+        self.start_error
+            .map_or(Ok(self.start), |error| Err(error.to_owned()))
     }
 
     fn invite(&mut self) -> Result<String, String> {
@@ -228,6 +231,19 @@ fn should_show_read_only_status_when_handled_elsewhere() {
             "{hidden} is shown"
         );
     }
+}
+
+#[test]
+fn should_offer_turn_sync_off_when_the_engine_failed_to_start() {
+    let mut control = FakeControl::off();
+    control.configured = true;
+    control.start_error = Some("state is corrupt");
+    let (mut harness, _dir) = open_with(control);
+    wait_for_label(&mut harness, "Sync error");
+    open_window(&mut harness);
+    harness.get_by_label("Sync is not running: state is corrupt");
+    harness.get_by_label("Turn sync off").click();
+    wait_for_label(&mut harness, "Sync off");
 }
 
 #[test]
