@@ -87,25 +87,31 @@ pub fn note_link_target(dest: &str) -> Option<String> {
 
 /// Every `sb-note:` destination in `markdown`, each once, in order of appearance.
 pub fn note_link_destinations(markdown: &str) -> Vec<String> {
-    let marker = format!("]({NOTE_LINK_SCHEME}");
-    let mut seen = HashSet::new();
-    let mut found = Vec::new();
-    for (at, _) in markdown.match_indices(&marker) {
-        let rest = &markdown[at + 2..];
-        let Some(end) = rest.find(')') else {
-            continue;
-        };
-        if seen.insert(&rest[..end]) {
-            found.push(rest[..end].to_owned());
-        }
-    }
-    found
+    let mut destinations = link_destinations(markdown);
+    destinations.retain(|dest| dest.starts_with(NOTE_LINK_SCHEME));
+    destinations
 }
 
 /// The destinations of the links in `markdown` that must not open from a note.
 pub fn blocked_link_destinations(markdown: &str) -> Vec<String> {
+    let mut destinations = link_destinations(markdown);
+    destinations.retain(|dest| !is_openable(dest));
+    destinations
+}
+
+/// The options the preview renderer (the Markdown viewer crate, 0.26.0) parses with: its backend
+/// crate, `src/pulldown.rs`, `parser_options`, line 543. The link hooks come from the same parse
+/// the preview draws, so every link it makes clickable is seen here.
+const PREVIEW_OPTIONS: pulldown_cmark::Options = pulldown_cmark::Options::ENABLE_TABLES
+    .union(pulldown_cmark::Options::ENABLE_TASKLISTS)
+    .union(pulldown_cmark::Options::ENABLE_STRIKETHROUGH)
+    .union(pulldown_cmark::Options::ENABLE_FOOTNOTES)
+    .union(pulldown_cmark::Options::ENABLE_DEFINITION_LIST);
+
+/// The destination of every link and image in `markdown`, each once, in order of appearance.
+fn link_destinations(markdown: &str) -> Vec<String> {
     let mut seen = HashSet::new();
-    pulldown_cmark::Parser::new(markdown)
+    pulldown_cmark::Parser::new_ext(markdown, PREVIEW_OPTIONS)
         .filter_map(|event| match event {
             pulldown_cmark::Event::Start(
                 pulldown_cmark::Tag::Link { dest_url, .. }
@@ -113,15 +119,16 @@ pub fn blocked_link_destinations(markdown: &str) -> Vec<String> {
             ) => Some(dest_url.into_string()),
             _ => None,
         })
-        .filter(|dest| !is_openable(dest) && seen.insert(dest.clone()))
+        .filter(|dest| seen.insert(dest.clone()))
         .collect()
 }
 
+/// Only web links open outside the app; `sb-note:` is the exact scheme our own rewrite writes.
 fn is_openable(dest: &str) -> bool {
     let lower = dest.to_ascii_lowercase();
     lower.starts_with("http://")
         || lower.starts_with("https://")
-        || lower.starts_with(NOTE_LINK_SCHEME)
+        || dest.starts_with(NOTE_LINK_SCHEME)
 }
 
 /// Alternating stretches that cover `text`: `true` for code (fenced blocks and inline spans).
@@ -440,6 +447,28 @@ mod tests {
         assert_eq!(
             blocked_link_destinations(markdown),
             ["file:///z", "other.md", "mailto:m@x.org"]
+        );
+    }
+
+    #[test]
+    fn should_list_blocked_links_in_every_syntax_the_preview_renders() {
+        let markdown = concat!(
+            "text[^1]\n\n",
+            "[^1]: [f](file:///foot)\n\n",
+            "| h |\n|---|\n| [c](file:///cell) |\n\n",
+            "- [ ] [t](file:///task)\n\n",
+            "term\n: [d](file:///def)\n\n",
+            "[u](SB-NOTE:foo)",
+        );
+        assert_eq!(
+            blocked_link_destinations(markdown),
+            [
+                "file:///foot",
+                "file:///cell",
+                "file:///task",
+                "file:///def",
+                "SB-NOTE:foo"
+            ]
         );
     }
 

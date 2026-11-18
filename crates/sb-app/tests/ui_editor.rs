@@ -30,6 +30,14 @@ fn make_vault(parent: &Path) -> PathBuf {
     let links =
         "[x](file:///C:/secret) [web](https://example.org) [rel](other.md) [[report.pdf]] [[ ]]";
     fs::write(vault.join("d.md"), links).unwrap();
+    let syntaxes = concat!(
+        "note[^1]\n\n[^1]: [foot](file:///foot)\n\n",
+        "| h |\n|---|\n| [cell](file:///cell) |\n\n",
+        "- [ ] [task](file:///task)\n\n",
+        "term\n: [def](file:///def)\n\n",
+        "[upper](SB-NOTE:foo)",
+    );
+    fs::write(vault.join("e.md"), syntaxes).unwrap();
     vault
 }
 
@@ -190,7 +198,7 @@ fn should_show_error_in_strip_when_link_cannot_be_followed() {
     f.harness.run();
     f.harness.get_by_label_contains("Error:");
     assert_eq!(open_path(&f.harness).as_deref(), Some("c.md"));
-    assert_eq!(fs::read_dir(&f.vault).unwrap().count(), 4);
+    assert_eq!(fs::read_dir(&f.vault).unwrap().count(), 5);
 }
 
 #[test]
@@ -488,6 +496,23 @@ fn should_not_open_links_that_are_not_web_links() {
     f.harness.get_by_label("web").click();
     f.harness.step();
     assert!(opened_url(&f.harness));
+}
+
+#[test]
+fn should_not_open_links_hidden_in_footnotes_tables_task_lists_and_definition_lists() {
+    let mut f = open_note_fixture("e");
+    press_command(&mut f.harness, Key::E);
+    for label in ["foot", "cell", "task", "def", "upper"] {
+        f.harness.get_by_label(label).click();
+        f.harness.step();
+        assert!(!opened_url(&f.harness), "{label} was opened");
+        f.harness.run();
+        f.harness
+            .get_by_label_contains("Only web links open from a note");
+        f.harness.get_by_label("Menu").click();
+        f.harness.key_press(Key::Escape);
+        f.harness.run();
+    }
 }
 
 #[test]
