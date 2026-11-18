@@ -319,7 +319,7 @@ mod tests {
             store.persist(&doc).unwrap();
             let (_store, reloaded) = reopen(&state);
             assert_eq!(reloaded, doc.alive_notes(), "cut at {cut}");
-            assert_eq!(reloaded[0].text, "one and three", "cut at {cut}");
+            assert_eq!(&*reloaded[0].text, "one and three", "cut at {cut}");
         }
     }
 
@@ -340,7 +340,7 @@ mod tests {
         store.persist(&doc).unwrap();
         let (_store, reloaded) = reopen(&state);
         assert_eq!(reloaded, doc.alive_notes());
-        assert_eq!(reloaded[0].text, "one and two");
+        assert_eq!(&*reloaded[0].text, "one and two");
     }
 
     #[test]
@@ -356,7 +356,7 @@ mod tests {
         store.persist(&doc).unwrap();
         let (_store, reloaded) = reopen(&state);
         assert_eq!(reloaded, doc.alive_notes());
-        assert_eq!(reloaded[0].text, "one and two");
+        assert_eq!(&*reloaded[0].text, "one and two");
     }
 
     #[test]
@@ -420,7 +420,7 @@ mod tests {
         let (_store, reloaded) = reopen(&state);
         assert_eq!(reloaded, doc.alive_notes());
         assert_eq!(reloaded.len(), 1);
-        assert_eq!(reloaded[0].text, "hello world");
+        assert_eq!(&*reloaded[0].text, "hello world");
     }
 
     #[test]
@@ -443,7 +443,7 @@ mod tests {
         let (_store, reloaded) = reopen(&state);
         assert_eq!(reloaded, empty.alive_notes());
         assert_eq!(reloaded.len(), 1);
-        assert_eq!(reloaded[0].text, "three");
+        assert_eq!(&*reloaded[0].text, "three");
     }
 
     #[test]

@@ -417,7 +417,7 @@ fn disk_follows_document(row: &Row<'_>) -> Option<Step> {
     let action = match (&row.file, row.note) {
         (Some(file), Some(note)) => DiskAction::Replace {
             path: file.path.clone(),
-            content: note.text.clone(),
+            content: note.text.to_string(),
             expect: file.hash,
         },
         (None, Some(note)) => create_file(note),
@@ -433,7 +433,7 @@ fn disk_follows_document(row: &Row<'_>) -> Option<Step> {
 fn create_file(note: &NoteView) -> DiskAction {
     DiskAction::Create {
         path: note.path.clone(),
-        content: note.text.clone(),
+        content: note.text.to_string(),
     }
 }
 
@@ -640,7 +640,7 @@ mod tests {
         NoteView {
             id: id(c),
             path: npath(path),
-            text: text.to_owned(),
+            text: text.into(),
             hash: h(text),
         }
     }

@@ -578,8 +578,8 @@ mod tests {
         let mut replica = dirs.open();
         let first = replica.reconcile().unwrap();
         assert!(first.doc_changed);
-        assert_eq!(note(&replica, "a.md").unwrap().text, "A\n");
-        assert_eq!(note(&replica, "d/b.md").unwrap().text, "B\n");
+        assert_eq!(&*note(&replica, "a.md").unwrap().text, "A\n");
+        assert_eq!(&*note(&replica, "d/b.md").unwrap().text, "B\n");
         assert_eq!(replica.doc.alive_notes().len(), 2);
         assert_eq!(replica.base.keys().count(), 2);
         let modified = |name: &str| std::fs::metadata(dirs.state_file(name)).unwrap().modified();
@@ -664,8 +664,8 @@ mod tests {
         dirs.remove("d/b.md");
         replica.reconcile().unwrap();
         let a = note(&replica, "a.md").unwrap();
-        assert_eq!((a.id, a.text.as_str()), (a_id, "A2\n"));
-        assert_eq!(note(&replica, "c.md").unwrap().text, "C\n");
+        assert_eq!((a.id, &*a.text), (a_id, "A2\n"));
+        assert_eq!(&*note(&replica, "c.md").unwrap().text, "C\n");
         assert!(note(&replica, "d/b.md").is_none());
         assert!(trash(&replica).is_empty());
     }
@@ -805,7 +805,7 @@ mod tests {
         replica.reconcile().unwrap();
         dirs.write("a.md", [0xff, 0xfe]);
         let outcome = replica.reconcile().unwrap();
-        assert_eq!(note(&replica, "a.md").unwrap().text, "A\n");
+        assert_eq!(&*note(&replica, "a.md").unwrap().text, "A\n");
         assert_eq!(std::fs::read(dirs.path("a.md")).unwrap(), [0xff, 0xfe]);
         assert_eq!(outcome.blocked.len(), 1);
         assert_eq!(outcome.blocked[0].path, "a.md");
@@ -929,7 +929,7 @@ mod tests {
             .doc
             .alive_notes()
             .into_iter()
-            .map(|n| n.text)
+            .map(|n| n.text.to_string())
             .collect();
         in_doc.sort_unstable();
         assert_eq!(in_doc, texts);
