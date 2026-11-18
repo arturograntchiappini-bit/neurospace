@@ -258,6 +258,7 @@ impl SecondBrainApp {
 
     fn save_settings(&mut self) {
         if let Err(error) = self.settings.save(&self.settings_path) {
+            eprintln!("secondbrain: could not save settings: {error}");
             let notice = Notice::error(format!("Could not save settings: {error}"));
             self.notices.post(notice, Instant::now());
         }

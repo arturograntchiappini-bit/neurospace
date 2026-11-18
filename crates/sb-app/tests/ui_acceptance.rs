@@ -13,9 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use eframe::App;
-use eframe::egui::{
-    Context, Event, Key, Modifiers, PointerButton, ViewportEvent, ViewportId,
-};
+use eframe::egui::{Context, Event, Key, Modifiers, PointerButton, ViewportEvent, ViewportId};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use sb_app::app::{AppOptions, SecondBrainApp};
@@ -183,7 +181,7 @@ fn should_find_note_by_search_and_graph() {
 
     press_command(&mut f.harness, Key::E);
     assert!(f.harness.state().is_previewing());
-    press_command(&mut f.harness, Key::G);
+    f.harness.key_press_modifiers(Modifiers::COMMAND, Key::G);
     run_until(&mut f.harness, "the graph to settle", |app| {
         app.graph_shown() && app.graph_settled()
     });
