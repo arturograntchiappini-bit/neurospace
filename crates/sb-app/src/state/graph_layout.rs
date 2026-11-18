@@ -8,6 +8,16 @@ use std::mem;
 
 use sb_core::Graph;
 
+use super::graph_viewport::Bounds;
+
+/// Above this many nodes the layout is not simulated: one step takes hundreds of milliseconds.
+///
+/// shortcut: the spiral layout stands in above the limit; M3b replaces the quadratic repulsion
+/// with Barnes-Hut and raises the limit.
+pub const SIMULATION_NODE_LIMIT: usize = 2000;
+/// After a wake the simulation takes at most this many steps, then counts as settled, so that a
+/// graph that keeps jittering never repaints for ever.
+pub const MAX_STEPS_PER_WAKE: usize = 1500;
 const SPIRAL_SPACING: f32 = 30.0;
 const GOLDEN_ANGLE: f32 = 2.39996;
 const REPULSION: f32 = 2000.0;
@@ -39,6 +49,7 @@ pub struct Layout {
     velocities: Vec<Point>,
     pinned: Option<usize>,
     last_move: f32,
+    steps_since_wake: usize,
 }
 
 /// Where node `i` starts: a sunflower spiral, so that no two nodes begin on top of each other.
@@ -57,6 +68,7 @@ impl Layout {
             velocities: Vec::new(),
             pinned: None,
             last_move: f32::INFINITY,
+            steps_since_wake: 0,
         };
         layout.update(graph);
         layout
@@ -86,7 +98,17 @@ impl Layout {
         self.velocities = vec![[0.0; 2]; self.nodes.len()];
         self.connect(graph);
         self.pinned = None;
-        self.last_move = f32::INFINITY;
+        self.wake();
+    }
+
+    /// Starts a fresh round of steps; a simplified layout has none to run and stays at rest.
+    fn wake(&mut self) {
+        self.steps_since_wake = 0;
+        self.last_move = if self.is_simplified() {
+            0.0
+        } else {
+            f32::INFINITY
+        };
     }
 
     /// Fills in each node's neighbours from the edges, ignoring direction, duplicates and
@@ -119,8 +141,13 @@ impl Layout {
     }
 
     /// One step of the simulation. Returns the largest distance any node moved, or would have
-    /// moved when it was pinned by `set_position`.
+    /// moved when it was pinned by `set_position`. Does nothing, and returns 0, for a simplified
+    /// layout.
     pub fn step(&mut self) -> f32 {
+        if self.is_simplified() {
+            return 0.0;
+        }
+        self.steps_since_wake += 1;
         let mut force = vec![[0.0; 2]; self.nodes.len()];
         self.repel(&mut force);
         self.attract(&mut force);
@@ -190,9 +217,33 @@ impl Layout {
         largest
     }
 
-    /// True when the last step moved every node less than a twentieth of a unit.
+    /// True when the last step moved every node less than a twentieth of a unit, or when
+    /// `MAX_STEPS_PER_WAKE` steps have run since the layout was last woken.
     pub fn is_settled(&self) -> bool {
-        self.last_move < SETTLED_BELOW
+        self.last_move < SETTLED_BELOW || self.steps_since_wake >= MAX_STEPS_PER_WAKE
+    }
+
+    /// True when the graph is too large to simulate (`SIMULATION_NODE_LIMIT`): the nodes stay on
+    /// their starting spiral, except where they are dragged.
+    pub fn is_simplified(&self) -> bool {
+        self.nodes.len() > SIMULATION_NODE_LIMIT
+    }
+
+    /// The index of the node with this id, if there is one.
+    pub fn index_of(&self, id: &str) -> Option<usize> {
+        self.nodes.iter().position(|node| node.id == id)
+    }
+
+    /// The box around every node's circle; `None` for an empty graph.
+    pub fn bounds(&self) -> Option<Bounds> {
+        let first = self.positions.first()?;
+        let (mut low, mut high) = (*first, *first);
+        for (i, at) in self.positions.iter().enumerate() {
+            let reach = self.radius(i);
+            low = [0, 1].map(|axis| low[axis].min(at[axis] - reach));
+            high = [0, 1].map(|axis| high[axis].max(at[axis] + reach));
+        }
+        Some((low, high))
     }
 
     /// Number of nodes.
@@ -215,7 +266,7 @@ impl Layout {
         self.positions[i] = p;
         self.velocities[i] = [0.0; 2];
         self.pinned = Some(i);
-        self.last_move = f32::INFINITY;
+        self.wake();
     }
 
     /// Radius of node `i` in layout units, growing with the square root of its link count.
@@ -420,5 +471,98 @@ mod tests {
         for i in 0..layout.len() {
             assert!(layout.position(i).iter().all(|c| c.is_finite()), "node {i}");
         }
+    }
+
+    fn unlinked(count: usize) -> Graph {
+        let ids: Vec<String> = (0..count).map(|i| format!("n{i}.md")).collect();
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        graph(&id_refs, &[])
+    }
+
+    /// `count` nodes and `links` pseudo-random edges, the same every run.
+    fn random_graph(count: usize, links: usize) -> Graph {
+        let mut state = 7_u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize % count
+        };
+        let mut graph = unlinked(count);
+        graph.edges = (0..links)
+            .map(|_| GraphEdge {
+                from: format!("n{}.md", next()),
+                to: format!("n{}.md", next()),
+            })
+            .collect();
+        graph
+    }
+
+    #[test]
+    fn should_not_simulate_above_the_node_limit() {
+        let mut layout = Layout::new(&unlinked(SIMULATION_NODE_LIMIT + 1));
+        assert!(layout.is_simplified());
+        assert!(
+            layout.is_settled(),
+            "a simplified layout is at rest at once"
+        );
+        let before: Vec<[f32; 2]> = (0..layout.len()).map(|i| layout.position(i)).collect();
+        assert_eq!(layout.step(), 0.0);
+        let after: Vec<[f32; 2]> = (0..layout.len()).map(|i| layout.position(i)).collect();
+        assert_eq!(before, after, "no step runs");
+        layout.set_position(0, [1.0, 2.0]);
+        assert!(
+            layout.is_settled(),
+            "a drag does not wake a simplified layout"
+        );
+        assert_eq!(layout.position(0), [1.0, 2.0]);
+    }
+
+    #[test]
+    fn should_still_simulate_at_the_node_limit() {
+        let mut layout = Layout::new(&unlinked(SIMULATION_NODE_LIMIT));
+        assert!(!layout.is_simplified());
+        assert!(!layout.is_settled());
+        assert!(layout.step() > 0.0);
+        let finite = (0..layout.len()).all(|i| layout.position(i).iter().all(|c| c.is_finite()));
+        assert!(finite);
+    }
+
+    #[test]
+    fn should_settle_within_the_step_cap_on_a_medium_random_graph() {
+        let mut layout = Layout::new(&random_graph(300, 450));
+        for _ in 0..MAX_STEPS_PER_WAKE {
+            layout.step();
+        }
+        assert!(layout.is_settled(), "the layout would repaint for ever");
+    }
+
+    #[test]
+    fn should_restart_the_step_count_when_woken() {
+        let mut layout = Layout::new(&random_graph(30, 45));
+        for _ in 0..MAX_STEPS_PER_WAKE {
+            layout.step();
+        }
+        layout.set_position(0, [900.0, 900.0]);
+        assert!(!layout.is_settled());
+    }
+
+    #[test]
+    fn should_find_node_by_id_and_bound_all_nodes() {
+        let g = graph(&["a.md", "b.md"], &[]);
+        let mut layout = Layout::new(&g);
+        let b = layout.index_of("b.md").unwrap();
+        assert_eq!(layout.id(b), "b.md");
+        assert_eq!(layout.index_of("zzz.md"), None);
+        layout.set_position(0, [-100.0, 50.0]);
+        layout.set_position(1, [200.0, -30.0]);
+        let ((x0, y0), (x1, y1)) = layout
+            .bounds()
+            .map(|(a, b)| ((a[0], a[1]), (b[0], b[1])))
+            .unwrap();
+        let reach = layout.radius(0);
+        assert_eq!((x0, y1), (-100.0 - reach, 50.0 + reach));
+        assert_eq!((x1, y0), (200.0 + reach, -30.0 - reach));
+        assert_eq!(Layout::new(&Graph::default()).bounds(), None);
     }
 }

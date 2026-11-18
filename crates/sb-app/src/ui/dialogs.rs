@@ -16,15 +16,16 @@ enum Choice {
     Cancel,
 }
 
-/// Shows the open dialog, if any, and carries out what the user chose.
+/// Shows the open dialog, if any, and carries out what the user chose. True when a note was
+/// created or renamed.
 pub fn show(
     ctx: &Context,
     p: &Palette,
     dialog: &mut Option<NoteDialog>,
     workspace: &mut Workspace,
-) {
+) -> bool {
     let Some(open) = dialog.as_mut() else {
-        return;
+        return false;
     };
     let frame = theme::document_frame(p).inner_margin(Margin::same(DIALOG_PADDING));
     let modal = Modal::new(Id::unique("note_dialog"))
@@ -42,6 +43,7 @@ pub fn show(
     if finished {
         *dialog = None;
     }
+    finished && choice == Some(Choice::Confirm)
 }
 
 fn contents(ui: &mut Ui, p: &Palette, dialog: &mut NoteDialog) -> Option<Choice> {

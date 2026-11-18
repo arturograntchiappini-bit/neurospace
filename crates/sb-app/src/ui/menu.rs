@@ -36,6 +36,8 @@ fn menu_items(ui: &mut Ui, settings: &mut Settings) -> MenuOutcome {
     ui.add_space(4.0);
     let reduce = ui.checkbox(&mut settings.reduce_transparency, "Reduce transparency");
     outcome.settings_changed |= reduce.changed();
+    let motion = ui.checkbox(&mut settings.reduce_motion, "Reduce motion");
+    outcome.settings_changed |= motion.changed();
     ui.add_space(4.0);
     outcome.settings_changed |= text_size_items(ui, settings);
     ui.add_space(4.0);

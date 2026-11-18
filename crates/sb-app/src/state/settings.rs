@@ -36,6 +36,8 @@ pub struct Settings {
     pub theme: ThemeChoice,
     /// Draw every panel fully opaque.
     pub reduce_transparency: bool,
+    /// Do not animate: the graph layout runs to rest at once.
+    pub reduce_motion: bool,
     /// Text size factor, 0.75 to 2.0.
     pub zoom: f32,
 }
@@ -46,6 +48,7 @@ impl Default for Settings {
             last_vault: None,
             theme: ThemeChoice::System,
             reduce_transparency: false,
+            reduce_motion: false,
             zoom: 1.0,
         }
     }
@@ -124,11 +127,26 @@ mod tests {
             last_vault: Some(PathBuf::from("some/vault")),
             theme: ThemeChoice::Dark,
             reduce_transparency: true,
+            reduce_motion: true,
             zoom: 1.5,
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
         assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn should_keep_motion_on_when_an_older_file_has_no_motion_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.json");
+        fs::write(
+            &path,
+            r#"{"theme": "dark", "reduce_transparency": true, "zoom": 1.5}"#,
+        )
+        .unwrap();
+        let settings = Settings::load(&path);
+        assert!(!settings.reduce_motion);
+        assert_eq!(settings.theme, ThemeChoice::Dark);
     }
 
     #[test]

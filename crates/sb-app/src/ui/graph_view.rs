@@ -4,26 +4,28 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    Align2, Button, Context, CornerRadius, FontId, Painter, Pos2, Rect, Response, Role, Sense,
-    Stroke, StrokeKind, TextStyle, Ui, Vec2, WidgetInfo, vec2,
+    Align2, Button, Context, CornerRadius, FontId, Key, Label, Painter, Pos2, Rect, Response,
+    RichText, Role, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
 use sb_core::{Graph, NotePath};
 
 use crate::state::graph_layout::Layout;
+use crate::state::graph_viewport::Viewport;
 use crate::state::{NoteAction, Workspace};
 use crate::ui::theme::Palette;
 
 const GRAPH_NAME: &str = "Graph of notes";
+const EMPTY_HINT: &str = "No notes yet";
+const SIMPLIFIED_HINT: &str = "Large vault: simplified layout";
 /// Time one frame may spend on layout steps; at least one step always runs.
 const STEP_BUDGET: Duration = Duration::from_millis(8);
-const MIN_ZOOM: f32 = 0.2;
-const MAX_ZOOM: f32 = 5.0;
+/// With «Reduce motion» a frame runs the layout to rest, but still not longer than this.
+const REDUCED_MOTION_BUDGET: Duration = Duration::from_millis(500);
 const SCROLL_ZOOM_RATE: f32 = 0.002;
 /// From this zoom on every node shows its label.
 const LABEL_ZOOM: f32 = 1.5;
 const DIMMED: f32 = 0.25;
 const GHOST_FILL: f32 = 0.5;
-const EDGE_ALPHA: f32 = 0.5;
 const EDGE_WIDTH: f32 = 1.0;
 const OUTLINE_WIDTH: f32 = 1.0;
 const OPEN_RING_WIDTH: f32 = 2.0;
@@ -35,10 +37,11 @@ const FOCUS_RING_WIDTH: f32 = 2.0;
 pub struct GraphView {
     layout: Layout,
     revision: Option<u64>,
-    pan: Vec2,
-    zoom: f32,
-    centre: Pos2,
-    dragging: Option<(usize, [f32; 2])>,
+    viewport: Viewport,
+    pane: Option<Rect>,
+    /// The note being dragged (by id: indices change when the layout updates) and where it goes.
+    dragging: Option<(String, [f32; 2])>,
+    reduce_motion: bool,
 }
 
 impl Default for GraphView {
@@ -46,10 +49,10 @@ impl Default for GraphView {
         GraphView {
             layout: Layout::new(&Graph::default()),
             revision: None,
-            pan: Vec2::ZERO,
-            zoom: 1.0,
-            centre: Pos2::ZERO,
+            viewport: Viewport::default(),
+            pane: None,
             dragging: None,
+            reduce_motion: false,
         }
     }
 }
@@ -58,7 +61,7 @@ impl Default for GraphView {
 pub struct GraphOutcome {
     /// A node was clicked.
     pub action: Option<NoteAction>,
-    /// «List view» was pressed.
+    /// «List view» was pressed, or Enter or Space on the focused graph.
     pub list_view: bool,
 }
 
@@ -72,34 +75,61 @@ struct Scene<'a> {
 }
 
 impl GraphView {
-    /// Draws the pane in the space left in `ui`: the «List view» button, then the graph.
+    /// Draws the pane in the space left in `ui`: the buttons, then the graph.
     pub fn show(&mut self, ui: &mut Ui, p: &Palette, workspace: &Workspace) -> GraphOutcome {
         self.follow(workspace);
-        let list_view = ui.add(Button::new("List view").frame_when_inactive(false));
+        let (list_view, fit) = self.buttons(ui, p);
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
-        response.widget_info(|| WidgetInfo::labeled(Role::Image, true, GRAPH_NAME));
-        self.centre = response.rect.center();
+        response.widget_info(|| WidgetInfo::labeled(Role::Canvas, true, GRAPH_NAME));
+        self.pane = Some(response.rect);
+        let (activated, home) = focused_keys(ui, &response);
+        if fit || home {
+            self.fit();
+        }
         self.navigate(ui, &response);
         self.settle(ui.ctx());
         let hovered = response
             .hover_pos()
             .and_then(|at| self.layout.node_at(self.to_world(at)));
-        let scene = Scene {
+        self.paint(&Scene {
             painter: &painter,
             palette: p,
             label_font: TextStyle::Small.resolve(ui.style()),
             open: workspace.open_note().map(|open| open.path.as_str()),
             hovered,
-        };
-        self.paint(&scene);
+        });
         if response.has_focus() {
-            let ring = Stroke::new(FOCUS_RING_WIDTH, p.accent.to_color32());
-            painter.rect_stroke(response.rect, CornerRadius::ZERO, ring, StrokeKind::Inside);
+            paint_focus_ring(&painter, p, response.rect);
         }
+        self.show_empty_hint(ui, p, response.rect);
         GraphOutcome {
-            action: self.clicked_node(&response),
-            list_view: list_view.clicked(),
+            action: self.clicked_node(&response).filter(|_| !activated),
+            list_view: list_view || activated,
         }
+    }
+
+    /// A line in the middle of `pane` when there are no notes.
+    fn show_empty_hint(&self, ui: &mut Ui, p: &Palette, pane: Rect) {
+        if self.layout.is_empty() {
+            let hint = RichText::new(EMPTY_HINT).color(p.text_secondary.to_color32());
+            ui.put(pane, Label::new(hint).selectable(false));
+        }
+    }
+
+    /// «List view», «Fit graph» and, for a large vault, the note about the simplified layout.
+    /// Returns whether the first two were pressed.
+    fn buttons(&self, ui: &mut Ui, p: &Palette) -> (bool, bool) {
+        let flat = |text| Button::new(text).frame_when_inactive(false);
+        ui.horizontal(|ui| {
+            let list_view = ui.add(flat("List view")).clicked();
+            let fit = ui.add(flat("Fit graph")).clicked();
+            if self.layout.is_simplified() {
+                let hint = RichText::new(SIMPLIFIED_HINT).color(p.text_secondary.to_color32());
+                ui.label(hint);
+            }
+            (list_view, fit)
+        })
+        .inner
     }
 
     /// True when the layout has come to rest.
@@ -107,12 +137,24 @@ impl GraphView {
         self.layout.is_settled()
     }
 
+    /// Sets whether the layout runs to rest at once instead of animating.
+    pub fn set_reduce_motion(&mut self, reduce: bool) {
+        self.reduce_motion = reduce;
+    }
+
+    /// The area the graph was drawn in last frame. Used by tests.
+    pub fn pane_rect(&self) -> Option<Rect> {
+        self.pane
+    }
+
     /// Where node `id` was drawn last frame, if there is such a node. Used by tests.
     pub fn node_rect(&self, id: &str) -> Option<Rect> {
-        let i = (0..self.layout.len()).find(|&i| self.layout.id(i) == id)?;
-        let side = 2.0 * self.layout.radius(i) * self.zoom;
-        let centre = self.to_screen(self.layout.position(i));
-        Some(Rect::from_center_size(centre, vec2(side, side)))
+        let i = self.layout.index_of(id)?;
+        let (centre, radius) = self.disc(i);
+        Some(Rect::from_center_size(
+            centre,
+            vec2(2.0 * radius, 2.0 * radius),
+        ))
     }
 
     /// Rebuilds the layout when the index changed since the last frame.
@@ -124,13 +166,26 @@ impl GraphView {
         }
     }
 
+    fn centre(&self) -> [f32; 2] {
+        let centre = self.pane.map_or(Pos2::ZERO, |pane| pane.center());
+        [centre.x, centre.y]
+    }
+
     fn to_screen(&self, p: [f32; 2]) -> Pos2 {
-        self.centre + self.pan + vec2(p[0], p[1]) * self.zoom
+        let [x, y] = self.viewport.to_screen(self.centre(), p);
+        pos2(x, y)
     }
 
     fn to_world(&self, at: Pos2) -> [f32; 2] {
-        let offset = (at - self.centre - self.pan) / self.zoom;
-        [offset.x, offset.y]
+        self.viewport.to_world(self.centre(), [at.x, at.y])
+    }
+
+    /// Shows every node in the pane.
+    fn fit(&mut self) {
+        let size = self
+            .pane
+            .map_or([1.0; 2], |pane| [pane.width(), pane.height()]);
+        self.viewport.fit(self.layout.bounds(), size);
     }
 
     fn navigate(&mut self, ui: &Ui, response: &Response) {
@@ -138,14 +193,11 @@ impl GraphView {
             self.zoom_about(ui, pointer);
         }
         if response.drag_started() {
-            let origin = ui.input(|input| input.pointer.press_origin());
-            let node = origin.and_then(|at| self.layout.node_at(self.to_world(at)));
-            self.dragging = node.map(|i| (i, self.layout.position(i)));
+            self.start_drag(ui);
         }
         if response.dragged() {
             self.drag_by(response.drag_delta());
-        }
-        if response.drag_stopped() {
+        } else {
             self.dragging = None;
         }
     }
@@ -153,33 +205,51 @@ impl GraphView {
     /// Scroll (or pinch) zooms, keeping the point under `pointer` where it is.
     fn zoom_about(&mut self, ui: &Ui, pointer: Pos2) {
         let (scroll, pinch) = ui.input(|input| (input.smooth_scroll_delta().y, input.zoom_delta()));
-        let wanted = self.zoom * pinch * (scroll * SCROLL_ZOOM_RATE).exp();
-        let zoom = wanted.clamp(MIN_ZOOM, MAX_ZOOM);
-        let anchor = pointer - self.centre;
-        self.pan = anchor - (anchor - self.pan) * (zoom / self.zoom);
-        self.zoom = zoom;
+        let factor = pinch * (scroll * SCROLL_ZOOM_RATE).exp();
+        let offset = pointer - self.pane.map_or(Pos2::ZERO, |pane| pane.center());
+        self.viewport.zoom_about([offset.x, offset.y], factor);
     }
 
-    /// Moves the node being dragged, or else the whole view.
+    /// A press on a node starts moving it; a press on the background pans the view.
+    fn start_drag(&mut self, ui: &Ui) {
+        let origin = ui.input(|input| input.pointer.press_origin());
+        let node = origin.and_then(|at| self.layout.node_at(self.to_world(at)));
+        self.dragging = node.map(|i| (self.layout.id(i).to_owned(), self.layout.position(i)));
+    }
+
+    /// Moves the node being dragged, or else the whole view. A node that has left the graph
+    /// since the drag began is not moved, and nothing else moves in its place.
     fn drag_by(&mut self, delta: Vec2) {
-        let Some((node, at)) = self.dragging.as_mut() else {
-            self.pan += delta;
+        let Some((id, at)) = self.dragging.as_mut() else {
+            self.viewport.pan_by([delta.x, delta.y]);
             return;
         };
-        at[0] += delta.x / self.zoom;
-        at[1] += delta.y / self.zoom;
-        self.layout.set_position(*node, *at);
+        let Some(node) = self.layout.index_of(id) else {
+            return;
+        };
+        at[0] += delta.x / self.viewport.zoom;
+        at[1] += delta.y / self.viewport.zoom;
+        self.layout.set_position(node, *at);
     }
 
     /// Runs layout steps for a frame and asks for the next frame while the layout still moves.
     fn settle(&mut self, ctx: &Context) {
+        let dragged = self
+            .dragging
+            .as_ref()
+            .and_then(|(id, at)| Some((self.layout.index_of(id)?, *at)));
+        let budget = if self.reduce_motion && dragged.is_none() {
+            REDUCED_MOTION_BUDGET
+        } else {
+            STEP_BUDGET
+        };
         let started = Instant::now();
         while !self.layout.is_settled() {
-            if let Some((node, at)) = self.dragging {
+            if let Some((node, at)) = dragged {
                 self.layout.set_position(node, at);
             }
             self.layout.step();
-            if started.elapsed() >= STEP_BUDGET {
+            if started.elapsed() >= budget {
                 break;
             }
         }
@@ -218,18 +288,19 @@ impl GraphView {
     }
 
     fn paint_edges(&self, scene: &Scene) {
-        let colour = scene.palette.text_secondary.to_color32();
+        let colour = scene.palette.edge.to_color32();
         for i in 0..self.layout.len() {
             for &j in self.layout.neighbours(i).iter().filter(|&&j| j > i) {
                 let touched = scene.hovered.is_none_or(|h| h == i || h == j);
-                let alpha = if touched {
-                    EDGE_ALPHA
+                let shade = if touched {
+                    colour
                 } else {
-                    EDGE_ALPHA * DIMMED
+                    colour.gamma_multiply(DIMMED)
                 };
                 let ends = [i, j].map(|n| self.to_screen(self.layout.position(n)));
-                let stroke = Stroke::new(EDGE_WIDTH, colour.gamma_multiply(alpha));
-                scene.painter.line_segment(ends, stroke);
+                scene
+                    .painter
+                    .line_segment(ends, Stroke::new(EDGE_WIDTH, shade));
             }
         }
     }
@@ -245,7 +316,7 @@ impl GraphView {
             let ring_radius = radius + OPEN_RING_GAP;
             scene.painter.circle_stroke(centre, ring_radius, ring);
         }
-        if self.zoom >= LABEL_ZOOM || scene.hovered == Some(i) {
+        if self.viewport.zoom >= LABEL_ZOOM || scene.hovered == Some(i) {
             self.paint_label(scene, i);
         }
     }
@@ -253,7 +324,7 @@ impl GraphView {
     /// Screen position and radius of node `i`.
     fn disc(&self, i: usize) -> (Pos2, f32) {
         let centre = self.to_screen(self.layout.position(i));
-        (centre, self.layout.radius(i) * self.zoom)
+        (centre, self.layout.radius(i) * self.viewport.zoom)
     }
 
     /// A note is a filled accent disc; a ghost is a half-transparent disc with an outline.
@@ -286,12 +357,26 @@ impl GraphView {
             .gamma_multiply(strength);
         let (centre, radius) = self.disc(i);
         let at = centre + vec2(0.0, radius + LABEL_GAP);
-        scene.painter.text(
-            at,
-            Align2::CENTER_TOP,
-            text,
-            scene.label_font.clone(),
-            colour,
-        );
+        let font = scene.label_font.clone();
+        scene
+            .painter
+            .text(at, Align2::CENTER_TOP, text, font, colour);
     }
+}
+
+fn paint_focus_ring(painter: &Painter, p: &Palette, pane: Rect) {
+    let ring = Stroke::new(FOCUS_RING_WIDTH, p.accent.to_color32());
+    painter.rect_stroke(pane, CornerRadius::ZERO, ring, StrokeKind::Inside);
+}
+
+/// Enter or Space (activate: open the list view) and Home (fit) pressed while the graph has
+/// the keyboard focus.
+fn focused_keys(ui: &Ui, response: &Response) -> (bool, bool) {
+    if !response.has_focus() {
+        return (false, false);
+    }
+    ui.input(|input| {
+        let activated = input.key_pressed(Key::Enter) || input.key_pressed(Key::Space);
+        (activated, input.key_pressed(Key::Home))
+    })
 }

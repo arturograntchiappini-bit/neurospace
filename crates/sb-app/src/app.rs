@@ -173,6 +173,11 @@ impl SecondBrainApp {
         self.view.graph_view.is_settled()
     }
 
+    /// The area the graph was drawn in last frame. Used by tests.
+    pub fn graph_pane_rect(&self) -> Option<Rect> {
+        self.view.graph_view.pane_rect()
+    }
+
     /// Where the graph drew node `id` last frame. Used by tests.
     pub fn graph_node_rect(&self, id: &str) -> Option<Rect> {
         self.view.graph_view.node_rect(id)
@@ -313,10 +318,14 @@ impl SecondBrainApp {
         let bar_outcome = shell::top_bar(ui, palette, bar);
         shell::status_strip(ui, palette, &mut self.notices, workspace);
         let side = show_panels(ui, palette, workspace, &mut self.view);
+        self.view
+            .graph_view
+            .set_reduce_motion(self.settings.reduce_motion);
         let centre = shell::document_area(ui, palette, |ui| {
             show_centre(ui, palette, workspace, &mut self.view)
         });
-        dialogs::show(ui.ctx(), palette, &mut self.view.dialog, workspace);
+        let created = dialogs::show(ui.ctx(), palette, &mut self.view.dialog, workspace);
+        self.view.graph &= !created;
         let found = quick_open::show(ui.ctx(), palette, &mut self.view.quick_open, workspace);
         let from_graph = self.view.graph && side.is_none() && centre.is_some();
         self.run_action(side.or(centre).or(found), from_graph);

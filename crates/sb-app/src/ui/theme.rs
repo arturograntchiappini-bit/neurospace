@@ -74,6 +74,8 @@ pub struct Palette {
     pub hover: Rgba,
     /// Fill of the selected item.
     pub selection: Rgba,
+    /// Links drawn in the graph: at least 3 : 1 against the document surface (WCAG 1.4.11).
+    pub edge: Rgba,
     /// Top of the simulated backdrop gradient.
     pub backdrop_top: Rgba,
     /// Bottom of the simulated backdrop gradient.
@@ -120,6 +122,7 @@ fn light(glass_alpha: u8) -> Palette {
         highlight: rgba(255, 255, 255, 128),
         hover: rgba(0, 0, 0, 15),
         selection: SELECTION,
+        edge: rgba(0x8A, 0x8A, 0x90, 255),
         backdrop_top: rgba(0xF2, 0xF2, 0xF4, 255),
         backdrop_bottom: rgba(0xE9, 0xE9, 0xEC, 255),
         shadow: shadow(20),
@@ -137,6 +140,7 @@ fn dark(glass_alpha: u8) -> Palette {
         highlight: rgba(255, 255, 255, 26),
         hover: rgba(255, 255, 255, 15),
         selection: SELECTION,
+        edge: rgba(0x77, 0x77, 0x7D, 255),
         backdrop_top: rgba(0x1E, 0x1E, 0x20, 255),
         backdrop_bottom: rgba(0x18, 0x18, 0x1A, 255),
         shadow: shadow(77),
@@ -443,6 +447,21 @@ mod tests {
             apply(&ctx, theme, &p);
             let fill = ctx.style_of(theme).visuals.window_fill;
             assert_eq!(fill, p.document.to_color32(), "{theme:?}");
+        }
+    }
+
+    #[test]
+    fn should_draw_graph_edges_with_non_text_contrast_of_three_on_the_document() {
+        for theme in THEMES {
+            for material in MATERIALS {
+                let p = palette(theme, material);
+                assert_eq!(p.edge.a, 255, "{theme:?} {material:?}: edges are opaque");
+                let ratio = contrast_ratio(p.edge, p.document);
+                assert!(
+                    ratio >= 3.0,
+                    "{theme:?} {material:?}: edge contrast {ratio:.2}"
+                );
+            }
         }
     }
 
