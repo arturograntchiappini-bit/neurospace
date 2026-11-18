@@ -149,16 +149,6 @@ impl Workspace {
         Ok(())
     }
 
-    /// Saves a dirty open note, then closes it; a failed save keeps it open.
-    ///
-    /// # Errors
-    /// The save error, or `InvalidInput` when the open note changed on disk.
-    pub fn close(&mut self) -> Result<()> {
-        self.save_or_stop()?;
-        self.open = None;
-        Ok(())
-    }
-
     /// Replaces the buffer of the open note; does nothing when no note is open.
     pub fn edit(&mut self, text: String, now: Instant) {
         let Some(open) = self.open.as_mut().filter(|open| open.buffer != text) else {
@@ -659,9 +649,8 @@ mod tests {
         set_readonly(&file, true);
         let failed = ws.save();
         let switched = ws.select(&p("a.md"));
-        let closed = ws.close();
         set_readonly(&file, false);
-        assert!(failed.is_err() && switched.is_err() && closed.is_err());
+        assert!(failed.is_err() && switched.is_err());
         let open = ws.open_note().unwrap();
         assert_eq!(open.buffer, "typed");
         assert!(open.is_dirty());
@@ -727,8 +716,6 @@ mod tests {
         let open = ws.open_note().unwrap();
         assert_eq!((open.path.as_str(), open.buffer.as_str()), ("a.md", "mine"));
         assert!(open.is_dirty());
-        assert!(matches!(ws.close(), Err(CoreError::InvalidInput(_))));
-        assert!(ws.open_note().is_some());
     }
 
     #[test]
@@ -791,9 +778,8 @@ mod tests {
         assert_eq!(on_disk(&dir, "a.md"), "a edited");
         assert_eq!(ws.open_note().unwrap().buffer, "b");
         ws.edit("b edited".into(), Instant::now());
-        ws.close().unwrap();
+        ws.save().unwrap();
         assert_eq!(on_disk(&dir, "b.md"), "b edited");
-        assert!(ws.open_note().is_none());
     }
 
     #[test]

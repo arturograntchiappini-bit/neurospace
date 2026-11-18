@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-18
+
+### Added
+
+- Desktop app `secondbrain` (new crate `sb-app`, `eframe`/`egui` with OpenGL): a welcome screen, then a window with a top bar, the file tree and search on the left, the open note in the middle, backlinks, outgoing links and tags on the right and a status strip. `secondbrain [VAULT_DIR]` reopens the last vault when no folder is given.
+- Notes: an editor with Markdown colouring, a preview with clickable wikilinks (a link to a note that does not exist yet creates it, an attachment link never does, only `http` and `https` links open outside the app), quick open, create, rename and delete (to the vault's trash) from the tree, and the shortcuts Ctrl+N, Ctrl+O, Ctrl+E, Ctrl+G, Ctrl+F and Ctrl+Plus, Ctrl+Minus, Ctrl+0.
+- Saving: autosave 500 ms after the last keystroke, on focus loss, on switching notes, on opening another vault and on exit. The vault folder is followed, so an external edit of the open note appears shortly after; unsaved edits that meet a changed or removed file go to a `<name> (conflict <id>).md` note, also when the window closes or another vault is opened. A save that fails keeps the text in the editor and shows the error; closing the window then asks twice.
+- Graph view (Ctrl+G or «Graph»): a force-directed layout with pan, zoom about the cursor, node dragging, hover highlighting, labels when zoomed in, «Fit graph» (and Home), «List view» (and Enter) for keyboard users, a click that opens a note for editing or creates a not-yet-created one. Above 2000 notes the layout is not simulated («Large vault: simplified layout»). The «Reduce motion» setting (`reduce_motion` in `app.json`) runs the layout to rest at once.
+- Sync window («Sync» in the top bar or the status strip): create an invite (ticket in a read-only field with «Copy»), join a pasted ticket, turn sync off, switch between Internet and LAN only, and see this device's id, the peers, blocked notes with their reason and the relay. The engine runs on a background thread and starts with a vault only when it already has a sync group (or when you invite or join), so a vault that never used sync never contacts the network; when another process runs the engine the window is read-only; switching vault and exit stop the engine (waiting up to 10 seconds). The ticket never appears in notices, logs or `Debug` output.
+- Look and accessibility: glass tool areas over a neutral backdrop (Windows Mica where the system accepts it, simulated glass elsewhere), a solid document surface, «Reduce transparency», theme System, Light or Dark, text size 75 % to 200 %, Inter 4.1 embedded under the SIL Open Font License 1.1, a visible focus ring, an accessible name on every field and symbol button, nothing conveyed by colour alone, and a test that every text colour has a WCAG 2 contrast of at least 4.5 : 1 on every surface it can meet.
+- Quitting and opening another vault run the same steps (save the open note or keep it in a conflict note, save the settings, stop the sync engine); a failure while quitting is written to stderr, a failure while opening another vault keeps you on the vault.
+- `sb_core::ops::create_note` (never replaces a note, adopts existing folder spelling), `new_note_path` (the path a click on an unresolved link creates, spec 6.6), `ATTACHMENT_EXTENSIONS` with `Link::is_attachment` and `is_attachment_target`, and `StateDir::save_config` in `sb-sync`.
+- Headless UI tests (`egui_kittest`) that drive the real UI from the welcome screen: note lifecycle, search and graph, external edit, sync window and the exit path.
+
+### Changed
+
+- Attachment links (`![[image.png]]`, `[[report.pdf]]`) are no longer ghost notes in the graph: they produce no node and no edge.
+- The ghost of a `./` or `/` link is named by the note a click would create, so `[[./new]]` in two folders gives two ghosts; ghosts of plain names are unchanged. A link for which no valid note path exists produces no ghost.
+
+### Fixed
+
+- On exit, text typed into a note that had changed on disk in the meantime was dropped; it now goes to a conflict note.
+
+## [0.2.0] - 2026-11-17
+
+Core, command line, MCP server and sync (milestones M1 and M2).
+
 ### Added
 
 - `sb` command line: `list`, `read`, `write`, `append`, `delete`, `rename`, `search`, `links`, `graph` and `tags`, with text or `--json` output.
@@ -15,15 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sb sync run`, `invite`, `join <TICKET>`, `leave` and `status`: pair devices with a ticket, run the engine in the foreground (log on stderr, clean stop on Ctrl+C or SIGTERM) and inspect it, with `--json` output.
 - `sb sync status` shows the relay the device reached (`relay: <url>`, or a hint to check the firewall in `internet` mode when there is none yet), and `status.json` and `sb sync status --json` carry the number of rejected entries of the sync document.
 
-- Desktop app: the note editor with Markdown colouring, the preview with clickable wikilinks, quick open (Ctrl+O), the shortcuts Ctrl+N, Ctrl+O, Ctrl+E, Ctrl+G and Ctrl+F, autosave after 500 ms, on focus loss, on switching notes or vaults and on exit, and following the vault folder so an external edit of the open note appears shortly after (unsaved edits go to a conflict note). Closing the window with unsaved text that cannot be saved keeps it open until you close again.
-- Desktop app: the graph view (Ctrl+G or «Graph»): a force-directed layout with pan, zoom about the cursor and node dragging, hover highlighting, labels when zoomed in, «Fit graph» (and Home), a «List view» button (and Enter on the focused graph) that opens quick open, a click on a note that opens it for editing and a click on a not-yet-created note that creates it. Creating a note from the New dialog also leaves the graph. Above 2000 notes the layout is not simulated and the pane says «Large vault: simplified layout»; the layout stops after 1500 steps at most. The new «Reduce motion» setting in the menu (`reduce_motion` in `app.json`) runs the layout to rest at once. Graph links have their own colour token with at least 3 : 1 contrast against the document surface.
-- Desktop app: the sync window («Sync» in the top bar or the sync summary in the status strip). It creates an invite (ticket in a read-only field with «Copy»), joins a pasted ticket, turns sync off, switches between Internet and LAN only, and lists this device's id, the peers (online or offline), blocked notes with their reason and the relay. The sync engine runs on a background thread: it starts with a vault only when the vault already has a sync group (or when you invite or join), so a vault that never used sync never contacts the network; when another process runs the engine the window shows its status read-only; vault switch and exit stop the engine. The ticket never appears in notices, logs or `Debug` output.
-- `sb_core::ops::create_note` (never replaces a note, adopts existing folder spelling), `new_note_path` (the path a click on an unresolved link creates, spec 6.6), `ATTACHMENT_EXTENSIONS` with `Link::is_attachment` and `is_attachment_target`, and `StateDir::save_config` in `sb-sync`.
-
 ### Changed
 
-- Attachment links (`![[image.png]]`, `[[report.pdf]]`) are no longer ghost notes in the graph: they produce no node and no edge.
-- The ghost of a `./` or `/` link is named by the note a click would create, so `[[./new]]` in two folders gives two ghosts; ghosts of plain names are unchanged. A link for which no valid note path exists produces no ghost.
 - Reading a note larger than 4 MiB is refused instead of loading it; writing over a note that is a symbolic link is refused; replacing a note keeps its file permissions.
 - The folder filter of `list` and `list_notes` is validated like a note path (`Projects\Sub`, `../x`, `./projects` and hidden folders are errors) and accepts one trailing `/`.
 - Note paths reject more Windows device names (`CON .md` with trailing spaces, `COM0`, `LPT0`, `COM¹`–`COM³`, `LPT¹`–`LPT³`, `CONIN$`, `CONOUT$`), because a Linux peer may legally hold such names.

@@ -467,10 +467,19 @@ impl SecondBrainApp {
             return;
         }
         if let Err(text) = self.save_for_close() {
+            let text = format!("{text}. Close again to quit without saving");
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.notices.post(Notice::error(text.clone()), now);
             self.close_warning = Some(text);
         }
+    }
+
+    /// The steps that quitting and opening another vault share: the open note is saved (or kept
+    /// in a conflict note), then the settings. Err says why the note could not be kept.
+    fn flush(&mut self) -> Result<(), String> {
+        let note = self.save_for_close();
+        self.save_settings();
+        note
     }
 
     fn save_for_close(&mut self) -> Result<(), String> {
@@ -480,7 +489,7 @@ impl SecondBrainApp {
         let path = workspace.open_note().map(|open| open.path.to_string());
         let failed = |error: sb_core::CoreError| {
             let path = path.clone().unwrap_or_default();
-            format!("Could not save {path}: {error}. Close again to quit without saving")
+            format!("Could not save {path}: {error}")
         };
         match workspace.save() {
             Ok(Saved::Nothing | Saved::Written) => Ok(()),
@@ -553,25 +562,16 @@ impl SecondBrainApp {
         }
     }
 
-    /// Closes the vault (saving its open note) and returns to the welcome screen.
+    /// Closes the vault (after the shared shutdown steps) and returns to the welcome screen.
+    /// The engine is asked to stop without waiting: the UI thread never blocks on it.
     fn leave_vault(&mut self) {
-        if !self.save_open_note() {
+        if let Err(text) = self.flush() {
+            self.notices.post(Notice::error(text), Instant::now());
             return;
         }
-        let Screen::Vault(workspace) = &mut self.screen else {
-            return;
-        };
-        match workspace.close() {
-            Ok(()) => {
-                self.screen = Screen::Welcome;
-                self.view.reloader = None;
-                self.sync.stop_for_leaving();
-            }
-            Err(error) => {
-                let notice = Notice::error(format!("Could not close the note: {error}"));
-                self.notices.post(notice, Instant::now());
-            }
-        }
+        self.screen = Screen::Welcome;
+        self.view.reloader = None;
+        self.sync.stop_for_leaving();
     }
 }
 
@@ -639,9 +639,12 @@ impl eframe::App for SecondBrainApp {
         self.show(ui);
     }
 
-    /// A window closed within the autosave delay must not lose what was typed.
+    /// The window is closing: the shared shutdown steps, then the engine is stopped and waited
+    /// for. Nothing is drawn any more, so a failure goes to stderr.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.save_open_note();
+        if let Err(text) = self.flush() {
+            eprintln!("secondbrain: {text}");
+        }
         self.sync.shut_down();
     }
 
