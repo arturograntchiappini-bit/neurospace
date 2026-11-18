@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ns_core::{NotePath, Vault};
 use ns_sync::{LocalReplica, StateDir};
@@ -29,7 +29,15 @@ fn write_vault(root: &Path) {
     for i in 0..NOTES {
         let path = root.join(note_rel(i));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, note_text(i)).unwrap();
+        fs::write(&path, note_text(i)).unwrap();
+        // Old mtime: a real vault's files are not "racy" (spec 5.3).
+        let aged = SystemTime::now() - Duration::from_secs(60);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(aged)
+            .unwrap();
     }
 }
 
