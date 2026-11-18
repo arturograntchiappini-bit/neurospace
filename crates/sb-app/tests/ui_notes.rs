@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{Key, Modifiers};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use sb_app::app::SecondBrainApp;
 use tempfile::TempDir;
 
@@ -313,6 +313,33 @@ fn should_open_note_menu_with_menu_key() {
     f.harness.run();
     click_label(&mut f.harness, "Rename…");
     f.harness.get_by_label("New name");
+}
+
+#[test]
+fn should_choose_a_menu_item_with_arrow_down_and_enter_after_the_menu_key() {
+    let mut f = open_fixture();
+    focus_row(&mut f.harness, "b");
+    f.harness.key_press(Key::Menu);
+    f.harness.run();
+    f.harness.key_press(Key::ArrowDown);
+    f.harness.run();
+    press_enter(&mut f.harness);
+    f.harness.get_by_label("New name");
+}
+
+#[test]
+fn should_return_the_focus_to_the_row_when_its_menu_closes_with_escape() {
+    let mut f = open_fixture();
+    focus_row(&mut f.harness, "b");
+    f.harness.key_press(Key::Menu);
+    f.harness.run();
+    f.harness.key_press(Key::Escape);
+    f.harness.run();
+    assert!(
+        f.harness.query_by_label("Rename…").is_none(),
+        "menu still open"
+    );
+    assert!(f.harness.get_by_label("b").accesskit_node().is_focused());
 }
 
 #[test]

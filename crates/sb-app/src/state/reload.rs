@@ -239,10 +239,7 @@ mod tests {
         let notices = reload(&mut ws, &mut reloader, Instant::now());
         assert!(notices.is_empty(), "{notices:?}");
         let open = ws.open_note().unwrap();
-        assert_eq!(
-            (open.buffer.as_str(), open.saved.as_str()),
-            ("theirs", "theirs")
-        );
+        assert_eq!((open.buffer(), open.saved.as_str()), ("theirs", "theirs"));
         assert!(!open.is_dirty() && !open.autosave_paused);
         assert!(conflict_files(&dir).is_empty());
     }
@@ -256,10 +253,7 @@ mod tests {
         let notices = reload(&mut ws, &mut reloader, Instant::now());
         let open = ws.open_note().unwrap();
         assert_eq!(open.path, p("n.md"));
-        assert_eq!(
-            (open.buffer.as_str(), open.saved.as_str()),
-            ("theirs", "theirs")
-        );
+        assert_eq!((open.buffer(), open.saved.as_str()), ("theirs", "theirs"));
         assert!(!open.is_dirty() && !open.autosave_paused);
         let names = conflict_files(&dir);
         assert_eq!(names.len(), 1, "{names:?}");
@@ -301,10 +295,7 @@ mod tests {
         assert_eq!(kept, "mine");
         let open = ws.open_note().unwrap();
         assert_eq!(open.path, p(&names[0]));
-        assert_eq!(
-            (open.buffer.as_str(), open.saved.as_str()),
-            ("mine", "mine")
-        );
+        assert_eq!((open.buffer(), open.saved.as_str()), ("mine", "mine"));
         assert!(!open.is_dirty() && !open.autosave_paused);
         assert_eq!(notices.len(), 1);
         assert!(notices[0].text.contains(&names[0]));
@@ -319,7 +310,7 @@ mod tests {
         let notices = reload(&mut ws, &mut reloader, Instant::now());
         assert!(notices.is_empty(), "{notices:?}");
         assert!(conflict_files(&dir).is_empty());
-        assert_eq!(ws.open_note().unwrap().buffer, "mine");
+        assert_eq!(ws.open_note().unwrap().buffer(), "mine");
     }
 
     #[test]
@@ -333,10 +324,7 @@ mod tests {
         let outcome = ws.apply_index(built_before_save, tag);
         assert!(matches!(outcome, ApplyOutcome::Stale));
         let open = ws.open_note().unwrap();
-        assert_eq!(
-            (open.buffer.as_str(), open.saved.as_str()),
-            ("mine", "mine")
-        );
+        assert_eq!((open.buffer(), open.saved.as_str()), ("mine", "mine"));
         assert_eq!(fs::read_to_string(dir.path().join("n.md")).unwrap(), "mine");
         assert_eq!(ws.index().get(&p("n.md").key()).unwrap().content, "mine");
     }
@@ -460,7 +448,7 @@ mod tests {
             ApplyOutcome::Stale
         ));
         let open = ws.open_note().unwrap();
-        assert_eq!((open.buffer.as_str(), open.saved.as_str()), ("new", "new"));
+        assert_eq!((open.buffer(), open.saved.as_str()), ("new", "new"));
         assert!(conflict_files(&dir).is_empty());
     }
 
@@ -474,10 +462,7 @@ mod tests {
         assert!(notices.is_empty(), "{notices:?}");
         assert!(conflict_files(&dir).is_empty());
         let open = ws.open_note().unwrap();
-        assert_eq!(
-            (open.buffer.as_str(), open.saved.as_str()),
-            ("same", "same")
-        );
+        assert_eq!((open.buffer(), open.saved.as_str()), ("same", "same"));
         assert!(!open.is_dirty() && !open.autosave_paused);
     }
 
@@ -510,7 +495,7 @@ mod tests {
         assert_eq!(notices[0].kind, NoticeKind::Error);
         let open = ws.open_note().unwrap();
         assert_eq!(open.path, p("n.md"));
-        assert_eq!((open.buffer.as_str(), open.saved.as_str()), ("mine", "old"));
+        assert_eq!((open.buffer(), open.saved.as_str()), ("mine", "old"));
         assert!(open.is_dirty());
         assert!(conflict_files(&dir).is_empty());
     }
@@ -552,7 +537,7 @@ mod tests {
         assert!(notices[0].text.starts_with("Could not reload the vault: "));
         assert_eq!(ws.index().len(), 1);
         let open = ws.open_note().unwrap();
-        assert_eq!((open.buffer.as_str(), open.saved.as_str()), ("mine", "old"));
+        assert_eq!((open.buffer(), open.saved.as_str()), ("mine", "old"));
         assert!(open.is_dirty());
     }
 

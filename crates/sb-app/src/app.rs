@@ -9,6 +9,7 @@ use eframe::egui::{
     CentralPanel, Context, Key, KeyboardShortcut, Modifiers, Rect, Theme, ThemePreference, Ui,
     ViewportCommand, Visuals,
 };
+use raw_window_handle::HasWindowHandle;
 use sb_core::Result as CoreResult;
 
 use crate::platform;
@@ -21,7 +22,7 @@ use crate::state::{
 use crate::sync_control::EngineControl;
 use crate::sync_host::{ControlFactory, SyncHost};
 use crate::ui::editor::{self, EditorState};
-use crate::ui::graph_view::GraphView;
+use crate::ui::graph_view::{GraphView, StepBudgets};
 use crate::ui::menu::{self, MenuOutcome};
 use crate::ui::shell::{self, Sidebars, Strip, TopBar, TopBarOutcome};
 use crate::ui::theme::{self, Material, Palette};
@@ -169,6 +170,21 @@ impl SecondBrainApp {
         self.settings.reduce_transparency
     }
 
+    /// Brings the window material in step with the theme and the transparency setting.
+    ///
+    /// Does nothing unless one of them changed since the last call.
+    pub fn sync_material(&mut self, window: &impl HasWindowHandle, theme: Theme) {
+        let dark = theme == Theme::Dark;
+        if !self.material_update_due(dark) {
+            return;
+        }
+        if self.reduce_transparency() {
+            platform::clear_mica(window);
+        } else {
+            self.set_material_available(platform::apply_mica(window, dark));
+        }
+    }
+
     /// True once per change of the theme or the transparency setting; remembers them.
     pub fn material_update_due(&mut self, dark: bool) -> bool {
         let key = Some((dark, self.settings.reduce_transparency));
@@ -207,6 +223,11 @@ impl SecondBrainApp {
     /// Whether the graph layout has come to rest. Used by tests.
     pub fn graph_settled(&self) -> bool {
         self.view.graph_view.is_settled()
+    }
+
+    /// Replaces the per-frame time limits of the graph layout. Used by tests.
+    pub fn set_graph_step_budgets(&mut self, budgets: StepBudgets) {
+        self.view.graph_view.set_step_budgets(budgets);
     }
 
     /// The area the graph was drawn in last frame. Used by tests.
@@ -268,6 +289,7 @@ impl SecondBrainApp {
 
     fn open_vault(&mut self, path: PathBuf) {
         let path = std::path::absolute(&path).unwrap_or(path);
+        self.welcome.cancel_picker();
         let (root, ctx) = (path.clone(), self.ctx.clone());
         let wake = ctx.clone();
         let job = Job::spawn(
@@ -672,7 +694,7 @@ fn theme_preference(choice: ThemeChoice) -> ThemePreference {
 
 impl eframe::App for SecondBrainApp {
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
-        platform::sync_material(&*frame, ui.ctx().theme(), self);
+        self.sync_material(&*frame, ui.ctx().theme());
         self.show(ui);
     }
 

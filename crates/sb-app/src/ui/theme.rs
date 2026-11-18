@@ -219,7 +219,7 @@ fn set_visuals(style: &mut Style, p: &Palette) {
     v.widgets.active.bg_stroke = Stroke::new(2.0, p.accent.to_color32());
     v.widgets.active.weak_bg_fill = p.selection.to_color32();
     v.widgets.open.weak_bg_fill = p.selection.to_color32();
-    let text = Stroke::new(1.0, p.text_primary.to_color32());
+    let text = p.text_primary.to_color32();
     for widget in [
         &mut v.widgets.noninteractive,
         &mut v.widgets.inactive,
@@ -227,7 +227,7 @@ fn set_visuals(style: &mut Style, p: &Palette) {
         &mut v.widgets.active,
         &mut v.widgets.open,
     ] {
-        widget.fg_stroke = text;
+        widget.fg_stroke.color = text;
     }
 }
 
@@ -238,6 +238,10 @@ pub fn bold_family() -> FontFamily {
 
 /// Inter Regular first in the proportional family, SemiBold as the family `"bold"`.
 pub fn install_fonts(ctx: &Context) {
+    ctx.set_fonts(font_definitions());
+}
+
+fn font_definitions() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let regular = FontData::from_static(include_bytes!("../../assets/Inter-Regular.ttf"));
     let semi_bold = FontData::from_static(include_bytes!("../../assets/Inter-SemiBold.ttf"));
@@ -247,10 +251,12 @@ pub fn install_fonts(ctx: &Context) {
         .insert("Inter-SemiBold".into(), Arc::new(semi_bold));
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
     proportional.insert(0, "Inter".into());
+    // Fallbacks (symbols, emoji) follow SemiBold; Regular must not, or a glyph SemiBold lacks
+    // would silently come out light.
     let mut bold = vec!["Inter-SemiBold".to_owned()];
-    bold.extend(proportional.iter().cloned());
+    bold.extend(proportional.iter().filter(|name| *name != "Inter").cloned());
     fonts.families.insert(bold_family(), bold);
-    ctx.set_fonts(fonts);
+    fonts
 }
 
 /// Frame of a glass panel: translucent fill, hairline, no shadow.
@@ -421,6 +427,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn should_keep_the_stroke_widths_of_every_widget_state() {
+        let ctx = Context::default();
+        for theme in THEMES {
+            apply(&ctx, theme, &palette(theme, Material::Opaque));
+            let widgets = ctx.style_of(theme).visuals.widgets.clone();
+            let defaults = theme.default_style().visuals.widgets;
+            for (state, got, wanted) in [
+                (
+                    "noninteractive",
+                    &widgets.noninteractive,
+                    &defaults.noninteractive,
+                ),
+                ("inactive", &widgets.inactive, &defaults.inactive),
+                ("hovered", &widgets.hovered, &defaults.hovered),
+                ("active", &widgets.active, &defaults.active),
+                ("open", &widgets.open, &defaults.open),
+            ] {
+                let widths = (got.fg_stroke.width, wanted.fg_stroke.width);
+                assert_eq!(widths.0, widths.1, "{theme:?}: {state} text stroke width");
+            }
+        }
+    }
+
+    #[test]
+    fn should_keep_inter_regular_out_of_the_bold_family() {
+        let fonts = font_definitions();
+        let bold = &fonts.families[&bold_family()];
+        assert_eq!(bold[0], "Inter-SemiBold");
+        assert!(!bold.iter().any(|name| name == "Inter"), "{bold:?}");
+        assert_eq!(fonts.families[&FontFamily::Proportional][0], "Inter");
     }
 
     #[test]

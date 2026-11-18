@@ -93,9 +93,15 @@ fn folder_contents(
         action = action.or(folder_row(ui, child, selected));
     }
     for note in &folder.notes {
-        action = action.or(note_row(ui, note, selected == Some(note)));
+        action = action.or(note_row(ui, note, is_selected(selected, note)));
     }
     action
+}
+
+/// The tree marks a note as open by its key, not its spelling: the open path may differ in letter
+/// case from the tree's (a link written in another case, a case-only rename).
+fn is_selected(selected: Option<&NotePath>, note: &NotePath) -> bool {
+    selected.is_some_and(|open| open.key() == note.key())
 }
 
 fn folder_row(ui: &mut Ui, folder: &Folder, selected: Option<&NotePath>) -> Option<NoteAction> {
@@ -155,7 +161,19 @@ fn row_menu(response: &Response, items: impl FnOnce(&mut Ui)) {
     } else {
         None
     };
-    Popup::menu(response).open_memory(command).show(items);
+    let shown = Popup::menu(response).open_memory(command).show(items);
+    return_focus_when_closed(response, shown.is_some());
+}
+
+/// A menu that just closed leaves the keyboard focus nowhere: give it back to its row, unless the
+/// user already moved it elsewhere.
+fn return_focus_when_closed(response: &Response, open: bool) {
+    let id = response.id.with("menu_was_open");
+    let was_open: bool = response.ctx.data(|data| data.get_temp(id)).unwrap_or(false);
+    response.ctx.data_mut(|data| data.insert_temp(id, open));
+    if was_open && !open && response.ctx.memory(|memory| memory.focused().is_none()) {
+        response.request_focus();
+    }
 }
 
 fn results_view(ui: &mut Ui, p: &Palette, search: &SearchBox) -> Option<NoteAction> {
@@ -184,4 +202,21 @@ fn results_view(ui: &mut Ui, p: &Palette, search: &SearchBox) -> Option<NoteActi
         }
     }
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(raw: &str) -> NotePath {
+        NotePath::parse(raw).unwrap()
+    }
+
+    #[test]
+    fn should_mark_the_open_note_whatever_the_letter_case_of_its_path() {
+        let open = path("notes/idea.MD");
+        assert!(is_selected(Some(&open), &path("Notes/Idea.md")));
+        assert!(!is_selected(Some(&open), &path("notes/other.md")));
+        assert!(!is_selected(None, &path("Notes/Idea.md")));
+    }
 }

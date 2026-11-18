@@ -20,7 +20,7 @@ const SIMPLIFIED_HINT: &str = "Large vault: simplified layout";
 /// Time one frame may spend on layout steps; at least one step always runs.
 const STEP_BUDGET: Duration = Duration::from_millis(8);
 /// With «Reduce motion» a frame runs the layout to rest, but still not longer than this.
-const REDUCED_MOTION_BUDGET: Duration = Duration::from_millis(500);
+const REDUCED_MOTION_BUDGET: Duration = Duration::from_millis(200);
 const SCROLL_ZOOM_RATE: f32 = 0.002;
 /// From this zoom on every node shows its label.
 const LABEL_ZOOM: f32 = 1.5;
@@ -33,6 +33,25 @@ const OPEN_RING_GAP: f32 = 3.0;
 const LABEL_GAP: f32 = 3.0;
 const FOCUS_RING_WIDTH: f32 = 2.0;
 
+/// How long one frame may spend on layout steps. Tests replace the defaults so that they do not
+/// depend on how fast the host is.
+#[derive(Clone, Copy, Debug)]
+pub struct StepBudgets {
+    /// While the layout animates.
+    pub animated: Duration,
+    /// With «Reduce motion», when the layout runs to rest.
+    pub reduced_motion: Duration,
+}
+
+impl Default for StepBudgets {
+    fn default() -> StepBudgets {
+        StepBudgets {
+            animated: STEP_BUDGET,
+            reduced_motion: REDUCED_MOTION_BUDGET,
+        }
+    }
+}
+
 /// What the graph pane remembers between frames: the layout, the view and an ongoing drag.
 pub struct GraphView {
     layout: Layout,
@@ -42,6 +61,7 @@ pub struct GraphView {
     /// The note being dragged (by id: indices change when the layout updates) and where it goes.
     dragging: Option<(String, [f32; 2])>,
     reduce_motion: bool,
+    budgets: StepBudgets,
 }
 
 impl Default for GraphView {
@@ -53,6 +73,7 @@ impl Default for GraphView {
             pane: None,
             dragging: None,
             reduce_motion: false,
+            budgets: StepBudgets::default(),
         }
     }
 }
@@ -140,6 +161,11 @@ impl GraphView {
     /// Sets whether the layout runs to rest at once instead of animating.
     pub fn set_reduce_motion(&mut self, reduce: bool) {
         self.reduce_motion = reduce;
+    }
+
+    /// Replaces the per-frame time limits of the layout. Used by tests.
+    pub fn set_step_budgets(&mut self, budgets: StepBudgets) {
+        self.budgets = budgets;
     }
 
     /// The area the graph was drawn in last frame. Used by tests.
@@ -239,9 +265,9 @@ impl GraphView {
             .as_ref()
             .and_then(|(id, at)| Some((self.layout.index_of(id)?, *at)));
         let budget = if self.reduce_motion && dragged.is_none() {
-            REDUCED_MOTION_BUDGET
+            self.budgets.reduced_motion
         } else {
-            STEP_BUDGET
+            self.budgets.animated
         };
         let started = Instant::now();
         while !self.layout.is_settled() {

@@ -83,7 +83,7 @@ fn edit(ui: &mut Ui, p: &Palette, workspace: &mut Workspace, state: &mut EditorS
     let Some(open) = workspace.open_note() else {
         return;
     };
-    let (key, mut text) = (open.path.key(), open.buffer.clone());
+    let (key, mut text) = (open.path.key(), open.buffer().to_owned());
     let id = Id::unique(("editor", &key, workspace.buffer_generation()));
     let focus = take_focus(ui, state, &key, id);
     let mut layouter = |ui: &Ui, buffer: &dyn TextBuffer, wrap_width: f32| {
@@ -151,7 +151,7 @@ fn colour(ui: &Ui, p: &Palette, text: &str, wrap_width: f32) -> Arc<Galley> {
 /// is reported to us instead of opening a browser or a file.
 fn preview(ui: &mut Ui, workspace: &Workspace, cache: &mut CommonMarkCache) -> Option<NoteAction> {
     let open = workspace.open_note()?;
-    let markdown = markup::wikilinks_to_markdown(&open.buffer);
+    let markdown = markup::wikilinks_to_markdown(open.buffer());
     let destinations = markup::note_link_destinations(&markdown);
     let blocked = markup::blocked_link_destinations(&markdown);
     cache.link_hooks_clear();

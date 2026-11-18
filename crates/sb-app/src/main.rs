@@ -6,7 +6,6 @@ use std::process::ExitCode;
 use clap::Parser;
 use eframe::egui::ViewportBuilder;
 use sb_app::app::{AppOptions, SecondBrainApp};
-use sb_app::platform;
 
 /// Second Brain: Markdown notes with links, graph and peer-to-peer sync.
 #[derive(Parser)]
@@ -48,7 +47,7 @@ fn main() -> ExitCode {
     };
     let created = Box::new(move |cc: &eframe::CreationContext<'_>| {
         let mut app = SecondBrainApp::new(&cc.egui_ctx, options);
-        platform::sync_material(cc, cc.egui_ctx.theme(), &mut app);
+        app.sync_material(cc, cc.egui_ctx.theme());
         Ok(Box::new(app) as Box<dyn eframe::App>)
     });
     match eframe::run_native("Second Brain", native_options(), created) {

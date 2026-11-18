@@ -237,7 +237,7 @@ fn should_show_external_edit_of_open_note() {
     fs::write(f.vault.join("a.md"), "changed").unwrap();
     run_until(&mut f.harness, "the editor to adopt the file", |app| {
         let workspace = app.workspace().unwrap();
-        workspace.open_note().unwrap().buffer == "changed"
+        workspace.open_note().unwrap().buffer() == "changed"
     });
     f.harness.run();
     let editor = f.harness.get_by_label(EDITOR);
@@ -257,7 +257,7 @@ fn should_keep_typed_text_in_conflict_note_when_file_changed_under_it() {
     let kept = fs::read_to_string(f.vault.join(&copies[0])).unwrap();
     assert_eq!(kept, "# A\n\n[[b]] [[new one]] ![[p.png]] mine");
     run_until(&mut f.harness, "the editor to show the file", |app| {
-        app.workspace().unwrap().open_note().unwrap().buffer == "theirs"
+        app.workspace().unwrap().open_note().unwrap().buffer() == "theirs"
     });
     assert_eq!(fs::read_to_string(f.vault.join("a.md")).unwrap(), "theirs");
 }
@@ -306,7 +306,7 @@ fn should_open_quick_open_from_the_top_bar() {
 
 fn buffer(harness: &Harness<'static, SecondBrainApp>) -> String {
     let workspace = harness.state().workspace().unwrap();
-    workspace.open_note().unwrap().buffer.clone()
+    workspace.open_note().unwrap().buffer().to_owned()
 }
 
 fn set_readonly(file: &Path, readonly: bool) {
@@ -481,7 +481,7 @@ fn should_not_bring_back_text_from_before_an_external_edit_with_undo() {
     });
     fs::write(f.vault.join("a.md"), "remote").unwrap();
     run_until(&mut f.harness, "the editor to adopt the file", |app| {
-        app.workspace().unwrap().open_note().unwrap().buffer == "remote"
+        app.workspace().unwrap().open_note().unwrap().buffer() == "remote"
     });
     f.harness.run();
     press_command(&mut f.harness, Key::Z);

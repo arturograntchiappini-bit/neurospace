@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use eframe::egui::{
     Align, Button, CentralPanel, Frame, Layout, Margin, Panel, Popup, Response, RichText, Role,
-    Sense, StrokeKind, Ui, WidgetInfo, pos2, vec2,
+    Sense, StrokeKind, Ui, UiBuilder, WidgetInfo, pos2, vec2,
 };
 
 use crate::state::notice::{Notice, NoticeBoard, NoticeKind};
@@ -139,12 +139,19 @@ fn panel_toggle(ui: &mut Ui, on_left: bool, name: &'static str) -> Response {
 /// the cluster is measured and remembered from the previous frame instead.
 fn right_aligned<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     let id = ui.scope_id().with("right_cluster_width");
-    let known: f32 = ui.data(|data| data.get_temp(id)).unwrap_or(0.0);
-    ui.add_space((ui.available_width() - known).max(0.0));
+    let known: Option<f32> = ui.data(|data| data.get_temp(id));
+    ui.add_space((ui.available_width() - known.unwrap_or(0.0)).max(0.0));
     let start = ui.cursor().left();
-    let result = add(ui);
+    // Until its width is known the cluster is measured unseen, so it never flashes in the
+    // wrong place for a frame.
+    let builder = if known.is_some() {
+        UiBuilder::new()
+    } else {
+        UiBuilder::new().invisible()
+    };
+    let result = ui.scope_builder(builder, add).inner;
     let width = ui.cursor().left() - start;
-    if (width - known).abs() > 0.5 {
+    if (width - known.unwrap_or(0.0)).abs() > 0.5 {
         ui.data_mut(|data| data.insert_temp(id, width));
         ui.ctx().request_repaint();
     }
@@ -328,4 +335,33 @@ pub fn document_area<R>(ui: &mut Ui, p: &Palette, content: impl FnOnce(&mut Ui) 
         .inner_margin(Margin::same(DOCUMENT_PADDING))
         .outer_margin(Margin::same(GAP));
     CentralPanel::default().frame(frame).show(ui, content).inner
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{CentralPanel, Context};
+
+    use super::*;
+
+    /// Whether the cluster was drawn visible, in each of `frames` frames of one context.
+    fn cluster_visibility(frames: usize) -> Vec<bool> {
+        let ctx = Context::default();
+        let mut seen = Vec::new();
+        for _ in 0..frames {
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                CentralPanel::default().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        right_aligned(ui, |ui| seen.push(ui.is_visible()));
+                    });
+                });
+            });
+            output.textures_delta.clear();
+        }
+        seen
+    }
+
+    #[test]
+    fn should_not_draw_the_right_cluster_before_its_width_is_known() {
+        assert_eq!(cluster_visibility(3), [false, true, true]);
+    }
 }

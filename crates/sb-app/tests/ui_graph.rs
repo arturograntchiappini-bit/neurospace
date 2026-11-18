@@ -4,11 +4,13 @@ mod common;
 
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use eframe::egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use sb_app::app::SecondBrainApp;
+use sb_app::ui::graph_view::StepBudgets;
 use tempfile::TempDir;
 
 use common::{harness, run_until};
@@ -288,6 +290,10 @@ fn ring_vault(size: usize) -> Vec<(String, String)> {
 #[test]
 fn should_settle_within_one_frame_when_motion_is_reduced() {
     let mut f = open_vault(&ring_vault(150));
+    f.harness.state_mut().set_graph_step_budgets(StepBudgets {
+        animated: Duration::ZERO,
+        reduced_motion: Duration::from_secs(600),
+    });
     f.harness.get_by_label("Menu").click();
     f.harness.run();
     f.harness.get_by_label("Reduce motion").click();
@@ -303,6 +309,10 @@ fn should_settle_within_one_frame_when_motion_is_reduced() {
 #[test]
 fn should_animate_over_several_frames_when_motion_is_not_reduced() {
     let mut f = open_vault(&ring_vault(150));
+    f.harness.state_mut().set_graph_step_budgets(StepBudgets {
+        animated: Duration::ZERO,
+        reduced_motion: Duration::ZERO,
+    });
     f.harness.key_press_modifiers(Modifiers::COMMAND, Key::G);
     f.harness.step();
     assert!(f.harness.state().graph_shown());

@@ -18,7 +18,10 @@ path = "src/main.rs"
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "clipboard", "links", "accesskit"] }
-egui_commonmark = { version = "0.26", default-features = false, features = ["pulldown_cmark"] }
+# Pinned exactly: `state::markup::PREVIEW_OPTIONS` must list the pulldown-cmark options this exact
+# renderer enables. Keep the egui_extras `image`, `file` and `http` features off: they would fetch
+# images and files for a note, and the preview must never touch the network or the disk.
+egui_commonmark = { version = "=0.26.0", default-features = false, features = ["pulldown_cmark"] }
 clap.workspace = true
 pulldown-cmark = { version = "0.13", default-features = false }
 raw-window-handle = "0.6.2"

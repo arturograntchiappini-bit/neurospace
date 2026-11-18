@@ -235,6 +235,13 @@ mod tests {
     }
 
     #[test]
+    fn should_name_the_ghost_of_an_anchored_link_in_a_root_note_and_skip_a_bare_dot_slash() {
+        let ix = Index::from_notes(vec![(p("a.md"), "[[./new]] [[./]] [[./../x]]".into())]);
+        let ghosts: Vec<_> = ghost_ids(&ix).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ghosts, ["?new"]);
+    }
+
+    #[test]
     fn should_keep_one_ghost_for_a_bare_missing_name() {
         let ix = Index::from_notes(vec![
             (p("x/a.md"), "[[Missing]]".into()),

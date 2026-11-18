@@ -646,6 +646,17 @@ mod tests {
     }
 
     #[test]
+    fn should_place_new_note_from_a_note_at_the_vault_root() {
+        let from = p("src.md");
+        assert_eq!(new_note_path("./near", &from).unwrap().as_str(), "near.md");
+        let leaving = new_note_path("./../x", &from).unwrap_err();
+        assert!(matches!(leaving, CoreError::InvalidInput(_)));
+        // A bare `./` names no note: it must not become `<folder>.md`.
+        let bare = new_note_path("./", &p("a/src.md")).unwrap_err();
+        assert!(matches!(bare, CoreError::InvalidPath { .. }), "{bare:?}");
+    }
+
+    #[test]
     fn should_refuse_new_note_when_target_leaves_vault_or_is_invalid() {
         let from = p("a/src.md");
         let refused = |t: &str| new_note_path(t, &from).unwrap_err();

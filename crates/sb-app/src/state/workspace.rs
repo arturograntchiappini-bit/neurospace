@@ -35,7 +35,7 @@ pub struct OpenNote {
     /// Where the note lives.
     pub path: NotePath,
     /// The text as typed.
-    pub buffer: String,
+    buffer: String,
     /// The text as last read from or written to disk.
     pub saved: String,
     /// When the buffer last changed; `Some` exactly while it differs from `saved`.
@@ -61,6 +61,11 @@ pub enum Saved {
 }
 
 impl OpenNote {
+    /// The text as typed. Read-only: only the workspace replaces it, so `words` stays right.
+    pub fn buffer(&self) -> &str {
+        &self.buffer
+    }
+
     /// True when the buffer holds text that is not on disk.
     pub fn is_dirty(&self) -> bool {
         self.last_edit.is_some()

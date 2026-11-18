@@ -3,8 +3,9 @@
 //! A world point `p` is drawn at `centre + pan + p * zoom`, where `centre` is the middle of the
 //! pane.
 
-/// Smallest zoom.
-pub const MIN_ZOOM: f32 = 0.2;
+/// Smallest zoom: low enough for «Fit graph» to show every node of a vault of several thousand
+/// notes (the simplified layout spreads them over about 12 000 world units).
+pub const MIN_ZOOM: f32 = 0.05;
 /// Largest zoom.
 pub const MAX_ZOOM: f32 = 5.0;
 /// Free space left around the graph by `Viewport::fit`.
@@ -141,6 +142,21 @@ mod tests {
             let [x, y] = view.to_screen([300.0, 200.0], corner);
             assert!(
                 (0.0..=600.0).contains(&x) && (0.0..=400.0).contains(&y),
+                "{x} {y}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_fit_the_whole_of_a_very_large_graph_when_fitting() {
+        // About 3000 notes spread over roughly 12 000 world units in a 900 by 600 pane.
+        let mut view = Viewport::default();
+        let bounds = ([-6000.0, -6000.0], [6000.0, 6000.0]);
+        view.fit(Some(bounds), [900.0, 600.0]);
+        for corner in [bounds.0, bounds.1] {
+            let [x, y] = view.to_screen([450.0, 300.0], corner);
+            assert!(
+                (0.0..=900.0).contains(&x) && (0.0..=600.0).contains(&y),
                 "{x} {y}"
             );
         }

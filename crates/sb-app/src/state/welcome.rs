@@ -24,6 +24,11 @@ impl WelcomeForm {
         self.picker = Some(Job::spawn(pick, wake));
     }
 
+    /// Forgets a dialog still open: a folder it returns later is not opened.
+    pub fn cancel_picker(&mut self) {
+        self.picker = None;
+    }
+
     /// Whether a folder dialog is open.
     pub fn is_picking(&self) -> bool {
         self.picker.is_some()
@@ -82,6 +87,16 @@ mod tests {
         );
         assert_eq!(form.error, None);
         assert!(!form.is_picking());
+    }
+
+    #[test]
+    fn should_forget_a_folder_dialog_that_is_still_open_when_it_is_cancelled() {
+        let mut form = WelcomeForm::default();
+        form.start_picker(|| Some(PathBuf::from("picked/vault")), || {});
+        form.cancel_picker();
+        assert!(!form.is_picking());
+        assert_eq!(form.poll_picker(), None);
+        assert_eq!(form.path, "");
     }
 
     #[test]

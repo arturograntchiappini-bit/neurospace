@@ -21,8 +21,9 @@ pub const NOTE_LINK_SCHEME: &str = "sb-note:";
 
 /// Splits `text` into contiguous byte ranges that cover all of it, each with its kind.
 ///
-/// shortcut: an inline code span never crosses a line and a fence closes on any line starting
-/// with the same three characters; upgrade to `pulldown-cmark` offsets if that ever misleads.
+/// Fences follow CommonMark (up to 3 spaces of indent, a closing fence of the same character and
+/// at least the opening length). shortcut: an inline code span never crosses a line; upgrade to
+/// `pulldown-cmark` offsets if that ever misleads.
 pub fn highlight(text: &str) -> Vec<(Range<usize>, SpanKind)> {
     let mut spans = Vec::new();
     for (range, is_code) in segments(text) {
@@ -159,35 +160,63 @@ fn segments(text: &str) -> Vec<(Range<usize>, bool)> {
 
 fn code_ranges(text: &str) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
-    let mut fence: Option<u8> = None;
+    let mut open: Option<Fence> = None;
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
         let range = offset..offset + line.len();
         offset = range.end;
-        match (fence, fence_marker(line)) {
-            (Some(open), marker) => {
+        match (open, Fence::parse(line)) {
+            (Some(fence), closing) => {
                 push_range(&mut ranges, range);
-                fence = if marker == Some(open) { None } else { fence };
+                let closes = closing.is_some_and(|c| c.closes(fence) && c.is_bare);
+                open = if closes { None } else { open };
             }
-            (None, Some(marker)) => {
-                fence = Some(marker);
+            (None, Some(fence)) if fence.can_open => {
+                open = Some(fence);
                 push_range(&mut ranges, range);
             }
-            (None, None) => inline_code(line, range.start, &mut ranges),
+            (None, _) => inline_code(line, range.start, &mut ranges),
         }
     }
     ranges
 }
 
-/// `` ` `` or `~` when `line` opens or closes a fenced block (up to 3 spaces of indent).
-fn fence_marker(line: &str) -> Option<u8> {
-    let trimmed = line.trim_start_matches(' ');
-    if line.len() - trimmed.len() > 3 {
-        return None;
+/// A line made of a CommonMark code fence: its character, run length and what may follow it.
+#[derive(Clone, Copy)]
+struct Fence {
+    marker: u8,
+    len: usize,
+    /// Nothing but whitespace after the run: the only shape that can close a fence.
+    is_bare: bool,
+    /// An opening fence: a backtick fence cannot have a backtick in its info string.
+    can_open: bool,
+}
+
+impl Fence {
+    /// The fence on `line`: up to 3 spaces of indent, then 3 or more backticks or tildes.
+    fn parse(line: &str) -> Option<Fence> {
+        let trimmed = line.trim_start_matches(' ');
+        if line.len() - trimmed.len() > 3 {
+            return None;
+        }
+        let marker = *trimmed
+            .as_bytes()
+            .first()
+            .filter(|b| matches!(**b, b'`' | b'~'))?;
+        let len = trimmed.bytes().take_while(|&b| b == marker).count();
+        let rest = &trimmed[len..];
+        (len >= 3).then(|| Fence {
+            marker,
+            len,
+            is_bare: rest.trim().is_empty(),
+            can_open: marker == b'~' || !rest.contains('`'),
+        })
     }
-    (*b"`~")
-        .into_iter()
-        .find(|&marker| trimmed.bytes().take(3).filter(|&b| b == marker).count() == 3)
+
+    /// True when this line closes `open`: same character and at least as long.
+    fn closes(self, open: Fence) -> bool {
+        self.marker == open.marker && self.len >= open.len
+    }
 }
 
 fn inline_code(line: &str, base: usize, ranges: &mut Vec<Range<usize>>) {
@@ -432,6 +461,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn should_follow_commonmark_for_where_fenced_code_opens_and_closes() {
+        // (input, output): `[[a]]` is code (kept) or text (rewritten) as CommonMark says.
+        let cases = [
+            // A longer opening fence is not closed by a shorter one.
+            (
+                "````\n```\n[[a]]\n````\n[[b]]",
+                "````\n```\n[[a]]\n````\n[b](sb-note:b)",
+            ),
+            // A tilde fence is closed by tildes only; backticks inside are text.
+            (
+                "~~~\n```\n[[a]]\n~~~\n[[b]]",
+                "~~~\n```\n[[a]]\n~~~\n[b](sb-note:b)",
+            ),
+            // Four spaces of indent make an indented block, not a fence.
+            ("    ```\n[[a]]", "    ```\n[a](sb-note:a)"),
+            // A backtick fence cannot have a backtick in its info string.
+            ("``` x ```\n[[a]]", "``` x ```\n[a](sb-note:a)"),
+            // A closing fence has no text after it.
+            (
+                "```\n``` x\n[[a]]\n```\n[[b]]",
+                "```\n``` x\n[[a]]\n```\n[b](sb-note:b)",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(wikilinks_to_markdown(input), expected, "input {input:?}");
+        }
+    }
     #[test]
     fn should_escape_markdown_in_link_labels_and_show_self_links_as_text() {
         assert_eq!(

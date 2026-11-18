@@ -201,7 +201,7 @@ fn should_show_external_edit_while_open() {
     assert_eq!(open_path(&f.harness).as_deref(), Some("first.md"));
     fs::write(f.vault.join("first.md"), "after").unwrap();
     run_until(&mut f.harness, "the editor to adopt the file", |app| {
-        app.workspace().unwrap().open_note().unwrap().buffer == "after"
+        app.workspace().unwrap().open_note().unwrap().buffer() == "after"
     });
     f.harness.run();
     let editor = f.harness.get_by_label(EDITOR);
