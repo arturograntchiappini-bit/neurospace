@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use eframe::egui::{
     CentralPanel, Context, Key, KeyboardShortcut, Modifiers, Rect, Theme, ThemePreference, Ui,
-    Visuals,
+    ViewportCommand, Visuals,
 };
 use sb_core::Result as CoreResult;
 
@@ -14,7 +14,7 @@ use crate::platform;
 use crate::state::welcome::WelcomeForm;
 use crate::state::{
     AUTOSAVE_DELAY, InspectorCache, Job, NoteAction, NoteDialog, Notice, NoticeBoard, Poll,
-    QuickOpen, Reloader, Saved, SearchBox, Settings, ThemeChoice, Workspace,
+    QuickOpen, RELOAD_DEBOUNCE, Reloader, Saved, SearchBox, Settings, ThemeChoice, Workspace,
 };
 use crate::ui::editor::{self, EditorState};
 use crate::ui::graph_view::GraphView;
@@ -48,12 +48,12 @@ pub struct AppOptions {
     pub vault: Option<PathBuf>,
 }
 
+/// What the opening job returns: the workspace and the watcher that follows its folder.
+type Opened = CoreResult<(Workspace, CoreResult<Reloader>)>;
+
 enum Screen {
     Welcome,
-    Opening {
-        path: PathBuf,
-        job: Job<CoreResult<Workspace>>,
-    },
+    Opening { path: PathBuf, job: Job<Opened> },
     Vault(Box<Workspace>),
 }
 
@@ -83,6 +83,7 @@ pub struct SecondBrainApp {
     view: VaultView,
     mica_available: bool,
     mica_key: Option<(bool, bool)>,
+    close_warning: Option<String>,
 }
 
 impl SecondBrainApp {
@@ -101,6 +102,7 @@ impl SecondBrainApp {
             view: VaultView::default(),
             mica_available: false,
             mica_key: None,
+            close_warning: None,
         };
         app.sync_context(ctx);
         if let Some(path) = start {
@@ -192,6 +194,9 @@ impl SecondBrainApp {
         if menu::handle_zoom_keys(&ctx, &mut self.settings) {
             self.save_settings();
         }
+        if ctx.input(|input| input.viewport().close_requested()) {
+            self.handle_close_request(&ctx);
+        }
         self.poll_opening();
         if matches!(self.screen, Screen::Vault(_)) {
             self.handle_note_keys(&ctx);
@@ -221,8 +226,15 @@ impl SecondBrainApp {
     fn open_vault(&mut self, path: PathBuf) {
         let path = std::path::absolute(&path).unwrap_or(path);
         let (root, ctx) = (path.clone(), self.ctx.clone());
+        let wake = ctx.clone();
         let job = Job::spawn(
-            move || Workspace::open(&root),
+            move || {
+                let workspace = Workspace::open(&root)?;
+                let reloader = Reloader::start(workspace.vault().root(), move || {
+                    wake.request_repaint();
+                });
+                Ok((workspace, reloader))
+            },
             move || ctx.request_repaint(),
         );
         self.screen = Screen::Opening { path, job };
@@ -235,17 +247,24 @@ impl SecondBrainApp {
         let path = path.clone();
         match job.poll() {
             Poll::Running => {}
-            Poll::Ready(Ok(workspace)) => self.finish_opening(path, workspace),
+            Poll::Ready(Ok((workspace, reloader))) => {
+                self.finish_opening(path, workspace, reloader);
+            }
             Poll::Ready(Err(error)) => self.fail_opening(&error.to_string()),
             Poll::Lost => self.fail_opening("the opening stopped unexpectedly"),
         }
     }
 
-    fn finish_opening(&mut self, path: PathBuf, workspace: Workspace) {
+    fn finish_opening(
+        &mut self,
+        path: PathBuf,
+        workspace: Workspace,
+        reloader: CoreResult<Reloader>,
+    ) {
         self.welcome = WelcomeForm::default();
         self.view = VaultView {
             sidebars: self.view.sidebars,
-            reloader: self.start_reloader(workspace.vault().root()),
+            reloader: self.keep_reloader(reloader),
             ..VaultView::default()
         };
         self.settings.last_vault = Some(path);
@@ -253,10 +272,9 @@ impl SecondBrainApp {
         self.screen = Screen::Vault(Box::new(workspace));
     }
 
-    /// Starts following the vault folder; without a watcher the vault stays usable.
-    fn start_reloader(&mut self, root: &Path) -> Option<Reloader> {
-        let ctx = self.ctx.clone();
-        match Reloader::start(root, move || ctx.request_repaint()) {
+    /// Keeps the folder watcher; without one the vault stays usable.
+    fn keep_reloader(&mut self, reloader: CoreResult<Reloader>) -> Option<Reloader> {
+        match reloader {
             Ok(reloader) => Some(reloader),
             Err(error) => {
                 let notice = Notice::error(format!(
@@ -370,11 +388,13 @@ impl SecondBrainApp {
         match workspace.save() {
             Ok(Saved::Nothing | Saved::Written) => true,
             Ok(Saved::ChangedOnDisk) => {
+                let reloading = self.view.reloader.is_some();
                 if let Some(reloader) = self.view.reloader.as_mut() {
                     reloader.mark_changed(now);
+                    self.ctx.request_repaint_after(RELOAD_DEBOUNCE);
                 }
-                let text = format!("{path} changed on disk; reloading");
-                self.notices.post(Notice::info(text), now);
+                self.notices
+                    .post(Notice::changed_on_disk(&path, reloading), now);
                 false
             }
             Err(error) => {
@@ -382,6 +402,41 @@ impl SecondBrainApp {
                 self.notices.post(Notice::error(text), now);
                 false
             }
+        }
+    }
+
+    /// The window is closing: save, or keep what cannot be saved in a conflict note. A failure
+    /// cancels the close and says so; asking again while that notice shows quits without saving.
+    fn handle_close_request(&mut self, ctx: &Context) {
+        let now = Instant::now();
+        let warned = self.close_warning.take();
+        let shown = self.notices.current(now).map(|notice| &notice.text);
+        if warned.as_ref().is_some_and(|text| Some(text) == shown) {
+            return;
+        }
+        if let Err(text) = self.save_for_close() {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            self.notices.post(Notice::error(text.clone()), now);
+            self.close_warning = Some(text);
+        }
+    }
+
+    fn save_for_close(&mut self) -> Result<(), String> {
+        let Screen::Vault(workspace) = &mut self.screen else {
+            return Ok(());
+        };
+        let path = workspace.open_note().map(|open| open.path.to_string());
+        let failed = |error: sb_core::CoreError| {
+            let path = path.clone().unwrap_or_default();
+            format!("Could not save {path}: {error}. Close again to quit without saving")
+        };
+        match workspace.save() {
+            Ok(Saved::Nothing | Saved::Written) => Ok(()),
+            Ok(Saved::ChangedOnDisk) => workspace
+                .keep_unsaved_as_conflict()
+                .map(drop)
+                .map_err(failed),
+            Err(error) => Err(failed(error)),
         }
     }
 

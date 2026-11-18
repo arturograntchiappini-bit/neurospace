@@ -5440,6 +5440,7 @@ dependencies = [
  "eframe",
  "egui_commonmark",
  "egui_kittest",
+ "pulldown-cmark",
  "raw-window-handle",
  "rfd",
  "sb-core",

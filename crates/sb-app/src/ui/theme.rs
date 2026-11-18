@@ -192,10 +192,9 @@ fn set_text_styles(style: &mut Style) {
     style
         .text_styles
         .insert(TextStyle::Small, proportional(13.0));
-    style.text_styles.insert(
-        TextStyle::Heading,
-        FontId::new(22.0, FontFamily::Name("bold".into())),
-    );
+    style
+        .text_styles
+        .insert(TextStyle::Heading, FontId::new(22.0, bold_family()));
 }
 
 fn set_visuals(style: &mut Style, p: &Palette) {
@@ -228,6 +227,11 @@ fn set_visuals(style: &mut Style, p: &Palette) {
     }
 }
 
+/// The font family that holds Inter SemiBold.
+pub fn bold_family() -> FontFamily {
+    FontFamily::Name("bold".into())
+}
+
 /// Inter Regular first in the proportional family, SemiBold as the family `"bold"`.
 pub fn install_fonts(ctx: &Context) {
     let mut fonts = FontDefinitions::default();
@@ -241,7 +245,7 @@ pub fn install_fonts(ctx: &Context) {
     proportional.insert(0, "Inter".into());
     let mut bold = vec!["Inter-SemiBold".to_owned()];
     bold.extend(proportional.iter().cloned());
-    fonts.families.insert(FontFamily::Name("bold".into()), bold);
+    fonts.families.insert(bold_family(), bold);
     ctx.set_fonts(fonts);
 }
 

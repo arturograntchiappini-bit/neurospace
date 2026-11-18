@@ -29,6 +29,17 @@ impl Notice {
         }
     }
 
+    /// A save found `path` changed on disk; `reloading` says whether the folder watcher will
+    /// load the new text.
+    pub fn changed_on_disk(path: &str, reloading: bool) -> Notice {
+        let then = if reloading {
+            "reloading"
+        } else {
+            "reopen the vault to load it"
+        };
+        Notice::info(format!("{path} changed on disk; {then}"))
+    }
+
     /// An error notice.
     pub fn error(text: impl Into<String>) -> Notice {
         Notice {
@@ -110,6 +121,18 @@ mod tests {
         );
         board.post(Notice::error("failed"), start);
         assert_eq!(board.time_left(start), None);
+    }
+
+    #[test]
+    fn should_say_what_follows_when_a_note_changed_on_disk() {
+        assert_eq!(
+            Notice::changed_on_disk("a.md", true).text,
+            "a.md changed on disk; reloading"
+        );
+        assert_eq!(
+            Notice::changed_on_disk("a.md", false).text,
+            "a.md changed on disk; reopen the vault to load it"
+        );
     }
 
     #[test]

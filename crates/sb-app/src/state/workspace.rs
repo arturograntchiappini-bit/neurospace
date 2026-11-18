@@ -70,6 +70,7 @@ pub struct Workspace {
     open: Option<OpenNote>,
     write_generation: u64,
     index_swaps: u64,
+    buffer_generation: u64,
 }
 
 impl Workspace {
@@ -88,6 +89,7 @@ impl Workspace {
             open: None,
             write_generation: 0,
             index_swaps: 0,
+            buffer_generation: 0,
         })
     }
 
@@ -118,6 +120,13 @@ impl Workspace {
         self.write_generation
     }
 
+    /// Changes whenever the open note's buffer is replaced from outside the editor (a note
+    /// opened, the file's text adopted, a conflict note taking over). An editor that keys its
+    /// undo history on it cannot bring back text from before the replacement.
+    pub fn buffer_generation(&self) -> u64 {
+        self.buffer_generation
+    }
+
     /// Changes whenever the index content may have changed: every local write and every swapped-in
     /// rebuild. Both parts only grow, so the sum differs from any earlier value. Panels that
     /// derive data from the index key their caches on it.
@@ -135,6 +144,7 @@ impl Workspace {
         let text = ops::read_note(&self.vault, path.as_str())?;
         // This read is newer than any rebuild already running.
         self.write_generation += 1;
+        self.buffer_generation += 1;
         self.open = Some(clean_note(path.clone(), text));
         Ok(())
     }
@@ -400,6 +410,7 @@ impl Workspace {
             Ok(kept_in) => kept_in,
             Err(notice) => return Some(notice),
         };
+        self.buffer_generation += 1;
         self.open = Some(clean_note(path.clone(), text));
         kept_in.map(|conflict| {
             Notice::info(format!(
@@ -423,6 +434,7 @@ impl Workspace {
             )));
         };
         let buffer = self.open.take()?.buffer;
+        self.buffer_generation += 1;
         self.open = Some(clean_note(conflict.clone(), buffer));
         Some(Notice::info(format!(
             "{path} was removed or can no longer be read; your unsaved edits are in {conflict}"
@@ -432,16 +444,28 @@ impl Workspace {
     /// Writes a dirty buffer to a conflict note; `None` when the note is clean. On failure the
     /// buffer stays open and dirty and the error notice says so.
     fn keep_unsaved_edits(&mut self) -> std::result::Result<Option<NotePath>, Notice> {
-        let Some(open) = self.open.as_ref().filter(|open| open.is_dirty()) else {
-            return Ok(None);
-        };
-        let (path, buffer) = (open.path.clone(), open.buffer.clone());
-        let created = create_conflict_note(&self.vault, &path, &buffer).map_err(|error| {
+        let path = self.open.as_ref().map(|open| open.path.clone());
+        self.keep_unsaved_as_conflict().map_err(|error| {
+            let path = path.map(|path| path.to_string()).unwrap_or_default();
             Notice::error(format!(
                 "Could not keep your unsaved edits to {path} in a conflict note ({error}); \
                  they stay in the editor"
             ))
-        })?;
+        })
+    }
+
+    /// Writes the unsaved buffer to `<stem> (conflict <id>).md` next to the note and leaves the
+    /// open note as it is. `None` when nothing is unsaved. For a window that is closing and can
+    /// no longer save over a file that changed.
+    ///
+    /// # Errors
+    /// Whatever creating the conflict note returns.
+    pub fn keep_unsaved_as_conflict(&mut self) -> Result<Option<NotePath>> {
+        let Some(open) = self.open.as_ref().filter(|open| open.is_dirty()) else {
+            return Ok(None);
+        };
+        let (path, buffer) = (open.path.clone(), open.buffer.clone());
+        let created = create_conflict_note(&self.vault, &path, &buffer)?;
         self.write_generation += 1;
         self.index.upsert(created.clone(), buffer);
         self.refresh_tree();
@@ -926,6 +950,23 @@ mod tests {
     }
 
     #[test]
+    fn should_change_buffer_generation_only_when_the_buffer_is_replaced_from_outside() {
+        let (dir, mut ws) = workspace(&[("a.md", "one"), ("b.md", "two")]);
+        let start = ws.buffer_generation();
+        ws.select(&p("a.md")).unwrap();
+        let selected = ws.buffer_generation();
+        assert_ne!(selected, start);
+        ws.edit("one!".into(), Instant::now());
+        assert_eq!(ws.buffer_generation(), selected);
+        fs::write(dir.path().join("a.md"), "remote").unwrap();
+        let rebuilt = sb_core::Index::build(ws.vault()).unwrap();
+        let tag = ws.write_generation();
+        ws.apply_index(rebuilt, tag);
+        assert_eq!(ws.open_note().unwrap().buffer, "remote");
+        assert_ne!(ws.buffer_generation(), selected);
+    }
+
+    #[test]
     fn should_create_and_select_note_with_the_case_as_written_when_ghost_found() {
         let (dir, mut ws) = workspace(&[("a.md", "[[Ghost]]"), ("sub/b.md", "[[./Next]]")]);
         let graph = ws.index().graph();
@@ -968,6 +1009,26 @@ mod tests {
         let error = ws.create_from_ghost("?ghost").unwrap_err();
         assert!(matches!(error, CoreError::AlreadyExists(_)));
         assert_eq!(on_disk(&dir, "Ghost.md"), "precious");
+    }
+
+    #[test]
+    fn should_keep_typed_text_in_a_conflict_note_on_demand() {
+        let (dir, mut ws) = open_dirty(&[("a.md", "old")], "a.md", "typed");
+        fs::write(dir.path().join("a.md"), "theirs").unwrap();
+        let kept = ws.keep_unsaved_as_conflict().unwrap().unwrap();
+        assert!(kept.as_str().starts_with("a (conflict "), "{kept}");
+        assert_eq!(on_disk(&dir, kept.as_str()), "typed");
+        assert_eq!(on_disk(&dir, "a.md"), "theirs");
+        assert!(ws.index().get(&kept.key()).is_some());
+    }
+
+    #[test]
+    fn should_keep_nothing_when_the_note_is_clean_or_closed() {
+        let (dir, mut ws) = workspace(&[("a.md", "old")]);
+        assert_eq!(ws.keep_unsaved_as_conflict().unwrap(), None);
+        ws.select(&p("a.md")).unwrap();
+        assert_eq!(ws.keep_unsaved_as_conflict().unwrap(), None);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

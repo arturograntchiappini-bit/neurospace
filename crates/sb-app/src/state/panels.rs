@@ -28,6 +28,8 @@ pub enum NoteAction {
     Delete(NotePath),
     /// Ask for the name of a new note in this folder.
     NewIn(String),
+    /// Tell the user this, and do nothing else.
+    Inform(String),
 }
 
 impl NoteAction {
@@ -52,6 +54,7 @@ impl NoteAction {
             },
             NoteAction::Rename(path) => open_dialog(dialog, NoteDialog::rename(path)),
             NoteAction::NewIn(folder) => open_dialog(dialog, NoteDialog::new_note(Some(folder))),
+            NoteAction::Inform(text) => Some(Notice::info(text)),
         }
     }
 }
@@ -414,6 +417,18 @@ mod tests {
         let notice = NoteAction::Open(p("a.md")).run(&mut ws, &mut dialog);
         assert!(notice.is_some());
         assert!(dialog.is_none());
+    }
+
+    #[test]
+    fn should_only_report_when_an_inform_action_runs() {
+        let (_dir, mut ws) = workspace(&[("a.md", "x")]);
+        let mut dialog = None;
+        let action = NoteAction::Inform("hello".into());
+        assert!(!action.navigates());
+        assert_eq!(
+            action.run(&mut ws, &mut dialog),
+            Some(Notice::info("hello"))
+        );
     }
 
     #[test]

@@ -102,6 +102,28 @@ pub fn note_link_destinations(markdown: &str) -> Vec<String> {
     found
 }
 
+/// The destinations of the links in `markdown` that must not open from a note.
+pub fn blocked_link_destinations(markdown: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    pulldown_cmark::Parser::new(markdown)
+        .filter_map(|event| match event {
+            pulldown_cmark::Event::Start(
+                pulldown_cmark::Tag::Link { dest_url, .. }
+                | pulldown_cmark::Tag::Image { dest_url, .. },
+            ) => Some(dest_url.into_string()),
+            _ => None,
+        })
+        .filter(|dest| !is_openable(dest) && seen.insert(dest.clone()))
+        .collect()
+}
+
+fn is_openable(dest: &str) -> bool {
+    let lower = dest.to_ascii_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with(NOTE_LINK_SCHEME)
+}
+
 /// Alternating stretches that cover `text`: `true` for code (fenced blocks and inline spans).
 fn segments(text: &str) -> Vec<(Range<usize>, bool)> {
     let mut out = Vec::new();
@@ -277,13 +299,12 @@ fn rewrite_line(line: &str, out: &mut String) {
     out.push_str(&line[at..]);
 }
 
-/// A wikilink as Markdown; any other link as it is.
+/// A wikilink as Markdown: plain text for embeds, attachments and self links, the literal text
+/// for a blank one; any other link as it is.
 fn rewrite_link(link: &str) -> String {
-    let (embed, inner) = match link.strip_prefix('!') {
-        Some(rest) => (true, rest),
-        None => (false, link),
-    };
-    let Some(inner) = inner
+    let embed = link.starts_with('!');
+    let Some(inner) = link
+        .trim_start_matches('!')
         .strip_prefix("[[")
         .and_then(|inner| inner.strip_suffix("]]"))
     else {
@@ -294,12 +315,15 @@ fn rewrite_link(link: &str) -> String {
     let target = written
         .split_once('#')
         .map_or(written, |(target, _)| target);
+    if written.is_empty() {
+        return link.to_owned();
+    }
     let label = match (alias.trim(), target) {
         ("", "") => written,
         ("", target) => target,
         (alias, _) => alias,
     };
-    if embed || target.is_empty() {
+    if embed || target.is_empty() || sb_core::is_attachment_target(target) {
         return escape_label(label);
     }
     format!(
@@ -397,6 +421,25 @@ mod tests {
         assert_eq!(
             wikilinks_to_markdown("[[a*b]] [[#Head]] [[T\\|x]]"),
             "[a\\*b](sb-note:a%2Ab) #Head [x](sb-note:T)"
+        );
+    }
+
+    #[test]
+    fn should_show_attachment_wikilinks_and_blank_ones_as_text() {
+        assert_eq!(
+            wikilinks_to_markdown("[[report.pdf]] [[a/b.PNG|pic]] [[x.md]]"),
+            "report.pdf pic [x.md](sb-note:x.md)"
+        );
+        assert_eq!(wikilinks_to_markdown("[[ ]] ![[ ]]"), "[[ ]] ![[ ]]");
+    }
+
+    #[test]
+    fn should_list_links_that_are_not_notes_or_web_links() {
+        let markdown = "[a](https://x.org) [b](HTTP://y.org) [c](file:///z) [d](other.md) \
+                        [e](sb-note:n) <mailto:m@x.org> [f](file:///z) `[g](file:///h)`";
+        assert_eq!(
+            blocked_link_destinations(markdown),
+            ["file:///z", "other.md", "mailto:m@x.org"]
         );
     }
 

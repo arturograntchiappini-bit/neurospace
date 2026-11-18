@@ -48,7 +48,8 @@ impl Link {
     }
 }
 
-pub(crate) fn is_attachment_target(target: &str) -> bool {
+/// True when the last component of `target` ends in `.` plus an attachment extension, ignoring case.
+pub fn is_attachment_target(target: &str) -> bool {
     let slashed = target.trim().replace('\\', "/");
     let last = slashed.rsplit('/').next().unwrap_or_default();
     let Some((_, extension)) = last.rsplit_once('.') else {

@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sb sync run`, `invite`, `join <TICKET>`, `leave` and `status`: pair devices with a ticket, run the engine in the foreground (log on stderr, clean stop on Ctrl+C or SIGTERM) and inspect it, with `--json` output.
 - `sb sync status` shows the relay the device reached (`relay: <url>`, or a hint to check the firewall in `internet` mode when there is none yet), and `status.json` and `sb sync status --json` carry the number of rejected entries of the sync document.
 
-- Desktop app: the note editor with Markdown colouring, the preview with clickable wikilinks, quick open (Ctrl+O), the shortcuts Ctrl+N, Ctrl+O, Ctrl+E, Ctrl+G and Ctrl+F, autosave after 500 ms, on focus loss, on switching notes or vaults and on exit, and following the vault folder so an external edit of the open note appears at once (unsaved edits go to a conflict note).
-- `sb_core::ops::create_note` (never replaces a note, adopts existing folder spelling), `new_note_path` (the path a click on an unresolved link creates, spec 6.6), `ATTACHMENT_EXTENSIONS` with `Link::is_attachment`, and `StateDir::save_config` in `sb-sync`.
+- Desktop app: the note editor with Markdown colouring, the preview with clickable wikilinks, quick open (Ctrl+O), the shortcuts Ctrl+N, Ctrl+O, Ctrl+E, Ctrl+G and Ctrl+F, autosave after 500 ms, on focus loss, on switching notes or vaults and on exit, and following the vault folder so an external edit of the open note appears shortly after (unsaved edits go to a conflict note). Closing the window with unsaved text that cannot be saved keeps it open until you close again.
+- `sb_core::ops::create_note` (never replaces a note, adopts existing folder spelling), `new_note_path` (the path a click on an unresolved link creates, spec 6.6), `ATTACHMENT_EXTENSIONS` with `Link::is_attachment` and `is_attachment_target`, and `StateDir::save_config` in `sb-sync`.
 
 ### Changed
 
