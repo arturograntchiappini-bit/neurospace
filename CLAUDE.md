@@ -654,7 +654,14 @@ Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nel
     - l'icona sul pulsante della barra delle applicazioni: si cattura solo la finestra;
     - un bordo nero sottile nelle catture opache, probabilmente il bordo di ridimensionamento reso da PrintWindow.
     - Visto una volta e non riprodotto: con la finestra ridotta a icona il processo è salito a 1 GB per poi scendere a 533 MB; tre prove successive sono rimaste a circa 228 MB.
-- 2026-11-18 — **Cambio di nome in Neurospace** (richiesta dell'utente) in corso nel worktree `.claude/worktrees/rename-neurospace`, branch `refactor/rename-neurospace`, da `main` `6c417f6`. Ledger: `.superpowers/sdd/2026-11-18-rename-neurospace/progress.md` del worktree. L'aggiornamento di graphify dopo M3 è sospeso: l'estrazione AST è fatta, quella dei documenti no. Si rifà per intero dopo il cambio di nome, che tocca quasi ogni file.
+- 2026-11-18 — **Cambio di nome in Neurospace completato** (richiesta dell'utente): branch `refactor/rename-neurospace`, da `main` `6c417f6`, commit `268fd7c` (codice, test, asset), `769b56b` (README, CHANGELOG), più i documenti dell'orchestratore. Ledger: `.superpowers/sdd/2026-11-18-rename-neurospace/progress.md`.
+  - Solo nomi: il controllo riga per riga dell'orchestratore non trova cambi di logica.
+  - Windows: 713 test passati, 2 ignorati, conteggi per suite identici a prima; `fmt`, `clippy` e build di release puliti.
+  - Linux `rust:1-bullseye`: `fmt`, `clippy` e ogni suite puliti, 11 test sui permessi passati da `nobody`.
+  - Binari: titolo e benvenuto «Neurospace», logo e icona intatti, `NS_STATE_DIR` e `NS_VAULT` letti, `ns delete` sposta in `.neurospace/trash/`, il server MCP si chiama `neurospace`.
+  - Prima del lavoro il disco C: era pieno: con il consenso dell'utente sono state cancellate le cartelle `target/` dei worktree di M1, M2 e M3 (circa 95 GB, solo file compilati).
+  - L'aggiornamento di graphify dopo M3, sospeso dopo l'estrazione AST, si rifà per intero dopo il merge.
+  - Non verificato: aprire un vault cliccando nell'app rinominata (coperto solo dai test UI); i vault di prova con `.secondbrain/` non sono più riconosciuti, per scelta.
 - Rischio chiuso il 2026-11-17: il preset di rete di iroh che «non risultava mai online» su questa macchina era il firewall applicativo, non il codice né iroh.
 - Non verificabile in questo progetto: uso interattivo della GUI da parte di una persona. La GUI si verifica con test headless e con l'avvio del binario.
 
