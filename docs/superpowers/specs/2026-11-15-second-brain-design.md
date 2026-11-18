@@ -1,7 +1,8 @@
-# Second Brain — Design
+# Neurospace — Design
 
 Date: 2026-11-15
 Status: approved under the user's delegation of 2026-11-15 (see `CLAUDE.md`, «Verità assoluta»). Every choice below that the user did not state is the orchestrator's call and is marked **(call)** where it first appears.
+Name: **Neurospace**, by the user's request of 2026-11-18 («change the name of the app/project to "neurospace"»); the project was called «Second Brain» until then, and dated plans and ledgers keep the old name. Identifiers use `neurospace` (GUI binary, app id, state folder, vault folder `.neurospace/`, sync protocol `neurospace/sync/1`) and the short prefix `ns` (console binary `ns`, crates `ns-*`, `NS_*` environment variables, tickets `ns1/`, link scheme `ns-note:`) **(call)**. Nothing was released under the old name, so there is no migration.
 
 ## 1. Intent
 
@@ -66,7 +67,7 @@ Things that would make the product a failure even if it «works»:
 That one rule lets every actor coexist without talking to each other:
 
 ```
- GUI (secondbrain)      CLI / MCP (sb)        any editor, any agent
+ GUI (neurospace)      CLI / MCP (ns)        any editor, any agent
         │                     │                        │
         └──── read / write plain .md files in the vault folder ────┘
                               ▲
@@ -77,7 +78,7 @@ That one rule lets every actor coexist without talking to each other:
 ```
 
 - The GUI, the CLI, the MCP server and external editors only ever read and write Markdown files.
-- The **sync engine** is the only writer of sync state. It runs inside the GUI process, or headless as `sb sync run`. A lock file guarantees one engine per vault.
+- The **sync engine** is the only writer of sync state. It runs inside the GUI process, or headless as `ns sync run`. A lock file guarantees one engine per vault.
 - The engine is controlled through files in its state directory (section 8.3), so the CLI needs no IPC to a running engine.
 
 ### 4.2 Workspace layout (call)
@@ -85,13 +86,13 @@ That one rule lets every actor coexist without talking to each other:
 ```
 Cargo.toml                 workspace
 crates/
-  sb-core/                 lib: note paths, vault file operations, Markdown parsing,
+  ns-core/                 lib: note paths, vault file operations, Markdown parsing,
                            index, link resolution, graph, search, folder watching.
                            No GUI, no network.
-  sb-sync/                 lib: sync document, reconciliation, peer protocol, engine,
+  ns-sync/                 lib: sync document, reconciliation, peer protocol, engine,
                            state directory, tickets, network adapter.
-  sb-cli/                  bin `sb`: CLI commands, MCP stdio server, headless sync.
-  sb-app/                  bin `secondbrain`: desktop GUI.
+  ns-cli/                  bin `ns`: CLI commands, MCP stdio server, headless sync.
+  ns-app/                  bin `neurospace`: desktop GUI.
 docs/                      spec, plans
 scripts/                   Linux build and cross-OS sync check (Docker)
 README.md  CHANGELOG.md
@@ -99,7 +100,7 @@ README.md  CHANGELOG.md
 
 Two binaries because one Windows executable cannot cleanly be both a console program and a GUI program.
 
-`sb-core` is the domain core together with `sb-sync`'s reconciliation, protocol and authentication modules (section 8). Changes there get the orchestrator's own diff review.
+`ns-core` is the domain core together with `ns-sync`'s reconciliation, protocol and authentication modules (section 8). Changes there get the orchestrator's own diff review.
 
 ### 4.3 Technology (call)
 
@@ -125,7 +126,7 @@ Exact versions, cargo features and verified API facts are in appendix A.
 
 A vault is any existing directory. Notes are the `.md` files below it, at any depth. Nothing has to be initialised.
 
-The application owns one directory inside the vault, `.secondbrain/`, used only for `trash/` (section 5.5). It is hidden and never synced or indexed.
+The application owns one directory inside the vault, `.neurospace/`, used only for `trash/` (section 5.5). It is hidden and never synced or indexed.
 
 ### 5.2 Note path and note key
 
@@ -159,7 +160,7 @@ Scanning walks the vault and returns the notes plus a list of ignored files with
 - A `.md` file larger than 4 MiB is ignored with reason `TooLarge`. Writing a note larger than that through the CLI, MCP or the GUI is refused, and so is reading one: a file over the limit is not treated as a note by any operation.
 - Files without the `.md` extension are not notes and are not reported.
 
-Ignored files are never indexed and never synced, and the sync engine never modifies or replaces them. The GUI and `sb list` show how many were ignored and why.
+Ignored files are never indexed and never synced, and the sync engine never modifies or replaces them. The GUI and `ns list` show how many were ignored and why.
 
 ### 5.4 Reading and writing
 
@@ -174,7 +175,7 @@ Ignored files are never indexed and never synced, and the sync engine never modi
 
 ### 5.5 Trash
 
-Deleting a note moves it to `.secondbrain/trash/<UTC timestamp>-<flattened path>`, where the timestamp is `YYYYMMDDThhmmssZ` and the flattened path replaces `/` with `__`. A trash file name never exceeds 255 bytes: when it would, the flattened path is shortened from the front, at a character boundary, keeping the timestamp and the end of the path. If the name is taken, `-1`, `-2`, … is appended. Nothing is ever unlinked directly. This applies to deletions by the user, by an agent and by the sync engine. The trash is never emptied automatically.
+Deleting a note moves it to `.neurospace/trash/<UTC timestamp>-<flattened path>`, where the timestamp is `YYYYMMDDThhmmssZ` and the flattened path replaces `/` with `__`. A trash file name never exceeds 255 bytes: when it would, the flattened path is shortened from the front, at a character boundary, keeping the timestamp and the end of the path. If the name is taken, `-1`, `-2`, … is appended. Nothing is ever unlinked directly. This applies to deletions by the user, by an agent and by the sync engine. The trash is never emptied automatically.
 
 ## 6. Markdown model
 
@@ -245,16 +246,16 @@ Clicking an unresolved link (or a ghost node) creates a note at a path computed 
 
 ## 7. Agent gateway: CLI and MCP
 
-One console binary, `sb`. Both surfaces call the same `sb-core` operations and return the same data.
+One console binary, `ns`. Both surfaces call the same `ns-core` operations and return the same data.
 
 ### 7.1 Vault selection
 
-`--vault <DIR>` wins; otherwise the `SB_VAULT` environment variable; otherwise the current directory. The directory must exist.
+`--vault <DIR>` wins; otherwise the `NS_VAULT` environment variable; otherwise the current directory. The directory must exist.
 
 ### 7.2 CLI
 
 ```
-sb [--vault <DIR>] [--json] <command>
+ns [--vault <DIR>] [--json] <command>
 
   list                              all notes; ignored files are summarised on stderr
   read <PATH>                       print the note
@@ -275,7 +276,7 @@ sb [--vault <DIR>] [--json] <command>
 
 ### 7.3 MCP server
 
-`sb mcp` speaks the Model Context Protocol over stdio. Stdout carries protocol messages only; diagnostics go to stderr. The process exits when stdin closes.
+`ns mcp` speaks the Model Context Protocol over stdio. Stdout carries protocol messages only; diagnostics go to stderr. The process exits when stdin closes.
 
 Tools. Every `path` is a note path as in section 5.2.
 
@@ -311,7 +312,7 @@ Sized for vaults of up to about 10 000 notes and 100 MB of text. Edit history is
 - Each replica has its own **device key** (the transport's key pair). Its public half is the **device id**.
 - Membership is knowledge of the secret. On every connection both sides send a proof and verify the other's in constant time before any other message:
 
-  `proof = blake3_keyed_hash(key = secret, data = "sb-sync-auth-v1" ‖ sender device id ‖ receiver device id)`
+  `proof = blake3_keyed_hash(key = secret, data = "ns-sync-auth-v1" ‖ sender device id ‖ receiver device id)`
 
   The transport already authenticates device ids, so a proof cannot be replayed by a third device. A peer whose proof fails learns nothing and is disconnected.
 - A ticket is a password. Anyone holding it can read and write the vault until the group is abandoned.
@@ -321,7 +322,7 @@ Sized for vaults of up to about 10 000 notes and 100 MB of text. Edit history is
 
 All sync state lives **outside** the vault, so copying or sharing the vault folder never copies a device key, a secret or edit history:
 
-- Base directory: `SB_STATE_DIR` if set; otherwise `%LOCALAPPDATA%\secondbrain` on Windows; otherwise `$XDG_DATA_HOME/secondbrain`, falling back to `$HOME/.local/share/secondbrain`.
+- Base directory: `NS_STATE_DIR` if set; otherwise `%LOCALAPPDATA%\neurospace` on Windows; otherwise `$XDG_DATA_HOME/neurospace`, falling back to `$HOME/.local/share/neurospace`.
 - Per replica: `<base>/vaults/<first 16 hex chars of blake3(canonical vault path)>/`. On Windows the canonical path is lowercased before hashing.
 
 | File | Content |
@@ -433,7 +434,7 @@ Rules that make this safe:
 2. **Compare before overwrite.** A file is replaced, renamed or trashed only if, re-read immediately beforehand with the replacement already prepared, it still has the content seen during the scan. Otherwise the key is blocked for this round. A writer that slips in between that check and the rename can still be overwritten; the window is a few system calls and is accepted.
 3. **Local first.** When a remote update arrives, the engine reconciles, then imports the update, then reconciles again. Pending local edits therefore enter the document as edits and merge with the remote ones line by line; the «both changed» rows are reached only in crash and race situations and after a join without contact (section 8.6).
 4. **Echo.** The engine's own writes trigger the watcher; the resulting round finds everything in agreement and produces nothing.
-5. **Missing vault.** If the vault directory does not exist, or `.secondbrain/` has disappeared from a vault that has sync state, nothing is treated as deleted: starting the engine fails with an error, and a running engine abandons the round before touching the document or any file. The check runs at the start of every round, because a drive can be unmounted while the engine runs and leave an empty folder behind. A running engine reports the error, keeps going and tries again at the next round, so sync resumes by itself when the vault is back.
+5. **Missing vault.** If the vault directory does not exist, or `.neurospace/` has disappeared from a vault that has sync state, nothing is treated as deleted: starting the engine fails with an error, and a running engine abandons the round before touching the document or any file. The check runs at the start of every round, because a drive can be unmounted while the engine runs and leave an empty folder behind. A running engine reports the error, keeps going and tries again at the next round, so sync resumes by itself when the vault is back.
 6. New files use the display path from `paths`. A note that already exists locally keeps its local casing.
 
 ### 8.6 Joining and leaving
@@ -488,17 +489,17 @@ A replica that is not fresh-joined completes its start-up reconciliation before 
   - `lan` contacts nothing outside the local network.
   - Both modes find peers on the same network by local discovery (mDNS) and try the address hints in `peers.json`.
   - The README states this plainly, so the serverless claim is honest: no server run by the user, and no server that stores or can read notes.
-- **Ticket:** `sb1/<device id hex>/<secret hex>[/<addr>,<addr>…]`, where the optional addresses are `ip:port` hints of the inviting device.
+- **Ticket:** `ns1/<device id hex>/<secret hex>[/<addr>,<addr>…]`, where the optional addresses are `ip:port` hints of the inviting device.
 
 Commands:
 
 | Command | Behaviour |
 | --- | --- |
-| `sb sync run` | Runs the engine in the foreground until interrupted or until the replica leaves its group. Creates the device key and the secret if missing. Fails if another engine holds the lock. |
-| `sb sync invite` | Creates the device key and secret if missing and prints a ticket. Includes address hints when a running engine has published them in `status.json`. |
-| `sb sync join <TICKET>` | Validates the ticket, then joins (section 8.6). |
-| `sb sync leave` | Leaves the group (section 8.6). |
-| `sb sync status` | Prints `status.json`; reports «engine not running» when the file is missing or older than 30 seconds. |
+| `ns sync run` | Runs the engine in the foreground until interrupted or until the replica leaves its group. Creates the device key and the secret if missing. Fails if another engine holds the lock. |
+| `ns sync invite` | Creates the device key and secret if missing and prints a ticket. Includes address hints when a running engine has published them in `status.json`. |
+| `ns sync join <TICKET>` | Validates the ticket, then joins (section 8.6). |
+| `ns sync leave` | Leaves the group (section 8.6). |
+| `ns sync status` | Prints `status.json`; reports «engine not running» when the file is missing or older than 30 seconds. |
 
 `join` and `leave` act directly when no engine is running (they take the lock for the duration). When one is running they write `command.pending`, and the engine carries the command out on its next tick and removes the file.
 
@@ -508,7 +509,7 @@ Timing: watcher debounce 300 ms; tick every 5 s; full rescan at least every 60 s
 
 - One **actor** thread owns the document, the base and the vault handle, and processes commands from a queue: reconcile, remote update, peer version, session opened or closed, tick, join, leave, shutdown. Nothing else touches the document. Its first command after start-up is a reconciliation (or the fresh-join wait).
 - Network sessions run on an async runtime and talk to the actor through channels. Session logic is written against generic byte streams, so the whole protocol is tested in memory; the network adapter only opens streams and reports device ids.
-- The engine reports events (peer connected, peer disconnected, synced, error) to its host through a channel. The GUI shows them; `sb sync run` logs them to stderr.
+- The engine reports events (peer connected, peer disconnected, synced, error) to its host through a channel. The GUI shows them; `ns sync run` logs them to stderr.
 
 ## 9. GUI
 
@@ -516,7 +517,7 @@ A single window in the spirit of Obsidian: very simple and minimal, very legible
 
 ### 9.1 Start
 
-`secondbrain [VAULT_DIR]`. Without an argument it reopens the last vault; if there is none it shows a welcome screen with a folder picker and a path field (the field is the fallback where no native dialog is available). The last vault is remembered in `<state base>/app.json`.
+`neurospace [VAULT_DIR]`. Without an argument it reopens the last vault; if there is none it shows a welcome screen with a folder picker and a path field (the field is the fallback where no native dialog is available). The last vault is remembered in `<state base>/app.json`.
 
 ### 9.2 Layout
 
@@ -621,10 +622,10 @@ Linux has no portable blur for a window (appendix A.5), so it always gets `Simul
 - «Reduce transparency» removes all translucency.
 - Nothing is conveyed by colour alone: an unresolved link also shows the words «not created yet», a blocked note the word «blocked».
 
-**Logo and icon** (user's request of 2026-11-18): the source is `assets/logo/second-brain.svg` (1024×1024, a rounded dark tile with two glass hemispheres and a blue graph hub). PNG renderings made from it (sizes 16, 32, 48, 64, 128, 256, 512) and a multi-size Windows `.ico` sit next to it, committed, with the command that made them in `assets/logo/README.md`; the SVG stays the only source. Uses:
-- the window and taskbar icon of `secondbrain` on Windows and Linux (`ViewportBuilder::with_icon`, from the 256 px PNG embedded in the binary);
-- the icon of `secondbrain.exe` in Explorer (Windows resource, from the `.ico`, built only for Windows targets);
-- the welcome screen shows the logo (about 96 points) above the folder picker, with the accessible name «Second Brain»; it is decoded into a texture by the application itself, so the egui image loaders stay without `image`, `file` and `http` features (section 9.3, the preview fetches nothing);
+**Logo and icon** (user's request of 2026-11-18): the source is `assets/logo/neurospace.svg` (1024×1024, a rounded dark tile with two glass hemispheres and a blue graph hub). PNG renderings made from it (sizes 16, 32, 48, 64, 128, 256, 512) and a multi-size Windows `.ico` sit next to it, committed, with the command that made them in `assets/logo/README.md`; the SVG stays the only source. Uses:
+- the window and taskbar icon of `neurospace` on Windows and Linux (`ViewportBuilder::with_icon`, from the 256 px PNG embedded in the binary);
+- the icon of `neurospace.exe` in Explorer (Windows resource, from the `.ico`, built only for Windows targets);
+- the welcome screen shows the logo (about 96 points) above the folder picker, with the accessible name «Neurospace»; it is decoded into a texture by the application itself, so the egui image loaders stay without `image`, `file` and `http` features (section 9.3, the preview fetches nothing);
 - the top of the README shows the logo.
 The Linux `.desktop` file and icon installation belong to M4.
 
@@ -632,7 +633,7 @@ The Linux `.desktop` file and icon installation belong to M4.
 
 ## 10. Cross-platform and distribution
 
-- Windows: `cargo build --release` produces `secondbrain.exe` and `sb.exe`.
+- Windows: `cargo build --release` produces `neurospace.exe` and `ns.exe`.
 - Linux: a script builds both binaries in a Docker container based on an old-glibc distribution (Debian 11, glibc 2.31) so that they run on almost every current distribution. The GUI needs a working OpenGL driver and X11 or Wayland at run time.
 - The README states the Linux run-time requirements, how to register the MCP server with Claude Code and Claude Desktop, how sync and tickets work, what `internet` mode contacts, and the non-goals.
 
@@ -653,8 +654,8 @@ Checks described as «by the orchestrator» are run by the orchestrating session
 
 **M1 — core, CLI, MCP**
 - `cargo test --workspace`, `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` pass on Windows, and the test suite passes in a Linux container.
-- By the orchestrator, against a sample vault: every CLI command gives the expected output with and without `--json`; a path with `..`, an absolute path and a path under `.secondbrain/` are refused.
-- By the orchestrator: piping `initialize`, `tools/list` and a `tools/call` for each tool into `sb mcp` returns well-formed responses and nothing else on stdout.
+- By the orchestrator, against a sample vault: every CLI command gives the expected output with and without `--json`; a path with `..`, an absolute path and a path under `.neurospace/` are refused.
+- By the orchestrator: piping `initialize`, `tools/list` and a `tools/call` for each tool into `ns mcp` returns well-formed responses and nothing else on stdout.
 
 **M2 — sync**
 - All tests pass on Windows and in a Linux container, including the scenario suite:
@@ -668,7 +669,7 @@ Checks described as «by the orchestrator» are run by the orchestrating session
   - crash windows: document persisted but files not written; files written but base not persisted; conflict resolution interrupted;
   - a wrong secret is rejected; an oversized or truncated frame closes the connection;
   - three replicas in a line converge.
-- By the orchestrator, on one machine: two `sb sync run` processes with different vaults and state directories, paired with a ticket, converge within 10 seconds after edits on either side, including an edit made by `sb write` while both run.
+- By the orchestrator, on one machine: two `ns sync run` processes with different vaults and state directories, paired with a ticket, converge within 10 seconds after edits on either side, including an edit made by `ns write` while both run.
 - `internet` mode is tried between two processes and its real status is recorded: working, or not verified on this machine and why.
 
 **M3 — GUI**
