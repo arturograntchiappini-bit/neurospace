@@ -598,7 +598,8 @@ Linux has no portable blur for a window (appendix A.5), so it always gets `Simul
 | Document surface | `#FFFFFF` | `#232325` |
 | Primary text | `#1C1C1E` | `#F5F5F7` |
 | Secondary text | `#3C3C43` | `#C8C8D2` |
-| Accent text (links, selected item) | `#0A45A8` | `#B4D0FF` |
+| Accent text (links, selected item) | `#0940A0` | `#B8D3FF` |
+| Graph edge (opaque; ≥ 3:1 non-text contrast on the document surface) | `#8A8A90` | `#77777D` |
 | Hairline | white 35 % | white 8 % |
 | Top highlight | white 50 % | white 10 % |
 | Shadow | black 8 %, blur 24, offset y 6 | black 30 %, blur 24, offset y 6 |
@@ -619,6 +620,13 @@ Linux has no portable blur for a window (appendix A.5), so it always gets `Simul
 - Text size scales from 75 % to 200 % (top bar menu, Ctrl+Plus, Ctrl+Minus, Ctrl+0) and is remembered.
 - «Reduce transparency» removes all translucency.
 - Nothing is conveyed by colour alone: an unresolved link also shows the words «not created yet», a blocked note the word «blocked».
+
+**Logo and icon** (user's request of 2026-11-18): the source is `assets/logo/second-brain.svg` (1024×1024, a rounded dark tile with two glass hemispheres and a blue graph hub). PNG renderings made from it (sizes 16, 32, 48, 64, 128, 256, 512) and a multi-size Windows `.ico` sit next to it, committed, with the command that made them in `assets/logo/README.md`; the SVG stays the only source. Uses:
+- the window and taskbar icon of `secondbrain` on Windows and Linux (`ViewportBuilder::with_icon`, from the 256 px PNG embedded in the binary);
+- the icon of `secondbrain.exe` in Explorer (Windows resource, from the `.ico`, built only for Windows targets);
+- the welcome screen shows the logo (about 96 points) above the folder picker, with the accessible name «Second Brain»; it is decoded into a texture by the application itself, so the egui image loaders stay without `image`, `file` and `http` features (section 9.3, the preview fetches nothing);
+- the top of the README shows the logo.
+The Linux `.desktop` file and icon installation belong to M4.
 
 **Settings** are kept in `<state base>/app.json` with the last vault: `{"last_vault": path or null, "theme": "system" | "light" | "dark", "reduce_transparency": bool, "zoom": number}`. A missing, unreadable or invalid file means the defaults (`null`, `"system"`, `false`, `1.0`); a zoom outside 0.75–2.0 is clamped. The application never fails to start because of this file.
 

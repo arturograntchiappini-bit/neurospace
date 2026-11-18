@@ -177,6 +177,24 @@ pub fn write_note(vault: &Vault, path: &str, content: &str) -> Result<WriteOutco
     })
 }
 
+/// Creates the note at `path`; never replaces anything, and adopts the spelling of existing folders.
+///
+/// # Errors
+/// `InvalidPath`, `AlreadyExists` when a note exists there in any letter case, `InvalidInput` for
+/// content over `MAX_NOTE_BYTES`, or a write error from the vault.
+pub fn create_note(vault: &Vault, path: &str, content: &str) -> Result<WriteOutcome> {
+    let parsed = parse_path(path)?;
+    if vault.locate(&parsed)?.is_some() {
+        return Err(CoreError::AlreadyExists(path.to_owned()));
+    }
+    let adopted = vault.adopt_folders(&parsed)?;
+    vault.create(&adopted, content)?;
+    Ok(WriteOutcome {
+        path: adopted,
+        created: true,
+    })
+}
+
 /// Appends to the note at `path`, creating it when no spelling of it exists.
 ///
 /// # Errors
@@ -423,6 +441,50 @@ mod tests {
             fs::read_to_string(vault.root().join("new/n.md")).unwrap(),
             "x"
         );
+    }
+
+    #[test]
+    fn should_create_note_when_path_is_free() {
+        let (_tmp, vault) = seeded();
+        let outcome = create_note(&vault, "n.md", "body").unwrap();
+        assert_eq!(
+            outcome,
+            WriteOutcome {
+                path: p("n.md"),
+                created: true
+            }
+        );
+        assert_eq!(
+            fs::read_to_string(vault.root().join("n.md")).unwrap(),
+            "body"
+        );
+    }
+
+    #[test]
+    fn should_refuse_create_when_note_exists_in_other_case() {
+        let (_tmp, vault) = seeded();
+        let result = create_note(&vault, "home.md", "new");
+        assert!(
+            matches!(result, Err(CoreError::AlreadyExists(_))),
+            "{result:?}"
+        );
+        assert_eq!(read_note(&vault, "Home.md").unwrap(), "[[Idea]] #start");
+    }
+
+    #[test]
+    fn should_adopt_folder_spelling_when_creating() {
+        let (_tmp, vault) = seeded();
+        let outcome = create_note(&vault, "projects/x.md", "x").unwrap();
+        assert_eq!(outcome.path, p("Projects/x.md"));
+        assert_eq!(dirs_named_projects(&vault), 1);
+    }
+
+    #[test]
+    fn should_refuse_create_when_content_too_large() {
+        let (_tmp, vault) = seeded();
+        let too_big = "a".repeat(crate::MAX_NOTE_BYTES + 1);
+        assert!(create_note(&vault, "big.md", &too_big).is_err());
+        assert!(!vault.root().join("big.md").exists());
     }
 
     #[test]

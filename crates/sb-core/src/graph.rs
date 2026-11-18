@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::Serialize;
 
-use crate::index::{Index, normalize_target};
+use crate::index::{Index, new_note_path};
 use crate::markdown::Link;
 use crate::path::{NoteKey, NotePath};
 
@@ -15,7 +15,7 @@ const GHOST_PREFIX: char = '?';
 /// A note, or a ghost standing for a link target that matches no note.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GraphNode {
-    /// Note path, or `?` plus the normalised target for a ghost.
+    /// Note path, or `?` plus the key of the note a click would create, for a ghost.
     pub id: String,
     /// File stem, or the target as first written for a ghost.
     pub label: String,
@@ -72,20 +72,21 @@ impl Index {
         }
     }
 
-    /// Id of the node a link points to; registers a ghost when unresolved. `None` for a self-link
-    /// or a target that normalises to nothing.
+    /// Id of the node a link points to; registers a ghost when unresolved. `None` for a self-link,
+    /// an attachment, or a target no note can be created for.
     fn target_id(
         &self,
         link: &Link,
         from: &NotePath,
         ghosts: &mut BTreeMap<String, String>,
     ) -> Option<String> {
+        if link.is_attachment() {
+            return None;
+        }
         let Some(target) = self.resolve(&link.target, from) else {
-            let normalized = normalize_target(&link.target);
-            if normalized.is_empty() {
-                return None;
-            }
-            let id = format!("{GHOST_PREFIX}{normalized}");
+            let key = new_note_path(&link.target, from).ok()?.key();
+            let stem = key.as_str().strip_suffix(".md").unwrap_or(key.as_str());
+            let id = format!("{GHOST_PREFIX}{stem}");
             ghosts
                 .entry(id.clone())
                 .or_insert_with(|| link.target.clone());
@@ -196,6 +197,59 @@ mod tests {
                 ("projects/Plan.md", "Home.md"),
                 ("projects/Plan.md", "projects/Idea.md"),
             ]
+        );
+    }
+
+    fn ghost_ids(ix: &Index) -> Vec<(String, String)> {
+        let nodes = ix.graph().nodes;
+        let ghosts = nodes.into_iter().filter(|node| !node.exists);
+        ghosts.map(|node| (node.id, node.label)).collect()
+    }
+
+    #[test]
+    fn should_skip_attachments_in_graph() {
+        let ix = Index::from_notes(vec![
+            (p("a.md"), "![[p.png]] [[b]]".into()),
+            (p("b.md"), String::new()),
+        ]);
+        let g = ix.graph();
+        let ids: Vec<_> = g.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["a.md", "b.md"]);
+        assert_eq!(
+            g.edges,
+            vec![GraphEdge {
+                from: "a.md".into(),
+                to: "b.md".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn should_separate_anchored_ghosts_by_folder() {
+        let ix = Index::from_notes(vec![
+            (p("x/a.md"), "[[./new]]".into()),
+            (p("y/c.md"), "[[./new]]".into()),
+        ]);
+        let ghosts: Vec<_> = ghost_ids(&ix).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ghosts, ["?x/new", "?y/new"]);
+    }
+
+    #[test]
+    fn should_name_the_ghost_of_an_anchored_link_in_a_root_note_and_skip_a_bare_dot_slash() {
+        let ix = Index::from_notes(vec![(p("a.md"), "[[./new]] [[./]] [[./../x]]".into())]);
+        let ghosts: Vec<_> = ghost_ids(&ix).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ghosts, ["?new"]);
+    }
+
+    #[test]
+    fn should_keep_one_ghost_for_a_bare_missing_name() {
+        let ix = Index::from_notes(vec![
+            (p("x/a.md"), "[[Missing]]".into()),
+            (p("y/c.md"), "[[missing]]".into()),
+        ]);
+        assert_eq!(
+            ghost_ids(&ix),
+            [("?missing".to_owned(), "Missing".to_owned())]
         );
     }
 

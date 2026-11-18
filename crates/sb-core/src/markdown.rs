@@ -35,6 +35,31 @@ pub struct Link {
     pub line: u32,
 }
 
+/// File extensions (without the dot) whose links point to attachments, not notes (spec 6.1).
+pub const ATTACHMENT_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "ico", "tif", "tiff", "pdf", "mp3",
+    "wav", "ogg", "m4a", "flac", "mp4", "webm", "mov", "mkv", "avi",
+];
+
+impl Link {
+    /// True when the target's last component ends in `.` plus an attachment extension, ignoring case.
+    pub fn is_attachment(&self) -> bool {
+        is_attachment_target(&self.target)
+    }
+}
+
+/// True when the last component of `target` ends in `.` plus an attachment extension, ignoring case.
+pub fn is_attachment_target(target: &str) -> bool {
+    let slashed = target.trim().replace('\\', "/");
+    let last = slashed.rsplit('/').next().unwrap_or_default();
+    let Some((_, extension)) = last.rsplit_once('.') else {
+        return false;
+    };
+    ATTACHMENT_EXTENSIONS
+        .iter()
+        .any(|known| extension.eq_ignore_ascii_case(known))
+}
+
 /// Links and tags of one note.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Parsed {
@@ -259,6 +284,15 @@ fn build_link(dest: &str, kind: LinkKind, line: u32) -> Option<Link> {
     })
 }
 
+/// The note a Markdown link destination names (heading removed, percent-decoded), or `None`
+/// when it has a URL scheme or does not end in `.md`: the same rule `parse` applies (spec 6.1).
+pub fn markdown_note_target(dest: &str) -> Option<String> {
+    if !is_note_destination(dest) {
+        return None;
+    }
+    build_link(dest, LinkKind::Markdown, 0).map(|link| link.target)
+}
+
 fn is_note_destination(dest: &str) -> bool {
     let path = dest.split_once('#').map_or(dest, |(path, _)| path);
     !has_url_scheme(dest) && percent_decode(path).to_ascii_lowercase().ends_with(".md")
@@ -480,6 +514,18 @@ MD: [text](other/Note%20D.md#h) and [ext](https://example.com/x.md) and [img](pi
     }
 
     #[test]
+    fn should_name_the_note_of_a_markdown_destination_the_way_parse_does() {
+        assert_eq!(
+            markdown_note_target("My%20Note.md#H").as_deref(),
+            Some("My Note.md")
+        );
+        assert_eq!(markdown_note_target("a/b.MD").as_deref(), Some("a/b.MD"));
+        for dest in ["https://e.com/a.md", "mailto:x.md", "pic.png", "note", "#h"] {
+            assert_eq!(markdown_note_target(dest), None, "{dest}");
+        }
+    }
+
+    #[test]
     fn should_ignore_markdown_links_with_url_scheme() {
         assert!(
             parse("[m](mailto:x.md) [h](http://e.com/a.md)")
@@ -510,5 +556,13 @@ MD: [text](other/Note%20D.md#h) and [ext](https://example.com/x.md) and [img](pi
     #[test]
     fn should_not_find_tags_inside_wiki_link_text() {
         assert!(parse("[[#Only heading]] [[Note #x]]").tags.is_empty());
+    }
+
+    #[test]
+    fn should_mark_attachment_when_extension_is_listed() {
+        let md =
+            "![[photo.PNG]] [[docs/report.pdf]] [[Idea]] [[v1.2 notes]] [[Meeting 2026.11.17]]";
+        let flags: Vec<bool> = parse(md).links.iter().map(Link::is_attachment).collect();
+        assert_eq!(flags, [true, true, false, false, false]);
     }
 }

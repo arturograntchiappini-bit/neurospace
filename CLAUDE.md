@@ -533,7 +533,7 @@ Ogni prompt di dispatch a un implementer contiene, oltre al template della skill
 
 ## Verità assoluta
 
-Ultimo aggiornamento: 2026-11-17 (pianificazione di M3)
+Ultimo aggiornamento: 2026-11-18 (chiusura di M3)
 
 **Legenda stati.** **[Confermato]** = detto o approvato dall'utente. **[Proposto — applicato su delega]** = deciso dall'orchestratore in base alla delega totale del 2026-11-15, non approvato voce per voce dall'utente: vale finché l'utente non lo cambia. **[Aperto]** = non deciso. Ciò che non è verificato è scritto come «non verificato».
 
@@ -543,12 +543,13 @@ Ultimo aggiornamento: 2026-11-17 (pianificazione di M3)
 - **[Confermato]** Delega: l'utente ha delegato ogni decisione e chiesto di procedere senza fermarsi fino al completamento (2026-11-15).
 - **[Confermato]** (richiesta dell'utente, 2026-11-17, testo integrale, arrivata all'inizio della pianificazione di M3): «la UI deve essere molto semplice e minimal ma molto molto ben leggibile e accessibile, polished, un po' stile mac con effetto glass».
 - **[Confermato]** (richiesta dell'utente, 2026-11-17, dopo aver visto le schermate dello spike sul vetro, testo integrale): «i saw the preview of spike glass i kinda like it, but i don't like the purple/pink gradient, get rid of it, plus, the glass effect should be refined better». Quindi: niente sfondi colorati a gradiente, solo fondali neutri; il vetro va rifinito.
+- **[Confermato]** (richiesta dell'utente, 2026-11-18, testo integrale): «as logo and icon use assets/logo/second-brain.svg». L'SVG è la sola fonte del logo e dell'icona (spec 9.6, «Logo and icon»).
 
 ### V.2 Fonti
 
 - Richiesta dell'utente (V.1).
 - **[Proposto — applicato su delega]** Spec di design: `docs/superpowers/specs/2026-11-15-second-brain-design.md`. Letta da un revisore indipendente (builder check) il 2026-11-15; le sue 7 domande sono state risolte come rulings (V.8) e la spec aggiornata.
-- **[Proposto — applicato su delega]** Piano M1: `docs/superpowers/plans/2026-11-15-m1-core-cli-mcp.md`. Piano M2: `docs/superpowers/plans/2026-11-16-m2-sync.md` (12 task, da 0 a 11), riletto contro il codice di M1 il 2026-11-16. Piano M3: `docs/superpowers/plans/2026-11-17-m3-gui.md` (10 task), scritto il 2026-11-17 dopo lo spike sul vetro. Il piano M3b (prestazioni del motore di sync e i cinque minori di stato rinviati da M2) e quello di M4 si scrivono all'inizio di ciascuno — **[Aperto]**.
+- **[Proposto — applicato su delega]** Piano M1: `docs/superpowers/plans/2026-11-15-m1-core-cli-mcp.md`. Piano M2: `docs/superpowers/plans/2026-11-16-m2-sync.md` (12 task, da 0 a 11), riletto contro il codice di M1 il 2026-11-16. Piano M3: `docs/superpowers/plans/2026-11-17-m3-gui.md` (10 task), scritto il 2026-11-17 dopo lo spike sul vetro, eseguito e chiuso il 2026-11-18 (più il logo, chiesto durante la chiusura). Il piano M3b (prestazioni del motore di sync e i cinque minori di stato rinviati da M2) e quello di M4 si scrivono all'inizio di ciascuno — **[Aperto]**.
 - Spike sul vetro del 2026-11-17 (codice usa-e-getta nella scratchpad): materiale Mica di Windows tramite `window-vibrancy` 0.8.1, vetro simulato, font Inter 4.1, contrasto WCAG. I fatti verificati sono nell'appendice A.5 della spec, e la sezione 9.6 contiene l'aspetto scelto.
 - Spike di verifica API del 2026-11-15 (codice usa-e-getta, fuori dal repo): iroh 1.4, eframe 0.37 + egui_commonmark 0.26, rmcp 3.10, loro 1.17 + notify 8.2. Conclusi; i fatti verificati sono nell'appendice A della spec, con accanto ciò che non è stato verificato.
 
@@ -621,6 +622,35 @@ Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nel
   - Non verificato: la modalità `internet` tra due reti reali diverse e su Windows (bloccata qui dal firewall); la scoperta mDNS tra due macchine; che errore dà Windows quando il vault viene smontato durante una scansione; mDNS aggiunto all'endpoint già avviato su una rete reale (controllato solo nel sorgente di iroh).
 - 2026-11-17 — `graphify --update` dopo M2 (subagente `haiku`; estrazione semantica dei 5 documenti cambiati in tre blocchi `haiku` lanciati dalla sessione principale): da 728 nodi, 1612 archi e 25 comunità a 2083 nodi, 5651 archi e 120 comunità. La guardia di restringimento non è scattata e nulla è stato forzato. Scompaiono 3 nodi, tutti attesi: `WINDOWS_DEVICE_NAMES`, tolto da `path.rs` nel Task 0 di M2, e due segnaposto della libreria standard. Nessun nodo dalle cartelle escluse (V.6). Non fatto: `cost.json` e la cache semantica dei documenti, quindi il prossimo aggiornamento ri-estrae quei documenti. graphifyy installato 0.9.93, skill 0.9.105: non aggiornato.
 - 2026-11-17 — **Pianificazione di M3.** Spike sul vetro in due versioni: la v1 aveva uno sfondo a gradiente viola/rosa, rifiutato dall'utente; la v2 usa fondali neutri e solo le aree strumenti sono di vetro, con la nota su una superficie piena. Spec aggiornata: 6.1 (link agli allegati), 6.3 (fantasmi dei link ancorati), 6.6 (dove nasce una nota creata da un link), 9 (vetro, tema di sistema, accessibilità, impostazioni, ciclo di vita del motore nella GUI), A.5 (fatti dello spike). Scritto il piano M3 (10 task).
+- 2026-11-18 — **M3 completata e validata** (GUI `secondbrain`): branch `feat/m3-gui`, worktree `.claude/worktrees/m3-gui`, testa `7783575` più i commit di documentazione. Ledger con ogni ruling: `.superpowers/sdd/2026-11-17-m3-gui/progress.md` del worktree.
+  - Dieci task completati e revisionati: albero, editor, anteprima, grafo, ricerca, apertura rapida, impostazioni, sync dalla GUI, vetro Mica o simulato, tema di sistema, accessibilità.
+  - Revisione finale `opus` (sola lettura): «pronto al merge con correzioni», 0 critici, 2 importanti, 7 minori. I due importanti:
+    - un salvataggio fallito intrappolava l'utente e la seconda chiusura perdeva il testo;
+    - a 10 000 note ogni salvataggio automatico bloccava l'interfaccia per 80–125 ms.
+  - Un'unica ondata di correzioni (5 commit). La ri-revisione ha trovato 2 importanti e 6 minori. Corretti:
+    - la GUI poteva creare un gruppo nuovo e usare la rete dopo un `sb sync leave` fatto altrove;
+    - il file `recovered/` non veniva mai scritto alla chiusura.
+    - Gli altri sono accettati o rinviati a M3b (V.8).
+  - Dalla validazione:
+    - «Adatta grafo» ingrandisce fino al 200 %, così i nomi delle note si vedono;
+    - logo e icona dall'SVG dell'utente (finestra, barra delle applicazioni, icona dell'eseguibile, schermata di benvenuto, README).
+  - Validazione dell'orchestratore:
+    - Windows: `fmt`, `clippy -D warnings` e tutta la suite puliti (sb-app 170 unitari più le suite UI, sb-core 125, sb-sync 218).
+    - Container Linux `rust:1-bullseye` (rustc 1.98), su `7783575`: `fmt` e `clippy` puliti, ogni suite passata da root (sb-app 171, sb-core 129, sb-sync 225), 11 test sensibili ai permessi passati da `nobody`. I 7 test dei salvataggi falliti sono passati da `nobody` su `dffbe03`.
+    - Binario di release, vault di 3 note, catture della sola finestra dell'app: scuro e chiaro, con Mica e con «Riduci trasparenza». Vetro neutro, nessun gradiente, nota su superficie piena, testo leggibile, anello di focus visibile.
+    - Un vault mai sincronizzato non avvia il motore: la cartella di stato contiene solo `vault-path.txt`. Ogni chiusura esce con stderr vuoto.
+    - Vault di 10 000 note (94,7 MB):
+      - albero disegnato in 1,0–1,6 s;
+      - ricerca 45–116 ms per tasto (381 ms per una sola lettera);
+      - una modifica esterna della nota aperta compare in 1,9 s;
+      - memoria 228–243 MB.
+  - Non verificato:
+    - uso interattivo da parte di una persona (trascinamento, sensazione di Mica);
+    - Windows 10;
+    - la GUI su Linux con un display reale: solo build e test headless;
+    - l'icona sul pulsante della barra delle applicazioni: si cattura solo la finestra;
+    - un bordo nero sottile nelle catture opache, probabilmente il bordo di ridimensionamento reso da PrintWindow.
+    - Visto una volta e non riprodotto: con la finestra ridotta a icona il processo è salito a 1 GB per poi scendere a 533 MB; tre prove successive sono rimaste a circa 228 MB.
 - Rischio chiuso il 2026-11-17: il preset di rete di iroh che «non risultava mai online» su questa macchina era il firewall applicativo, non il codice né iroh.
 - Non verificabile in questo progetto: uso interattivo della GUI da parte di una persona. La GUI si verifica con test headless e con l'avvio del binario.
 
@@ -677,4 +707,15 @@ Formato: decisione — perché — costo se sbagliata.
   - L'indice della GUI si ricostruisce per intero in background dopo 300 ms di quiete, invece di aggiornarsi un pezzo alla volta: il watcher non dà i percorsi, e così l'elenco dei file ignorati resta giusto. Costo: alla scala dichiarata ogni cambiamento esterno costa una ricostruzione di qualche secondo in background.
   - Una nota creata da un link con nome semplice nasce nella radice del vault (come in Obsidian); un link `./x` nasce nella cartella della nota di partenza. L'id di un fantasma è la chiave della nota che il clic creerebbe. Costo: i fantasmi dei link `./` cambiano id nell'output di `get_graph`.
   - Inter 4.1 è incorporato nel binario, con la licenza OFL accanto ai font.
+- 2026-11-18 — **Rulings nate durante M3 e alla sua chiusura** (dettaglio e costo nel ledger di M3, `.superpowers/sdd/2026-11-17-m3-gui/progress.md`):
+  - Un salvataggio che fallisce non intrappola l'utente: su ogni uscita dalla nota (cambio nota, cambio vault, chiusura) il testo finisce in una copia di conflitto e si procede; alla seconda chiusura, se nemmeno quella riesce, il testo va in `<cartella di stato>/recovered/`. La spec 9.3 («il testo scritto non si perde mai») prevale sul ruling del Task 7 «la seconda chiusura esce senza salvare». Costo: più copie di conflitto quando una nota è in sola lettura.
+  - Cancellare la nota aperta salva prima il testo non salvato; se il salvataggio fallisce, la cancellazione è rifiutata. Costo: nessuno noto.
+  - I backlink e la ricerca non si ricalcolano a ogni salvataggio della nota aperta (chiavi di cache che ignorano il proprio salvataggio). Resta un ricalcolo per salvataggio dopo la ricostruzione in background (N1), rinviato a M3b. Costo: fino ad allora, a 10 000 note, un piccolo scatto dopo ogni pausa di scrittura.
+  - La GUI riavvia il motore solo se il vault ha ancora un gruppo: dopo un `sb sync leave` fatto altrove non crea un gruppo nuovo e non contatta la rete. Un invito o un'unione falliti che hanno avviato il motore lo fermano. Costo: un invito ripetuto riavvia il motore (qualche secondo).
+  - Alla chiusura la GUI aspetta al massimo 10 s un avvio del motore in corso; al cambio di vault il vecchio motore si ferma in background, senza bloccare l'interfaccia. Costo: una chiusura durante un avvio lento può durare fino a 10 s.
+  - «Adatta grafo» ingrandisce fino al 200 %, perché i nomi delle note compaiono dal 150 %: prima un vault piccolo mostrava punti senza nome. Costo: nessuno per i vault grandi, che restano molto sotto il 100 %.
+  - Logo: PNG e ICO sono generati a mano dall'SVG e salvati accanto, con i comandi in `assets/logo/README.md`; la build non ha un renderer SVG. L'icona di `secondbrain.exe` è una risorsa Windows (`winresource`, attiva solo per i target Windows). Il file `.desktop` per Linux va a M4. Costo: se l'SVG cambia, le immagini vanno rifatte a mano.
+  - Dipendenze aggiunte a `sb-app` oltre al piano: `raw-window-handle` 0.6.2 (serve a Mica) e `pulldown-cmark` 0.13 (già nel workspace). Il CHANGELOG resta tutto sotto `[Unreleased]` fino al rilascio di M4.
+  - Rinviati a M3b: ricostruzione completa dell'indice dopo ogni salvataggio (m5, N1), nessun taglio degli archi fuori vista nel grafo (m6), albero non virtualizzato, stato del motore letto in modo bloccante, i test del motore che vanno in timeout sotto carico. Accettati: ricerca non aggiornata per il testo della nota aperta fino al prossimo cambio tra note (N3); sotto circa 390 pt di larghezza la larghezza minima del contenuto vince sul limite del pannello (N6); una copia di conflitto ridondante in un caso raro (N7); due rami non testati del controllo del sync (N8); sezioni ravvicinate nella finestra del sync (V2). Costo: CPU e fotogrammi a 10 000 note, nessun dato a rischio.
+  - Alcune ri-revisioni di correzioni piccole (Task 4, Task 10, correzioni residue, adattamento del grafo, logo) sono state sostituite dalla lettura del diff da parte dell'orchestratore. Costo: un difetto sottile arriva alle revisioni di M3b.
 - 2026-11-15 — **Domanda 7 (chi fa le prove a mano, connettività in M4).** Le prove «a mano» le esegue l'orchestratore con comandi; la GUI non è verificata da una persona e lo si dichiara; la prova Windows↔Linux usa un ticket con indirizzi e porta fissa; `internet` resta la modalità predefinita e il suo stato reale si registra in M2. — Docker è disponibile; mDNS non attraversa la rete di Docker. — Costo: se `internet` non funziona sulle reti dell'utente, il sync tra reti diverse non va finché non si indaga.

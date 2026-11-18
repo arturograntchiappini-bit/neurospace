@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="linear-gradient-1" x1="512" y1="0" x2="512" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2c2c31"/>
+      <stop offset="1" stop-color="#141416"/>
+    </linearGradient>
+    <filter id="filter-1" filterUnits="userSpaceOnUse" x="300" y="303" width="424" height="424" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="30"/></filter>
+    <linearGradient id="linear-gradient-2" x1="360.606" y1="284.412" x2="360.606" y2="740.377" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.1"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.02"/>
+    </linearGradient>
+    <linearGradient id="linear-gradient-3" x1="663.394" y1="284.412" x2="663.394" y2="740.377" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.1"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.02"/>
+    </linearGradient>
+    <linearGradient id="linear-gradient-4" x1="512" y1="1" x2="512" y2="1023" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.32"/>
+      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.1"/>
+    </linearGradient>
+  </defs>
+  <title>Second Brain</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path id="Tile" d="M232 0 L792 0 C920.13 0 1024 103.87 1024 232 L1024 792 C1024 920.13 920.13 1024 792 1024 L232 1024 C103.87 1024 0 920.13 0 792 L0 232 C0 103.87 103.87 0 232 0 Z" fill="url(#linear-gradient-1)"/>
+    <g filter="url(#filter-1)">
+      <circle id="Hub_glow" data-name="Hub glow" cx="512" cy="515" r="120" fill="#0a84ff" opacity="0.55"/>
+    </g>
+    <path id="Left_hemisphere" data-name="Left hemisphere" d="M490 307 C452 275 392 277 360 313 C312 307 264 343 268 397 C220 425 220 501 262 531 C236 585 262 645 308 659 C316 713 376 749 424 723 C452 753 490 741 490 711 C470 645 470 375 490 307 Z" fill="url(#linear-gradient-2)" stroke="#eaf1ff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="Right_hemisphere" data-name="Right hemisphere" d="M534 307 C572 275 632 277 664 313 C712 307 760 343 756 397 C804 425 804 501 762 531 C788 585 762 645 716 659 C708 713 648 749 600 723 C572 753 534 741 534 711 C554 645 554 375 534 307 Z" fill="url(#linear-gradient-3)" stroke="#eaf1ff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+    <polyline id="Left_links" data-name="Left links" points="512,515 376,425 372,597 512,515" fill="none" stroke="#7db8ff" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+    <polyline id="Right_links" data-name="Right links" points="512,515 648,425 652,597 512,515" fill="none" stroke="#7db8ff" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle id="Node_L1" data-name="Node L1" cx="376" cy="425" r="30" fill="#eaf1ff"/>
+    <circle id="Node_L1-2" data-name="Node L1" cx="648" cy="425" r="30" fill="#eaf1ff"/>
+    <circle id="Node_L2" data-name="Node L2" cx="372" cy="597" r="30" fill="#eaf1ff"/>
+    <circle id="Node_L2-2" data-name="Node L2" cx="652" cy="597" r="30" fill="#eaf1ff"/>
+    <circle id="Hub" cx="512" cy="515" r="46" fill="#0a84ff" stroke="#eaf1ff" stroke-width="12" stroke-miterlimit="10"/>
+    <path id="Glass_edge" data-name="Glass edge" d="M232 4 L792 4 C917.921 4 1020 106.079 1020 232 L1020 792 C1020 917.921 917.921 1020 792 1020 L232 1020 C106.079 1020 4 917.921 4 792 L4 232 C4 106.079 106.079 4 232 4 Z" fill="none" stroke="url(#linear-gradient-4)" stroke-width="6" stroke-miterlimit="10"/>
+  </g>
+</svg>
