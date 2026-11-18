@@ -108,7 +108,8 @@ struct ViewCache {
     recomputed: usize,
 }
 
-/// The CRDT document that mirrors the notes of one replica.
+/// The CRDT document that mirrors the notes of one replica. It is `Send` but not `Sync` (the view
+/// cache is a `RefCell`): keep it on one thread at a time.
 pub struct SyncDoc {
     doc: LoroDoc,
     cache: RefCell<ViewCache>,
@@ -208,6 +209,8 @@ impl SyncDoc {
     /// through [`SyncDoc::cached`].
     fn refresh_cache(&self) {
         let mut cache = self.cache.borrow_mut();
+        // An error path that left a transaction open would otherwise hide its edits from the frontiers.
+        self.doc.commit();
         let now = self.doc.state_frontiers();
         let atoms = self.atom_count();
         let stale = match &cache.frontiers {
@@ -1080,6 +1083,69 @@ mod tests {
         assert_eq!(doc.view().len(), 10);
         assert_eq!(doc.cache.borrow().recomputed, 10);
         assert_matches_scratch(&doc);
+    }
+
+    #[test]
+    fn should_see_an_edit_that_was_never_committed() {
+        let mut doc = SyncDoc::new();
+        let note = doc.create_note(&p("n.md"), "old\n").unwrap();
+        doc.view();
+        let text = doc.doc.get_text(format!("t:{}", note.as_str()));
+        text.insert(0, "new ").unwrap();
+        assert_eq!(only_text(&doc), "new old\n");
+    }
+
+    #[test]
+    fn should_see_a_tombstone_that_was_never_committed() {
+        let mut doc = SyncDoc::new();
+        let note = doc.create_note(&p("n.md"), "old\n").unwrap();
+        doc.view();
+        let key = tomb_key(&note, &content_hash("old\n"));
+        doc.tombs().insert(&key, true).unwrap();
+        assert!(doc.alive_notes().is_empty());
+    }
+
+    #[test]
+    fn should_recompute_only_the_note_a_peer_edited() {
+        let (mut a, mut b, note) = pair_with_note("l1\nl2\n");
+        for i in 0..20 {
+            a.create_note(&p(&format!("m{i}.md")), "t\n").unwrap();
+        }
+        sync(&mut a, &mut b);
+        b.view();
+        a.update_note(&note, "l1\nl2 peer\n").unwrap();
+        sync(&mut a, &mut b);
+        b.cache.borrow_mut().recomputed = 0;
+        let edited = b.alive_notes().into_iter().find(|n| n.id == note).unwrap();
+        assert_eq!(&*edited.text, "l1\nl2 peer\n");
+        assert_eq!(b.cache.borrow().recomputed, 1);
+        assert_matches_scratch(&b);
+    }
+
+    fn assert_full_rebuild_after(inject: impl Fn(&LoroDoc)) {
+        let (mut a, mut b, _) = pair_with_note("t\n");
+        for i in 0..5 {
+            a.create_note(&p(&format!("m{i}.md")), "t\n").unwrap();
+        }
+        sync(&mut a, &mut b);
+        b.view();
+        inject(&a.doc);
+        a.doc.commit();
+        sync(&mut a, &mut b);
+        b.cache.borrow_mut().recomputed = 0;
+        assert_eq!(b.view().len(), 6);
+        assert_eq!(b.cache.borrow().recomputed, 6);
+        assert_matches_scratch(&b);
+    }
+
+    #[test]
+    fn should_rebuild_when_a_peer_adds_a_foreign_text_container() {
+        assert_full_rebuild_after(|doc| doc.get_text("foreign").insert(0, "x").unwrap());
+    }
+
+    #[test]
+    fn should_rebuild_when_a_peer_adds_a_tombstone_key_without_a_colon() {
+        assert_full_rebuild_after(|doc| doc.get_map("tombs").insert("no-colon", true).unwrap());
     }
 
     #[test]
