@@ -1,0 +1,42 @@
+[package]
+name = "ns-app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "ns_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "neurospace"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "clipboard", "links", "accesskit"] }
+# Pinned exactly: `state::markup::PREVIEW_OPTIONS` must list the pulldown-cmark options this exact
+# renderer enables. Keep the egui_extras `image`, `file` and `http` features off: they would fetch
+# images and files for a note, and the preview must never touch the network or the disk.
+egui_commonmark = { version = "=0.26.0", default-features = false, features = ["pulldown_cmark"] }
+clap.workspace = true
+pulldown-cmark = { version = "0.13", default-features = false }
+raw-window-handle = "0.6.2"
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal", "wayland"] }
+ns-core = { path = "../ns-core" }
+ns-sync = { path = "../ns-sync" }
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+window-vibrancy = "0.8.1"
+
+[build-dependencies]
+winresource = "0.1.34"
+
+[dev-dependencies]
+egui_kittest = "0.37"
+tempfile.workspace = true

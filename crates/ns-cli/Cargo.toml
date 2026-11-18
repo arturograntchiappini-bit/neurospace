@@ -1,0 +1,29 @@
+[package]
+name = "ns-cli"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ns"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+rmcp = { version = "3.10", default-features = false, features = ["server", "macros", "transport-io"] }
+ns-core = { path = "../ns-core" }
+ns-sync = { path = "../ns-sync" }
+schemars = "1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt", "macros", "io-std", "signal"] }
+
+[dev-dependencies]
+rmcp = { version = "3.10", default-features = false, features = ["server", "macros", "client"] }
+tempfile.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-util"] }
