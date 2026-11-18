@@ -414,6 +414,24 @@ fn should_cancel_close_then_write_a_recovered_file_when_nothing_can_keep_the_tex
 }
 
 #[test]
+fn should_write_a_recovered_file_on_exit_when_nothing_can_keep_the_text() {
+    let (name, stem) = long_note();
+    let mut f = open_note_fixture_with(&stem, &[(&name, "old")]);
+    let file = f.vault.join(&name);
+    if !lock_note(&file) {
+        return;
+    }
+    type_into(&mut f.harness, EDITOR, " mine");
+    eframe::App::on_exit(f.harness.state_mut(), None);
+    set_readonly(&file, false);
+    let recovered = f._dirs.1.path().join("state").join("recovered");
+    let files: Vec<_> = fs::read_dir(recovered).unwrap().collect();
+    assert_eq!(files.len(), 1);
+    let path = files[0].as_ref().unwrap().path();
+    assert_eq!(fs::read_to_string(path).unwrap(), "old mine");
+}
+
+#[test]
 fn should_close_at_once_when_nothing_is_unsaved() {
     let mut f = open_note_fixture("a");
     assert!(!request_close(&mut f.harness));

@@ -223,7 +223,8 @@ fn first_reply(control: &mut dyn SyncControl) -> Reply {
 
 fn answer(control: &mut dyn SyncControl, request: Request) -> Option<Reply> {
     Some(match request {
-        Request::Start => Reply::Started(control.start()),
+        // Same rule as the first start: never start an engine for a vault without a group.
+        Request::Start => first_reply(control),
         Request::Invite => Reply::Invited(control.invite()),
         Request::Join(ticket) => Reply::Joined(control.join(&ticket)),
         Request::Leave => Reply::Left(control.leave()),
@@ -476,6 +477,8 @@ mod tests {
         configured: bool,
         start: Result<StartOutcome, String>,
         later_start: Option<Result<StartOutcome, String>>,
+        /// What `configured` answers once `start` has been called (the other process left).
+        configured_after_start: Option<bool>,
         invite: Result<String, String>,
         invite_delay: Duration,
         status: Option<Status>,
@@ -489,6 +492,7 @@ mod tests {
             configured,
             start: Ok(StartOutcome::Started),
             later_start: None,
+            configured_after_start: None,
             invite: Ok("sb1/SECRET-TICKET".into()),
             invite_delay: Duration::ZERO,
             status: None,
@@ -506,6 +510,9 @@ mod tests {
         fn start(&mut self) -> Result<StartOutcome, String> {
             self.calls.push("start");
             let answer = self.start.clone();
+            if let Some(configured) = self.configured_after_start {
+                self.configured = configured;
+            }
             if let Some(next) = self.later_start.take() {
                 self.start = next;
             }
@@ -837,6 +844,24 @@ mod tests {
         apply_next(&mut panel, &worker);
         assert_eq!(panel.state, SyncState::On);
         assert_eq!(calls.all(), ["start", "status", "start"]);
+    }
+
+    #[test]
+    fn should_not_start_an_engine_when_the_other_process_left_the_group() {
+        let (mut control, calls) = fake(true);
+        control.start = Ok(StartOutcome::HandledElsewhere);
+        control.configured_after_start = Some(false);
+        let worker = spawn(control);
+        let mut panel = SyncPanel::default();
+        apply_next(&mut panel, &worker);
+        assert_eq!(panel.state, SyncState::HandledElsewhere);
+        let t0 = Instant::now();
+        panel.tick(&worker, t0, true);
+        apply_next(&mut panel, &worker);
+        panel.tick(&worker, t0, true);
+        apply_next(&mut panel, &worker);
+        assert_eq!(panel.state, SyncState::Off);
+        assert_eq!(calls.all(), ["start", "status"]);
     }
 
     #[test]

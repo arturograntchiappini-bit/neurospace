@@ -397,15 +397,18 @@ impl SecondBrainApp {
         self.post_workspace_notices();
     }
 
-    /// Shows what the workspace did on its own (text moved to a conflict note).
-    fn post_workspace_notices(&mut self) {
+    /// Shows what the workspace did on its own (text moved to a conflict note); returns the texts.
+    fn post_workspace_notices(&mut self) -> Vec<String> {
         let Screen::Vault(workspace) = &mut self.screen else {
-            return;
+            return Vec::new();
         };
         let now = Instant::now();
+        let mut texts = Vec::new();
         for notice in workspace.take_notices() {
+            texts.push(notice.text.clone());
             self.notices.post(notice, now);
         }
+        texts
     }
 
     /// Opens the sync window when `opened` and draws it while it is open.
@@ -538,7 +541,10 @@ impl SecondBrainApp {
             let path = path.unwrap_or_default();
             format!("Could not save {path}: {error}")
         });
-        self.post_workspace_notices();
+        // Leaving and closing may leave nothing on screen to show where the text went.
+        for text in self.post_workspace_notices() {
+            eprintln!("secondbrain: {text}");
+        }
         saved
     }
 
@@ -703,6 +709,7 @@ impl eframe::App for SecondBrainApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Err(text) = self.flush() {
             eprintln!("secondbrain: {text}");
+            self.write_recovered_text();
         }
         self.sync.shut_down();
     }
