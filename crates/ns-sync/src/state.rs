@@ -264,14 +264,18 @@ fn rename_over(from: &Path, to: &Path) -> io::Result<()> {
     std::fs::rename(from, to)
 }
 
-/// Calls `read` until it finds something, at most three times, 10 ms apart; an error ends it at once.
+/// Waits before each re-read of a missing `status.json`: 100 ms in all, enough for the engine's rename.
+const ABSENT_REREAD_DELAYS_MS: [u64; 4] = [10, 20, 30, 40];
+
+/// Calls `read` until it finds something, then again after each delay of `ABSENT_REREAD_DELAYS_MS`;
+/// an error ends it at once.
 fn read_until_found<T>(mut read: impl FnMut() -> Result<Option<T>>) -> Result<Option<T>> {
     let mut found = read()?;
-    for _ in 0..2 {
+    for delay in ABSENT_REREAD_DELAYS_MS {
         if found.is_some() {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(delay));
         found = read()?;
     }
     Ok(found)
@@ -596,8 +600,9 @@ impl StateDir {
         write_json(&self.file("status.json"), status)
     }
 
-    /// The last published status, if any. A missing file is read twice more, 10 ms apart: the
-    /// engine replaces it all the time, and a reader can hit the instant between two names.
+    /// The last published status, if any. A missing file is read up to four more times, waiting
+    /// 10, 20, 30 and 40 ms before each (about 100 ms in total): the engine replaces it all the
+    /// time, and a reader can hit the instant between two names.
     pub fn read_status(&self) -> Result<Option<Status>> {
         read_until_found(|| read_json(&self.file("status.json")))
     }
@@ -1173,13 +1178,13 @@ mod tests {
     }
 
     #[test]
-    fn should_read_three_times_before_calling_a_status_missing() {
+    fn should_read_five_times_before_calling_a_status_missing() {
         let mut reads = 0;
         let missing = read_until_found(|| {
             reads += 1;
             Ok::<Option<u8>, SyncError>(None)
         });
-        assert_eq!((missing.unwrap(), reads), (None, 3));
+        assert_eq!((missing.unwrap(), reads), (None, 5));
         let mut reads = 0;
         let found = read_until_found(|| {
             reads += 1;
