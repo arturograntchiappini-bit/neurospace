@@ -595,7 +595,10 @@ fn refuse_read_only(target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Renames `temp` over `target` when `still_expected` accepts the target's current bytes.
+/// Renames `temp` over `target` when `still_expected` accepts the target's current bytes. It never
+/// retries a denied rename: the denial means someone else holds the file, who may finish writing
+/// meanwhile, and the check would no longer cover what is on disk. The caller blocks the note and
+/// tries again next round.
 fn swap_if(
     temp: &Path,
     target: &Path,
@@ -609,14 +612,21 @@ fn swap_if(
     if !still_expected(&current) {
         return Ok(false);
     }
-    replace_keeping_permissions(temp, target)?;
+    copy_permissions(temp, target)?;
+    fs::rename(temp, target).map_err(io_error(target))?;
     Ok(true)
 }
 
-fn replace_keeping_permissions(temp: &Path, target: &Path) -> Result<()> {
+fn copy_permissions(temp: &Path, target: &Path) -> Result<()> {
     if let Some(existing) = lstat(target)? {
         fs::set_permissions(temp, existing.permissions()).map_err(io_error(temp))?;
     }
+    Ok(())
+}
+
+/// The unconditional replace of `write` and `append`, where overwriting is the request.
+fn replace_keeping_permissions(temp: &Path, target: &Path) -> Result<()> {
+    copy_permissions(temp, target)?;
     rename_over(temp, target).map_err(io_error(target))
 }
 
@@ -817,6 +827,53 @@ mod tests {
 
     fn denied() -> io::Error {
         io::ErrorKind::PermissionDenied.into()
+    }
+
+    /// Holds `file` open without delete sharing, so Windows denies a rename over it, and
+    /// releases it after 20 ms: inside the window of a retrying rename, long before any other.
+    #[cfg(windows)]
+    fn call_while_held_briefly<T>(file: &Path, call: impl FnOnce() -> T) -> T {
+        use std::os::windows::fs::OpenOptionsExt;
+        const SHARE_READ: u32 = 1;
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(SHARE_READ)
+            .open(file)
+            .unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                drop(held);
+            });
+            call()
+        })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn should_retry_a_denied_replacing_write() {
+        let (dir, vault) = vault();
+        vault.write(&p("n.md"), "old").unwrap();
+        let file = dir.path().join("n.md");
+        let result = call_while_held_briefly(&file, || vault.write(&p("n.md"), "new"));
+        result.unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "new");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn should_not_retry_a_denied_conditional_replace() {
+        let (dir, vault) = vault();
+        vault.write(&p("n.md"), "old").unwrap();
+        let file = dir.path().join("n.md");
+        let result =
+            call_while_held_briefly(&file, || vault.replace_if(&p("n.md"), "new", &|_| true));
+        assert!(matches!(
+            result,
+            Err(CoreError::Io { ref source, .. }) if source.kind() == io::ErrorKind::PermissionDenied
+        ));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "old");
+        assert_eq!(temporary_entries(dir.path()), 0);
     }
 
     #[test]
