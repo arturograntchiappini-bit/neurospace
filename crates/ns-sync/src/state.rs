@@ -221,8 +221,51 @@ pub(crate) fn corrupt(path: &Path, reason: impl ToString) -> SyncError {
     }
 }
 
+/// Waits before each retry of `retry_when_denied`; five tries in all.
+#[cfg(any(windows, test))]
+const RETRY_DELAYS_MS: [u64; 4] = [10, 20, 40, 80];
+
+/// Runs `operation` again while it fails with `PermissionDenied`, waiting 10, 20, 40 and 80 ms
+/// between tries; any other result, or the fifth denial, is returned as it is.
+#[cfg(any(windows, test))]
+fn retry_when_denied<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut result = operation();
+    for delay in RETRY_DELAYS_MS {
+        if !matches!(&result, Err(error) if error.kind() == ErrorKind::PermissionDenied) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        result = operation();
+    }
+    result
+}
+
+/// Windows refuses a read for a moment while another process replaces the file (`status.json` is
+/// rewritten under its readers), so a denied read is tried again a few times there.
+#[cfg(windows)]
+fn read_file(path: &Path) -> io::Result<Vec<u8>> {
+    retry_when_denied(|| std::fs::read(path))
+}
+
+#[cfg(not(windows))]
+fn read_file(path: &Path) -> io::Result<Vec<u8>> {
+    std::fs::read(path)
+}
+
+/// The rename of `write_atomic`: Windows refuses it for a moment while the target is being replaced
+/// or opened by another process, so it is tried again a few times there.
+#[cfg(windows)]
+fn rename_over(from: &Path, to: &Path) -> io::Result<()> {
+    retry_when_denied(|| std::fs::rename(from, to))
+}
+
+#[cfg(not(windows))]
+fn rename_over(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::rename(from, to)
+}
+
 pub(crate) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
-    match std::fs::read(path) {
+    match read_file(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io_error(path)(error)),
@@ -292,7 +335,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     tmp_name.push(format!(".{}-{counter}.tmp", std::process::id()));
     let tmp = path.with_file_name(tmp_name);
     write_temporary(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).map_err(|source| {
+    rename_over(&tmp, path).map_err(|source| {
         let _ = std::fs::remove_file(&tmp);
         io_error(path)(source)
     })
@@ -1060,6 +1103,42 @@ mod tests {
         );
         expected.sort_unstable();
         assert_eq!(names(&state), expected);
+    }
+
+    fn denied() -> io::Error {
+        ErrorKind::PermissionDenied.into()
+    }
+
+    #[test]
+    fn should_retry_an_operation_denied_twice_and_then_succeed() {
+        let mut calls = 0;
+        let result = retry_when_denied(|| {
+            calls += 1;
+            if calls <= 2 { Err(denied()) } else { Ok(calls) }
+        });
+        assert_eq!(result.unwrap(), 3);
+    }
+
+    #[test]
+    fn should_give_up_after_five_denied_tries() {
+        let mut calls = 0;
+        let result: io::Result<()> = retry_when_denied(|| {
+            calls += 1;
+            Err(denied())
+        });
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::PermissionDenied);
+        assert_eq!(calls, 5);
+    }
+
+    #[test]
+    fn should_not_retry_any_other_error() {
+        let mut calls = 0;
+        let result: io::Result<()> = retry_when_denied(|| {
+            calls += 1;
+            Err(ErrorKind::NotFound.into())
+        });
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::NotFound);
+        assert_eq!(calls, 1);
     }
 
     #[test]
