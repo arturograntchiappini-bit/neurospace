@@ -682,6 +682,41 @@ mod tests {
     }
 
     #[test]
+    fn should_aggregate_distant_bodies_instead_of_pushing_exactly() {
+        let layout = scattered(500);
+        let (mut approximate, mut exact) = (vec![[0.0; 2]; 500], vec![[0.0; 2]; 500]);
+        layout.repel(&mut approximate);
+        layout.repel_exact(&mut exact);
+        assert!(approximate != exact, "the tree never aggregated");
+        let tree = QuadTree::build(&(0..500).map(|i| layout.position(i)).collect::<Vec<_>>());
+        let root = &tree.cells[0];
+        assert_eq!(root.count, 500.0);
+        let far = [1.0e6, 1.0e6];
+        assert!(
+            root.is_far_from(far),
+            "a far point must see the root as one body"
+        );
+        assert!(
+            !root.is_far_from(layout.position(0)),
+            "a body inside never aggregates its own cell"
+        );
+    }
+
+    #[test]
+    fn should_step_two_equal_layouts_to_bitwise_equal_positions() {
+        let graph = random_graph(200, 300);
+        let (mut first, mut second) = (Layout::new(&graph), Layout::new(&graph));
+        for _ in 0..20 {
+            first.step();
+            second.step();
+        }
+        for i in 0..200 {
+            let bits = |layout: &Layout| layout.position(i).map(f32::to_bits);
+            assert_eq!(bits(&first), bits(&second), "node {i}");
+        }
+    }
+
+    #[test]
     fn should_not_repel_a_node_from_itself() {
         let layout = scattered(1);
         let mut force = vec![[0.0; 2]];
