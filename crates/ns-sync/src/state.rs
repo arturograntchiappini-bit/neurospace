@@ -284,7 +284,8 @@ fn write_temporary(tmp: &Path, bytes: &[u8]) -> Result<()> {
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Writes through a temporary file no other writer shares (the engine thread and the status keeper
-/// both write `status.json`). A crash can leave one behind; the state directory is ours.
+/// both write `status.json`). A crash can leave one behind: `StateDir::clear_group` and the engine
+/// at start-up remove them.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -295,6 +296,20 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
         io_error(path)(source)
     })
+}
+
+/// Whether `name` is `<stem>.<pid>-<counter>.tmp`, the temporary name of `write_atomic`, for a `stem`
+/// in `stems`. Nothing else matches, so removing the matches never touches another file.
+fn is_temporary_of(name: &str, stems: &[&str]) -> bool {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    name.strip_suffix(".tmp")
+        .and_then(|rest| rest.rsplit_once('.'))
+        .is_some_and(|(stem, suffix)| {
+            stems.contains(&stem)
+                && suffix
+                    .split_once('-')
+                    .is_some_and(|(a, b)| digits(a) && digits(b))
+        })
 }
 
 /// Describes a JSON failure by kind and position only: the message may quote the input.
@@ -530,11 +545,40 @@ impl StateDir {
         read_json(&self.file("status.json"))
     }
 
-    /// Forgets the sync group but keeps the device key, device id and vault path.
+    /// Forgets the sync group but keeps the device key, device id and vault path. Leftover
+    /// temporary files of the group files (they can hold the secret or a snapshot) go too.
     pub fn clear_group(&self) -> Result<()> {
         GROUP_FILES
             .iter()
-            .try_for_each(|name| remove_if_exists(&self.file(name)))
+            .try_for_each(|name| remove_if_exists(&self.file(name)))?;
+        self.remove_temporaries(&GROUP_FILES)
+    }
+
+    /// Removes the temporary files a crash left behind for the state files the engine alone
+    /// writes. Call it while holding the engine lock; the command line writes `command.pending`
+    /// and `config.json` without the lock, so they are not touched.
+    pub fn remove_stale_temporaries(&self, _lock: &EngineLock) -> Result<()> {
+        let mut stems = vec!["device.key", "device.id"];
+        stems.extend(
+            GROUP_FILES
+                .iter()
+                .filter(|name| **name != "command.pending"),
+        );
+        self.remove_temporaries(&stems)
+    }
+
+    fn remove_temporaries(&self, stems: &[&str]) -> Result<()> {
+        let entries = std::fs::read_dir(&self.dir).map_err(io_error(&self.dir))?;
+        for entry in entries.flatten() {
+            let stale = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| is_temporary_of(name, stems));
+            if stale {
+                remove_if_exists(&entry.path())?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -983,6 +1027,39 @@ mod tests {
             ["device.id", "device.key", "engine.lock", "vault-path.txt"]
         );
         state.clear_group().unwrap();
+    }
+
+    #[test]
+    fn should_remove_temporary_leftovers_of_group_files_when_clearing_the_group() {
+        let (_tmp, state) = fresh();
+        let leftovers = [
+            "secret.12-3.tmp",
+            "doc.snap.9-0.tmp",
+            "status.json.1-2.tmp",
+            "command.pending.7-7.tmp",
+        ];
+        let others = [
+            "notes.12-3.tmp",
+            "secret.tmp",
+            "secret.12-3.tmp.bak",
+            "secret.a-3.tmp",
+            "secret.12-.tmp",
+            "secret.-3.tmp",
+            "device.key.1-1.tmp",
+            "config.json.1-1.tmp",
+        ];
+        for name in leftovers.iter().chain(&others) {
+            std::fs::write(state.file(name), "x").unwrap();
+        }
+        state.clear_group().unwrap();
+        let mut expected: Vec<&str> = others.to_vec();
+        expected.extend(
+            ["device.id", "engine.lock", "vault-path.txt"]
+                .iter()
+                .filter(|n| state.file(n).exists()),
+        );
+        expected.sort_unstable();
+        assert_eq!(names(&state), expected);
     }
 
     #[test]

@@ -136,6 +136,8 @@ impl EngineHandle {
     ) -> Result<EngineHandle> {
         let vault_root = folder.root;
         let lock = state.lock()?;
+        // Leftovers only waste space; a failure here must not keep the engine from starting.
+        let _ = state.remove_stale_temporaries(&lock);
         let (commands, inbox) = mpsc::channel();
         let mut network = make_network(commands.clone(), &state)?;
         let id = network.device_id();
@@ -1225,6 +1227,28 @@ mod tests {
         assert!(rig.state.lock().is_ok());
         assert!(rig.calls.lock().unwrap().shut_down);
         assert!(rig.handle.status().is_err());
+    }
+
+    #[test]
+    fn should_remove_stale_temporary_files_of_its_own_state_when_it_starts() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let stale = ["secret.1-1.tmp", "device.key.2-2.tmp", "doc.snap.3-3.tmp"];
+        // The command line writes these without the engine lock, and nothing else is ours.
+        let kept = [
+            "command.pending.4-4.tmp",
+            "config.json.5-5.tmp",
+            "notes.6-6.tmp",
+        ];
+        for name in stale.iter().chain(&kept) {
+            std::fs::write(state_dir.path().join(name), "x").unwrap();
+        }
+        let rig = start_in(tempfile::tempdir().unwrap(), state_dir, [1; 32]).unwrap();
+        stale
+            .iter()
+            .for_each(|name| assert!(!rig.state.file(name).exists(), "{name}"));
+        kept.iter()
+            .for_each(|name| assert!(rig.state.file(name).exists(), "{name}"));
+        rig.handle.shutdown().unwrap();
     }
 
     #[test]
