@@ -1074,8 +1074,14 @@ mod tests {
     fn should_not_diff_the_document_once_per_tombstone() {
         let mut doc = SyncDoc::new();
         let ids: Vec<NoteId> = (0..50)
-            .map(|i| doc.create_note(&p(&format!("n{i}.md")), "t
-").unwrap())
+            .map(|i| {
+                doc.create_note(
+                    &p(&format!("n{i}.md")),
+                    "t
+",
+                )
+                .unwrap()
+            })
             .collect();
         doc.view();
         doc.cache.borrow_mut().diffs = 0;
