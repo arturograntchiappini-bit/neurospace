@@ -58,7 +58,9 @@ impl LoadCache {
     /// and time, and reports the key as removed when the file is gone, also when no scan has
     /// ever seen it (a placeholder entry stands for it).
     pub fn expect(&mut self, key: &NoteKey) {
-        if self.entries.contains_key(key) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            // A former not-UTF-8 file is a note now, so its disappearance must be reported.
+            entry.is_note = true;
             return self.forget(key);
         }
         // A key comes from a valid note path, so it parses; the spelling is never compared
@@ -308,6 +310,33 @@ mod tests {
         let delta = vault.load_changes(&mut cache).unwrap();
         assert_eq!(changed(&delta), [("b.md", "two")]);
         assert!(delta.removed.is_empty());
+    }
+
+    #[test]
+    fn should_report_a_note_written_over_a_not_utf8_file_as_removed_when_it_is_gone() {
+        let (dir, vault) = vault();
+        put_old(dir.path(), "x.md", &[0xff]);
+        let mut cache = LoadCache::default();
+        vault.load_changes(&mut cache).unwrap();
+        fs::write(dir.path().join("x.md"), "text").unwrap();
+        cache.expect(&key("x.md"));
+        fs::remove_file(dir.path().join("x.md")).unwrap();
+        let delta = vault.load_changes(&mut cache).unwrap();
+        assert_eq!(delta.removed, [key("x.md")]);
+    }
+
+    #[test]
+    fn should_report_a_note_written_over_a_not_utf8_file_as_changed_when_it_stays() {
+        let (dir, vault) = vault();
+        put_old(dir.path(), "x.md", &[0xff]);
+        let mut cache = LoadCache::default();
+        vault.load_changes(&mut cache).unwrap();
+        fs::write(dir.path().join("x.md"), "text").unwrap();
+        cache.expect(&key("x.md"));
+        let delta = vault.load_changes(&mut cache).unwrap();
+        assert_eq!(changed(&delta), [("x.md", "text")]);
+        assert!(delta.removed.is_empty());
+        assert!(delta.ignored.is_empty());
     }
 
     #[test]
