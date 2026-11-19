@@ -617,7 +617,38 @@ fn replace_keeping_permissions(temp: &Path, target: &Path) -> Result<()> {
     if let Some(existing) = lstat(target)? {
         fs::set_permissions(temp, existing.permissions()).map_err(io_error(temp))?;
     }
-    fs::rename(temp, target).map_err(io_error(target))
+    rename_over(temp, target).map_err(io_error(target))
+}
+
+/// A rename that replaces `target`. Windows refuses it for a moment while an indexer, an antivirus
+/// or a reader holds the target open, so it is tried again a few times there.
+#[cfg(windows)]
+fn rename_over(temp: &Path, target: &Path) -> io::Result<()> {
+    retry_when_denied(|| fs::rename(temp, target))
+}
+
+#[cfg(not(windows))]
+fn rename_over(temp: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(temp, target)
+}
+
+/// Waits before each retry of `retry_when_denied`; five tries in all.
+#[cfg(any(windows, test))]
+const RETRY_DELAYS_MS: [u64; 4] = [10, 20, 40, 80];
+
+/// Runs `operation` again while it fails with `PermissionDenied`, waiting 10, 20, 40 and 80 ms
+/// between tries; any other result, or the fifth denial, is returned as it is.
+#[cfg(any(windows, test))]
+fn retry_when_denied<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut result = operation();
+    for delay in RETRY_DELAYS_MS {
+        if !matches!(&result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        result = operation();
+    }
+    result
 }
 
 fn temp_sibling(target: &Path) -> PathBuf {
@@ -782,6 +813,42 @@ mod tests {
         let missing = vault.replace_if(&p("missing.md"), "x", &|_| true);
         assert!(matches!(missing, Err(CoreError::NotFound(_))));
         assert_eq!(temporary_entries(dir.path()), 0);
+    }
+
+    fn denied() -> io::Error {
+        io::ErrorKind::PermissionDenied.into()
+    }
+
+    #[test]
+    fn should_retry_an_operation_denied_twice_and_then_succeed() {
+        let mut calls = 0;
+        let result = retry_when_denied(|| {
+            calls += 1;
+            if calls <= 2 { Err(denied()) } else { Ok(calls) }
+        });
+        assert_eq!(result.unwrap(), 3);
+    }
+
+    #[test]
+    fn should_give_up_after_five_denied_tries() {
+        let mut calls = 0;
+        let result: io::Result<()> = retry_when_denied(|| {
+            calls += 1;
+            Err(denied())
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(calls, 5);
+    }
+
+    #[test]
+    fn should_not_retry_any_other_error() {
+        let mut calls = 0;
+        let result: io::Result<()> = retry_when_denied(|| {
+            calls += 1;
+            Err(io::ErrorKind::NotFound.into())
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(calls, 1);
     }
 
     #[test]
