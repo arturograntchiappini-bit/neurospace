@@ -409,6 +409,7 @@ pub struct IrohNetwork {
     endpoint: Endpoint,
     router: Router,
     shared: Arc<Shared>,
+    mode: NetMode,
 }
 
 impl IrohNetwork {
@@ -443,6 +444,7 @@ impl IrohNetwork {
             endpoint,
             router,
             shared,
+            mode: config.mode,
         })
     }
 }
@@ -450,6 +452,10 @@ impl IrohNetwork {
 impl Network for IrohNetwork {
     fn device_id(&self) -> DeviceId {
         self.shared.own_id
+    }
+
+    fn mode(&self) -> NetMode {
+        self.mode
     }
 
     fn addresses(&self) -> Vec<SocketAddr> {

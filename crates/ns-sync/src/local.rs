@@ -91,6 +91,8 @@ pub struct LocalReplica {
     base_version: Option<Vec<u8>>,
     /// What `open` repaired, for the host to show once in the status.
     pub(crate) notice: Option<String>,
+    /// The log size past which a round compacts it; lowered by tests only.
+    pub(crate) compact_over: u64,
 }
 
 impl LocalReplica {
@@ -114,6 +116,7 @@ impl LocalReplica {
             disk: DiskCache::default(),
             base_version,
             notice,
+            compact_over: COMPACT_LOG_BYTES,
         })
     }
 
@@ -166,7 +169,7 @@ impl LocalReplica {
             apply_doc_action(&mut self.doc, action)?;
         }
         self.store.persist(&self.doc)?;
-        let compaction = self.compact_when_over(COMPACT_LOG_BYTES);
+        let compaction = self.compact_when_over(self.compact_over);
         let version = self.doc.version();
         self.stage = StageRecord {
             doc_changed: version != before,

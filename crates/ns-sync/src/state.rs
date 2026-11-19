@@ -163,6 +163,15 @@ pub struct Status {
     pub last_error: Option<String>,
     /// Time of this update, in seconds since the Unix epoch.
     pub updated_unix: u64,
+    /// The network mode the engine was started with; `None` in a file from an older version.
+    #[serde(default)]
+    pub mode: Option<NetMode>,
+    /// Standing conditions, each shown exactly while it holds (never an error, never a secret).
+    #[serde(default)]
+    pub notices: Vec<String>,
+    /// A sync round is running; the rest of the status is from the moment it began.
+    #[serde(default)]
+    pub busy: bool,
 }
 
 fn non_empty(env: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
@@ -431,6 +440,12 @@ impl StateDir {
     /// Replaces the list of known peers.
     pub fn save_peers(&self, peers: &[PeerEntry]) -> Result<()> {
         write_json(&self.file("peers.json"), &peers)
+    }
+
+    /// Whether `add_peer` can keep this id: it is known already, or the list has room.
+    pub fn peer_fits(&self, id: &str) -> Result<bool> {
+        let peers = self.peers()?;
+        Ok(peers.len() < MAX_STORED_PEERS || peers.iter().any(|known| known.id == id))
     }
 
     /// Adds a peer, or merges new addresses into a known one. True when the id is new and was stored;
@@ -877,6 +892,9 @@ mod tests {
             relay: Some("https://relay.example./".to_string()),
             last_error: Some("boom".to_string()),
             updated_unix: 1_700_000_000,
+            mode: Some(NetMode::Lan),
+            notices: vec!["watching is off".to_string()],
+            busy: true,
         };
         state.write_status(&status).unwrap();
         assert_eq!(state.read_status().unwrap(), Some(status));
@@ -888,6 +906,17 @@ mod tests {
         let old = r#"{"pid":1,"device_id":"","addresses":[],"peers":[],"notes":0,"blocked":[],"last_error":null,"updated_unix":0}"#;
         std::fs::write(state.file("status.json"), old).unwrap();
         assert_eq!(state.read_status().unwrap().unwrap().relay, None);
+    }
+
+    #[test]
+    fn should_read_an_old_status_without_the_new_fields() {
+        let (_tmp, state) = fresh();
+        let old = r#"{"pid":1,"device_id":"","addresses":[],"peers":[],"notes":0,"blocked":[],"last_error":null,"updated_unix":0}"#;
+        std::fs::write(state.file("status.json"), old).unwrap();
+        let status = state.read_status().unwrap().unwrap();
+        assert_eq!(status.mode, None);
+        assert!(status.notices.is_empty());
+        assert!(!status.busy);
     }
 
     #[test]

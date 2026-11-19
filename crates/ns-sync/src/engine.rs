@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -14,9 +15,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::auth::{GroupTag, group_tag};
 use crate::error::{Result, SyncError};
 use crate::protocol::{FRAME_MAX, Message};
-use crate::replica::{Outgoing, Replica, SessionId, Tick};
+use crate::replica::{Outgoing, Replica, SessionId, Tick, unix_now};
 use crate::session::SessionEvent;
-use crate::state::{DeviceId, EngineLock, PeerEntry, Secret, StateDir, Status, to_hex};
+use crate::state::{DeviceId, EngineLock, NetMode, PeerEntry, Secret, StateDir, Status, to_hex};
 use crate::ticket::Ticket;
 
 /// What the engine reports to its host.
@@ -42,6 +43,8 @@ pub enum EngineEvent {
 pub trait Network: Send + 'static {
     /// This device's id.
     fn device_id(&self) -> DeviceId;
+    /// The mode the network was started with.
+    fn mode(&self) -> NetMode;
     /// The addresses this device listens on.
     fn addresses(&self) -> Vec<SocketAddr>;
     /// The relay this device is connected to, once it has one (always `None` without relays).
@@ -278,7 +281,7 @@ struct Watching {
     commands: Sender<Command>,
     make: WatchFn,
     current: Option<VaultWatcher>,
-    /// Said once, when the engine starts without a watcher.
+    /// Shown in the status while there is no watcher.
     notice: Option<String>,
 }
 
@@ -301,6 +304,7 @@ impl Watching {
     /// Replaces the watcher: after a drive came back, the old one may watch nothing.
     fn restart(&mut self) -> Result<()> {
         self.current = Some((self.make)(&self.root, &self.commands)?);
+        self.notice = None;
         Ok(())
     }
 }
@@ -367,9 +371,103 @@ impl Drop for StopGuard {
     }
 }
 
+/// How often the keeper rewrites `status.json` while a round runs.
+const KEEPER_INTERVAL: Duration = Duration::from_secs(5);
+
+/// What the keeper thread and the actor share.
+#[derive(Default)]
+struct KeeperState {
+    /// The status of the moment the round began; `None` outside a round.
+    snapshot: Option<Status>,
+    stopped: bool,
+}
+
+#[derive(Default)]
+struct KeeperShared {
+    state: Mutex<KeeperState>,
+    wake: Condvar,
+}
+
+impl KeeperShared {
+    fn lock(&self) -> MutexGuard<'_, KeeperState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Rewrites the snapshot as busy every `interval` while a round runs. The write happens under the lock,
+    /// so once `round_finished` returns no stale busy status can land after the actor's own.
+    fn keep(&self, status_dir: &StateDir, interval: Duration) {
+        let mut guard = self.lock();
+        while !guard.stopped {
+            if guard.snapshot.is_none() {
+                guard = self
+                    .wake
+                    .wait(guard)
+                    .unwrap_or_else(PoisonError::into_inner);
+                continue;
+            }
+            let (next, waited) = self
+                .wake
+                .wait_timeout(guard, interval)
+                .unwrap_or_else(PoisonError::into_inner);
+            guard = next;
+            let Some(snapshot) = guard.snapshot.as_ref().filter(|_| waited.timed_out()) else {
+                continue;
+            };
+            let busy = Status {
+                busy: true,
+                updated_unix: unix_now(),
+                ..snapshot.clone()
+            };
+            // shortcut: a failed write is retried at the next interval; the actor reports its own write errors.
+            let _ = status_dir.write_status(&busy);
+        }
+    }
+}
+
+/// Keeps `status.json` fresh while the actor is inside a long round, so a reader never takes a busy
+/// engine for a stopped one (spec 8.9). It never reads the replica, which stays on the actor thread.
+struct StatusKeeper {
+    shared: Arc<KeeperShared>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl StatusKeeper {
+    fn start(status_dir: StateDir, interval: Duration) -> StatusKeeper {
+        let shared = Arc::new(KeeperShared::default());
+        let worker = Arc::clone(&shared);
+        // shortcut: when the thread cannot start, long rounds show no busy status; upgrade if that ever happens.
+        let thread = std::thread::Builder::new()
+            .name("ns-sync-status".into())
+            .spawn(move || worker.keep(&status_dir, interval))
+            .ok();
+        StatusKeeper { shared, thread }
+    }
+
+    fn round_started(&self, status: Status) {
+        self.shared.lock().snapshot = Some(status);
+        self.shared.wake.notify_one();
+    }
+
+    fn round_finished(&self) {
+        self.shared.lock().snapshot = None;
+    }
+}
+
+impl Drop for StatusKeeper {
+    fn drop(&mut self) {
+        self.shared.lock().stopped = true;
+        self.shared.wake.notify_all();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 struct SessionLink {
     peer: DeviceId,
     outbound: UnboundedSender<Message>,
+    /// The group tag the session authenticated under.
+    group: GroupTag,
 }
 
 /// The state of the actor thread: the only owner of the replica and the network.
@@ -385,6 +483,7 @@ struct Actor {
     /// The tag of the current group secret; sessions authenticated under another one are refused.
     group: Option<GroupTag>,
     watching: Watching,
+    keeper: StatusKeeper,
     /// The vault lost its marker folder; the watcher is replaced after the next good round.
     rewatch: bool,
     frame_limit: usize,
@@ -400,6 +499,7 @@ impl Actor {
         watching: Watching,
     ) -> Actor {
         let started = Instant::now();
+        let keeper = StatusKeeper::start(replica.local().state.clone(), KEEPER_INTERVAL);
         let mut actor = Actor {
             replica,
             network,
@@ -411,6 +511,7 @@ impl Actor {
             last_error: None,
             group: None,
             watching,
+            keeper,
             rewatch: false,
             frame_limit: FRAME_MAX,
             new_group: false,
@@ -444,8 +545,8 @@ impl Actor {
             let text = "this vault was not in a group: a new group was created";
             self.emit(EngineEvent::Notice(text.into()));
         }
-        if let Some(notice) = self.watching.notice.take() {
-            self.report(&SyncError::Net(notice));
+        if let Some(notice) = self.watching.notice.clone() {
+            self.emit(EngineEvent::Notice(notice));
         }
         self.round();
         let mut running = self.tick();
@@ -516,7 +617,26 @@ impl Actor {
         !left
     }
 
+    /// Runs a section that can take long: the keeper keeps `status.json` fresh meanwhile, and afterwards the
+    /// actor writes the real status, unless the section ended the engine (`false`).
+    fn busy(&mut self, section: impl FnOnce(&mut Self) -> bool) -> bool {
+        self.keeper.round_started(self.status());
+        let keep_going = section(self);
+        self.keeper.round_finished();
+        if keep_going {
+            self.publish_status();
+        }
+        keep_going
+    }
+
     fn round(&mut self) {
+        self.busy(|actor| {
+            actor.run_round();
+            true
+        });
+    }
+
+    fn run_round(&mut self) {
         self.schedule.round_done(Instant::now());
         match self.replica.reconcile() {
             Ok(outgoing) => {
@@ -544,8 +664,13 @@ impl Actor {
 
     /// `false` when the replica left its group.
     fn tick(&mut self) -> bool {
+        self.busy(Self::run_tick)
+    }
+
+    fn run_tick(&mut self) -> bool {
         self.schedule.tick_done(Instant::now());
         self.replica.set_addresses(self.network.addresses());
+        self.replica.set_mode(self.network.mode());
         self.replica.set_relay(self.network.relay());
         let was_waiting = self.replica.is_waiting_for_first_state();
         match self.replica.tick(self.started.elapsed()) {
@@ -556,7 +681,6 @@ impl Actor {
                 if was_waiting && !self.replica.is_waiting_for_first_state() {
                     self.after_reconcile();
                 }
-                self.publish_status();
             }
             Err(error) => self.report(&error),
         }
@@ -602,27 +726,42 @@ impl Actor {
             return;
         }
         match event {
-            SessionEvent::Opened { peer, outbound } => self.open_session(session, peer, outbound),
+            SessionEvent::Opened { peer, outbound } => {
+                self.open_session(
+                    session,
+                    SessionLink {
+                        peer,
+                        outbound,
+                        group,
+                    },
+                );
+            }
             SessionEvent::Received(message) => self.receive(session, message),
             SessionEvent::Closed => self.forget(session),
         }
     }
 
-    fn open_session(
-        &mut self,
-        session: SessionId,
-        peer: DeviceId,
-        outbound: UnboundedSender<Message>,
-    ) {
-        self.sessions
-            .insert(session, SessionLink { peer, outbound });
+    fn open_session(&mut self, session: SessionId, link: SessionLink) {
+        let peer = link.peer;
+        self.sessions.insert(session, link);
         self.emit(EngineEvent::PeerConnected(to_hex(&peer)));
         let outgoing = self.replica.session_opened(session, peer);
         self.send_all(outgoing);
     }
 
-    /// A refused message ends the session: only the next session's `Version` exchange fetches again what was dropped.
+    /// `Updates` can reconcile, so they count as a busy section.
     fn receive(&mut self, session: SessionId, message: Message) {
+        if !matches!(message, Message::Updates { .. }) {
+            return self.deliver(session, message);
+        }
+        self.busy(|actor| {
+            actor.deliver(session, message);
+            true
+        });
+    }
+
+    /// A refused message ends the session: only the next session's `Version` exchange fetches again what was dropped.
+    fn deliver(&mut self, session: SessionId, message: Message) {
         if !self.sessions.contains_key(&session) {
             return;
         }
@@ -678,23 +817,40 @@ impl Actor {
             (Err(error), _) | (_, Err(error)) => return self.report(&error),
         };
         // The same secret the network authenticates with, so a failed read at one tick heals at the next.
-        self.group = Some(group_tag(&secret));
+        let tag = group_tag(&secret);
+        self.group = Some(tag);
+        self.close_sessions_of_other_groups(tag);
         let connected = self.replica.connected_peers();
         self.network.refresh(secret, &peers, &connected);
     }
 
-    /// The replica's status plus the engine's last error.
+    /// A secret changed by hand voids every session that authenticated with the old one.
+    fn close_sessions_of_other_groups(&mut self, tag: GroupTag) {
+        let stale: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, link)| link.group != tag)
+            .map(|(&session, _)| session)
+            .collect();
+        for session in stale {
+            self.close(session);
+        }
+    }
+
+    /// The replica's status plus the engine's last error and its own notices.
     fn status(&self) -> Status {
         let mut status = self.replica.status();
         status.last_error = self.last_error.clone().or(status.last_error);
+        if let Some(notice) = &self.watching.notice
+            && !status.notices.contains(notice)
+        {
+            status.notices.insert(0, notice.clone());
+        }
         status
     }
 
-    /// Overwrites the replica's `status.json` when the engine has an error to show.
+    /// Writes the engine's status to `status.json`.
     fn publish_status(&mut self) {
-        if self.last_error.is_none() {
-            return;
-        }
         if let Err(error) = self.replica.local().state.write_status(&self.status()) {
             self.report(&error);
         }
@@ -754,7 +910,7 @@ mod tests {
     use crate::state::PendingCommand;
     use crate::state::to_hex;
 
-    const LIMIT: Duration = Duration::from_secs(5);
+    const LIMIT: Duration = Duration::from_secs(30);
 
     type Refresh = (Secret, Vec<PeerEntry>, Vec<DeviceId>);
 
@@ -773,6 +929,9 @@ mod tests {
     impl Network for FakeNetwork {
         fn device_id(&self) -> DeviceId {
             self.id
+        }
+        fn mode(&self) -> NetMode {
+            NetMode::Lan
         }
         fn addresses(&self) -> Vec<SocketAddr> {
             Vec::new()
@@ -1114,10 +1273,86 @@ mod tests {
         let deadline = Instant::now() + LIMIT;
         while !said && Instant::now() < deadline {
             let event = rig.events.recv_timeout(Duration::from_millis(50));
-            said = matches!(&event, Ok(EngineEvent::Error(text)) if text.contains("file watching is off"));
+            said = matches!(&event, Ok(EngineEvent::Notice(text)) if text.contains("file watching is off"));
         }
         assert!(said, "no notice about the missing watcher");
         wait_until("the first round", || note_count(&rig) == 1);
+        rig.handle.shutdown().unwrap();
+    }
+
+    fn status_json_has(rig: &Rig, wanted: impl Fn(&Status) -> bool) -> bool {
+        rig.state
+            .read_status()
+            .ok()
+            .flatten()
+            .is_some_and(|status| wanted(&status))
+    }
+
+    #[test]
+    fn should_rewrite_a_busy_status_while_a_round_runs() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let state = StateDir::at(state_dir.path()).unwrap();
+        let keeper = StatusKeeper::start(state.clone(), Duration::from_millis(50));
+        keeper.round_started(Status::default());
+        wait_until("a busy status.json", || {
+            let status = state.read_status().ok().flatten();
+            status.is_some_and(|status| status.busy && status.updated_unix > 0)
+        });
+        keeper.round_finished();
+        std::fs::remove_file(state.file("status.json")).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < deadline {
+            assert!(
+                !state.file("status.json").exists(),
+                "written after the round"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn should_keep_the_watcher_notice_after_a_good_round() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::write(
+            vault.path().join("a.md"),
+            "text
+",
+        )
+        .unwrap();
+        let rig =
+            start_in_watching(vault, tempfile::tempdir().unwrap(), [1; 32], no_watcher).unwrap();
+        wait_until("the first round", || note_count(&rig) == 1);
+        let off = |text: &String| text.contains("file watching is off");
+        let status = rig.handle.status().unwrap();
+        assert!(status.notices.iter().any(off), "{:?}", status.notices);
+        assert_eq!(status.last_error, None);
+        wait_until("the notice in status.json", || {
+            status_json_has(&rig, |status| status.notices.iter().any(off))
+        });
+        rig.handle.shutdown().unwrap();
+    }
+
+    #[test]
+    fn should_show_the_mode_in_status() {
+        let rig = start_rig([1; 32], &[]);
+        wait_until("the mode", || {
+            rig.handle.status().unwrap().mode == Some(NetMode::Lan)
+        });
+        wait_until("the mode in status.json", || {
+            status_json_has(&rig, |status| status.mode == Some(NetMode::Lan))
+        });
+        rig.handle.shutdown().unwrap();
+    }
+
+    #[test]
+    fn should_close_sessions_when_the_secret_changes_on_disk() {
+        let rig = start_rig([1; 32], &[]);
+        let _outbound = open_session(&rig, 5, [9; 32]);
+        expect_event(&rig.events, &EngineEvent::PeerConnected(to_hex(&[9; 32])));
+        rig.state.save_secret(&[7; 32]).unwrap();
+        wait_until("the session to be closed", || {
+            rig.calls.lock().unwrap().closed.contains(&5)
+        });
         rig.handle.shutdown().unwrap();
     }
 
@@ -1179,9 +1414,13 @@ mod tests {
     fn link(actor: &mut Actor, session: SessionId) -> UnboundedReceiver<Message> {
         let (outbound, receiver) = unbounded_channel();
         let peer = [9; 32];
-        actor
-            .sessions
-            .insert(session, SessionLink { peer, outbound });
+        let group = [0; 8];
+        let link = SessionLink {
+            peer,
+            outbound,
+            group,
+        };
+        actor.sessions.insert(session, link);
         receiver
     }
 

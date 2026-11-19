@@ -12,7 +12,8 @@ use crate::error::{Result, SyncError};
 use crate::local::{LocalReplica, Outcome};
 use crate::protocol::Message;
 use crate::state::{
-    DeviceId, PeerEntry, PeerStatus, PendingCommand, Secret, StateDir, Status, from_hex32, to_hex,
+    DeviceId, MAX_STORED_PEERS, NetMode, PeerEntry, PeerStatus, PendingCommand, Secret, StateDir,
+    Status, from_hex32, to_hex,
 };
 use crate::ticket::Ticket;
 
@@ -76,6 +77,13 @@ pub struct Replica {
     /// Engine time at which the wait ends; set at the first tick when opened with the marker.
     wait_deadline: Option<Duration>,
     last_error: Option<String>,
+    mode: Option<NetMode>,
+    /// What opening the state repaired; shown for the life of the replica.
+    open_notice: Option<String>,
+    /// The notice of the last round, replaced by the next one.
+    round_notice: Option<String>,
+    /// A device could not be remembered because `peers.json` is full; until it has room again.
+    peers_full: bool,
 }
 
 impl Replica {
@@ -86,7 +94,7 @@ impl Replica {
     pub fn open(vault: Vault, state: StateDir, device_id: DeviceId) -> Result<Replica> {
         let waiting = state.fresh_join();
         let mut local = LocalReplica::open(vault, state)?;
-        let last_error = local.notice.take();
+        let open_notice = local.notice.take();
         Ok(Replica {
             local,
             device_id,
@@ -96,7 +104,11 @@ impl Replica {
             relay: None,
             waiting,
             wait_deadline: None,
-            last_error,
+            last_error: None,
+            mode: None,
+            open_notice,
+            round_notice: None,
+            peers_full: false,
         })
     }
 
@@ -146,7 +158,7 @@ impl Replica {
         .into()
     }
 
-    fn remember_peer(&self, peer: &DeviceId) -> Result<()> {
+    fn remember_peer(&mut self, peer: &DeviceId) -> Result<()> {
         if *peer == self.device_id {
             return Ok(());
         }
@@ -154,6 +166,15 @@ impl Replica {
             id: to_hex(peer),
             addrs: Vec::new(),
         };
+        self.store_peer(entry)
+    }
+
+    /// Stores a device, or raises the «list is full» notice when it does not fit.
+    fn store_peer(&mut self, entry: PeerEntry) -> Result<()> {
+        if !self.local.state.peer_fits(&entry.id)? {
+            self.peers_full = true;
+            return Ok(());
+        }
         self.local.state.add_peer(entry).map(drop)
     }
 
@@ -198,6 +219,11 @@ impl Replica {
         self.addresses = addresses;
     }
 
+    /// Sets the network mode, for status.
+    pub fn set_mode(&mut self, mode: NetMode) {
+        self.mode = Some(mode);
+    }
+
     /// Sets the relay the network reached, for status.
     pub fn set_relay(&mut self, relay: Option<String>) {
         self.relay = relay;
@@ -237,7 +263,29 @@ impl Replica {
             relay: self.relay.clone(),
             last_error: self.last_error.clone(),
             updated_unix: unix_now(),
+            mode: self.mode,
+            notices: self.notices(),
+            busy: false,
         }
+    }
+
+    /// The standing conditions of the replica, in a fixed order.
+    fn notices(&self) -> Vec<String> {
+        let full =
+            format!("the device list is full ({MAX_STORED_PEERS}): new devices are not remembered");
+        let peers_full = self.peers_full.then_some(full);
+        let all = [&self.open_notice, &self.round_notice]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .chain(peers_full);
+        let mut notices: Vec<String> = Vec::new();
+        for text in all {
+            if !notices.contains(&text) {
+                notices.push(text);
+            }
+        }
+        notices
     }
 
     /// `now` is the time since the engine started. Carries out a pending command, ends an
@@ -266,8 +314,15 @@ impl Replica {
     }
 
     fn finish_tick(&mut self, now: Duration, tick: &mut Tick) -> Result<()> {
+        self.peers_full = self.peers_full && !self.peers_have_room();
         tick.outgoing.extend(self.end_expired_wait(now)?);
         self.local.state.write_status(&self.status())
+    }
+
+    /// An unreadable `peers.json` counts as no room: the notice stays.
+    fn peers_have_room(&self) -> bool {
+        let peers = self.local.state.peers();
+        peers.is_ok_and(|peers| peers.len() < MAX_STORED_PEERS)
     }
 
     /// Joins the group of a ticket. Its own group only adds the inviting peer. Another group
@@ -288,6 +343,9 @@ impl Replica {
             addrs: ticket.addrs.iter().map(ToString::to_string).collect(),
         };
         if self.local.state.secret()? == Some(ticket.secret) {
+            if !self.local.state.peer_fits(&inviter.id)? {
+                return Err(SyncError::PeerListFull);
+            }
             self.local.state.add_peer(inviter)?;
             return Ok(Tick::default());
         }
@@ -399,9 +457,7 @@ impl Replica {
             return Ok(());
         }
         self.outcome = self.local.reconcile()?;
-        if let Some(notice) = &self.outcome.notice {
-            self.last_error = Some(notice.clone());
-        }
+        self.round_notice.clone_from(&self.outcome.notice);
         Ok(())
     }
 
@@ -467,14 +523,15 @@ impl Replica {
         Ok(())
     }
 
-    fn on_peers(&self, ids: &[DeviceId]) -> Result<()> {
-        let foreign = ids.iter().filter(|id| **id != self.device_id);
+    fn on_peers(&mut self, ids: &[DeviceId]) -> Result<()> {
+        let own = self.device_id;
+        let foreign = ids.iter().filter(|id| **id != own);
         for id in foreign.take(MAX_PEERS_PER_MESSAGE) {
             let entry = PeerEntry {
                 id: to_hex(id),
                 addrs: Vec::new(),
             };
-            self.local.state.add_peer(entry)?;
+            self.store_peer(entry)?;
         }
         Ok(())
     }
@@ -525,6 +582,7 @@ mod tests {
     use ns_core::NotePath;
 
     use super::*;
+    use crate::state::MAX_STORED_PEERS;
     use crate::store::DocStore;
 
     struct Fixture {
@@ -581,7 +639,13 @@ mod tests {
         let state_dir = StateDir::at(state.path()).unwrap();
         let replica =
             Replica::open(Vault::open(vault.path()).unwrap(), state_dir, [1; 32]).unwrap();
-        assert!(replica.status().last_error.unwrap().contains("base.json"));
+        let status = replica.status();
+        assert!(
+            status.notices[0].contains("base.json"),
+            "{:?}",
+            status.notices
+        );
+        assert_eq!(status.last_error, None);
     }
 
     #[test]
@@ -727,5 +791,75 @@ mod tests {
         };
         assert!(fixture.replica.on_message(1, garbage).is_err());
         assert_eq!(fixture.replica.sessions[&1].known, before);
+    }
+
+    fn full_list(state: &StateDir) -> Vec<PeerEntry> {
+        let entry = |id: String| PeerEntry {
+            id,
+            addrs: Vec::new(),
+        };
+        let mut full = vec![entry(to_hex(&[2; 32]))];
+        full.extend((1..MAX_STORED_PEERS).map(|n| entry(format!("{n:064x}"))));
+        state.save_peers(&full).unwrap();
+        full
+    }
+
+    #[test]
+    fn should_replace_the_round_notice_at_the_next_round() {
+        let mut fixture = fixture();
+        fixture.replica.local.compact_over = 0;
+        std::fs::create_dir(fixture.state.path().join("doc.snap.tmp")).unwrap();
+        std::fs::write(
+            fixture._vault.path().join("x.md"),
+            "x
+",
+        )
+        .unwrap();
+        fixture.replica.reconcile().unwrap();
+        let status = fixture.replica.status();
+        assert!(
+            status.notices[0].contains("compaction"),
+            "{:?}",
+            status.notices
+        );
+        assert_eq!(status.last_error, None);
+        std::fs::remove_dir(fixture.state.path().join("doc.snap.tmp")).unwrap();
+        fixture.replica.reconcile().unwrap();
+        assert!(fixture.replica.status().notices.is_empty());
+    }
+
+    #[test]
+    fn should_refuse_a_join_when_the_device_list_is_full() {
+        let mut fixture = fixture();
+        let state = StateDir::at(fixture.state.path()).unwrap();
+        state.save_secret(&[7; 32]).unwrap();
+        full_list(&state);
+        let before = std::fs::read(state.file("peers.json")).unwrap();
+        let ticket = Ticket {
+            device_id: [9; 32],
+            secret: [7; 32],
+            addrs: Vec::new(),
+        };
+        assert!(fixture.replica.join(&ticket, Duration::ZERO).is_err());
+        assert_eq!(std::fs::read(state.file("peers.json")).unwrap(), before);
+    }
+
+    #[test]
+    fn should_say_when_a_peer_cannot_be_remembered() {
+        let mut fixture = fixture();
+        let state = StateDir::at(fixture.state.path()).unwrap();
+        let mut full = full_list(&state);
+        fixture.replica.session_opened(1, [2; 32]);
+        assert!(fixture.replica.status().notices.is_empty());
+        fixture
+            .replica
+            .on_message(1, Message::Peers(vec![[3; 32]]))
+            .unwrap();
+        let said = fixture.replica.status().notices;
+        assert!(said[0].contains("device list is full"), "{said:?}");
+        full.pop();
+        state.save_peers(&full).unwrap();
+        fixture.replica.tick(Duration::ZERO).unwrap();
+        assert!(fixture.replica.status().notices.is_empty());
     }
 }
