@@ -603,39 +603,43 @@ impl StateDir {
     }
 
     /// Forgets the sync group but keeps the device key, device id and vault path. Leftover
-    /// temporary files of the group files (they can hold the secret or a snapshot) go too.
+    /// temporary files of the group files (they can hold the secret or a snapshot) go too, on a
+    /// best-effort basis: one that cannot be deleted never fails the leave.
     pub fn clear_group(&self) -> Result<()> {
         GROUP_FILES
             .iter()
             .try_for_each(|name| remove_if_exists(&self.file(name)))?;
-        self.remove_temporaries(&GROUP_FILES)
+        self.remove_temporaries(&GROUP_FILES);
+        Ok(())
     }
 
     /// Removes the temporary files a crash left behind for the state files the engine alone
     /// writes. Call it while holding the engine lock; the command line writes `command.pending`
-    /// and `config.json` without the lock, so they are not touched.
-    pub fn remove_stale_temporaries(&self, _lock: &EngineLock) -> Result<()> {
+    /// and `config.json` without the lock, so they are not touched. Best-effort, like `clear_group`.
+    pub fn remove_stale_temporaries(&self, _lock: &EngineLock) {
         let mut stems = vec!["device.key", "device.id"];
         stems.extend(
             GROUP_FILES
                 .iter()
                 .filter(|name| **name != "command.pending"),
         );
-        self.remove_temporaries(&stems)
+        self.remove_temporaries(&stems);
     }
 
-    fn remove_temporaries(&self, stems: &[&str]) -> Result<()> {
-        let entries = std::fs::read_dir(&self.dir).map_err(io_error(&self.dir))?;
+    /// Skips whatever cannot be deleted: a file held open, or a directory with a matching name.
+    fn remove_temporaries(&self, stems: &[&str]) {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
         for entry in entries.flatten() {
-            let stale = entry
-                .file_name()
+            let name = entry.file_name();
+            if name
                 .to_str()
-                .is_some_and(|name| is_temporary_of(name, stems));
-            if stale {
-                remove_if_exists(&entry.path())?;
+                .is_some_and(|name| is_temporary_of(name, stems))
+            {
+                let _ = std::fs::remove_file(entry.path());
             }
         }
-        Ok(())
     }
 }
 
@@ -1193,6 +1197,37 @@ mod tests {
         });
         assert!(failed.is_err());
         assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn should_finish_clearing_the_group_when_a_leftover_cannot_be_deleted() {
+        let (_tmp, state) = fresh();
+        state.save_secret(&[1; 32]).unwrap();
+        let stuck_dir = state.file("doc.snap.2-2.tmp");
+        std::fs::create_dir(&stuck_dir).unwrap();
+        std::fs::write(stuck_dir.join("inner"), "x").unwrap();
+        std::fs::write(state.file("secret.3-3.tmp"), "x").unwrap();
+        state.clear_group().unwrap();
+        assert!(!state.file("secret").exists());
+        assert!(!state.file("secret.3-3.tmp").exists());
+        assert!(stuck_dir.join("inner").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn should_finish_clearing_the_group_when_a_leftover_is_held_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (_tmp, state) = fresh();
+        let leftover = state.file("secret.4-4.tmp");
+        std::fs::write(&leftover, "x").unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&leftover)
+            .unwrap();
+        state.clear_group().unwrap();
+        drop(held);
+        assert!(leftover.exists());
     }
 
     #[test]

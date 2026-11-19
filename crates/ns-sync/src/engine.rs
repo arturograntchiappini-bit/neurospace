@@ -138,8 +138,7 @@ impl EngineHandle {
     ) -> Result<EngineHandle> {
         let vault_root = folder.root;
         let lock = state.lock()?;
-        // Leftovers only waste space; a failure here must not keep the engine from starting.
-        let _ = state.remove_stale_temporaries(&lock);
+        state.remove_stale_temporaries(&lock);
         let (commands, inbox) = mpsc::channel();
         let mut network = make_network(commands.clone(), &state)?;
         let id = network.device_id();
