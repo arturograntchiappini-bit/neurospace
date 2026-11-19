@@ -953,7 +953,10 @@ mod tests {
         assert!(outcome.blocked[0].reason.contains("UTF-8"));
         let scan = replica.disk.refresh(&replica.vault).unwrap();
         let entry = scan.disk.get(&np("x.md").key());
-        assert!(matches!(entry, Some(DiskEntry::Blocked { .. })), "{entry:?}");
+        assert!(
+            matches!(entry, Some(DiskEntry::Blocked { .. })),
+            "{entry:?}"
+        );
     }
 
     #[test]
