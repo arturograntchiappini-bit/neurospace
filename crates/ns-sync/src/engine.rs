@@ -17,7 +17,9 @@ use crate::error::{Result, SyncError};
 use crate::protocol::{FRAME_MAX, Message};
 use crate::replica::{Outgoing, Replica, SessionId, Tick, unix_now};
 use crate::session::SessionEvent;
-use crate::state::{DeviceId, EngineLock, NetMode, PeerEntry, Secret, StateDir, Status, to_hex};
+use crate::state::{
+    DeviceId, EngineLock, NetMode, PeerEntry, Secret, StateDir, Status, remove_if_exists, to_hex,
+};
 use crate::ticket::Ticket;
 
 /// What the engine reports to its host.
@@ -621,13 +623,17 @@ impl Actor {
     }
 
     /// Runs a section that can take long: the keeper keeps `status.json` fresh meanwhile, and afterwards the
-    /// actor writes the real status, unless the section ended the engine (`false`).
+    /// actor writes the real status. A section that ended the engine (`false`) left the group, which
+    /// deletes `status.json`: remove the busy copy the keeper may have written in the meantime.
     fn busy(&mut self, section: impl FnOnce(&mut Self) -> bool) -> bool {
         self.keeper.round_started(self.status());
         let keep_going = section(self);
         self.keeper.round_finished();
         if keep_going {
             self.publish_status();
+        } else if let Err(error) = remove_if_exists(&self.replica.local().state.file("status.json"))
+        {
+            self.report(&error);
         }
         keep_going
     }
@@ -1342,6 +1348,29 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn should_leave_no_busy_status_behind_when_a_section_ends_the_engine() {
+        let (vault, state_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let state = StateDir::at(state_dir.path()).unwrap();
+        let replica = open_replica(vault.path(), &state, [1; 32]).unwrap();
+        let network = FakeNetwork {
+            id: [1; 32],
+            calls: Arc::default(),
+        };
+        let (commands, _inbox) = mpsc::channel();
+        let watching = Watching::start(vault.path(), commands, no_watcher);
+        let mut actor = Actor::new(replica, Box::new(network), None, watching);
+        actor.keeper = StatusKeeper::start(state.clone(), Duration::from_millis(20));
+        let keep_going = actor.busy(|_| {
+            wait_until("a busy status.json", || {
+                state.read_status().ok().flatten().is_some_and(|s| s.busy)
+            });
+            false
+        });
+        assert!(!keep_going);
+        assert!(!state.file("status.json").exists());
     }
 
     #[test]
