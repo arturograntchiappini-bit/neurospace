@@ -172,7 +172,7 @@ Ignored files are never indexed and never synced, and the sync engine never modi
 - A caller can make the cache forget one file, so the next scan reads it again. The sync engine does this for every file whose replace, rename or trash was refused because the file no longer had the content seen in the scan (section 8.5, rule 2): otherwise a change the cache missed would keep that key blocked for ever.
 - A scan that fails (the vault root cannot be listed) leaves the cache as it was and reports the error; it never reports every note as removed.
 
-The accepted limit: a program that rewrites a file keeping exactly its size and setting its modification time back to the old value is not seen until the file changes again. Editors, `ns`, MCP, the GUI and the sync engine never do that.
+The accepted limit: a change that leaves a file's size and modification time exactly as they were is not seen until the file changes again. That covers a program that rewrites a file keeping its size and setting its time back, two notes of equal size and time swapped by renames, a file system that reports a stale size or time for a moment, and a network share whose clock runs behind. Editors, `ns`, MCP, the GUI and the sync engine never do the first two. No data is lost in any of these cases, because the engine reads a file again before it overwrites or trashes it (8.5): the change only arrives late.
 
 ### 5.4 Reading and writing
 
