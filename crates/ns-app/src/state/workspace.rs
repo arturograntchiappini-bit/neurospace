@@ -5,8 +5,8 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io, mem};
 
 use ns_core::{
-    CoreError, DEFAULT_SEARCH_LIMIT, Index, NotePath, Result, SearchHit, Vault, new_note_path, ops,
-    utc_compact,
+    CoreError, DEFAULT_SEARCH_LIMIT, Index, IndexDelta, NotePath, Result, SearchHit, Vault,
+    new_note_path, ops, utc_compact,
 };
 
 use super::notice::Notice;
@@ -20,12 +20,12 @@ pub const QUICK_OPEN_LIMIT: usize = 50;
 const CONFLICT_NAME_ATTEMPTS: usize = 5;
 const RECOVERED_STEM_CHARS: usize = 50;
 
-/// What `Workspace::apply_index` did with a rebuilt index.
+/// What `Workspace::apply_delta` did with a scan.
 #[derive(Debug)]
 pub enum ApplyOutcome {
-    /// The index was swapped in; the notices describe what happened to the open note.
+    /// The delta was applied; the notices describe what happened to the open note.
     Applied(Vec<Notice>),
-    /// The workspace wrote something since the rebuild started: the index was dropped.
+    /// The workspace wrote something since the scan started: the delta was dropped.
     Stale,
 }
 
@@ -410,15 +410,17 @@ impl Workspace {
         self.open.as_ref().map_or(0, |open| open.words)
     }
 
-    /// Swaps in an index rebuilt from disk and reconciles the open note with it. `Stale` (nothing
-    /// changed) when the workspace wrote something since `started_at_write` (see
-    /// `write_generation`): that index may predate our own write, so the caller must rebuild
-    /// again.
-    pub fn apply_index(&mut self, index: Index, started_at_write: u64) -> ApplyOutcome {
+    /// Applies what a scan of the folder found. `Stale` (nothing changed) when the workspace wrote
+    /// something since `started_at_write` (see `write_generation`): the scan may predate our own
+    /// write, so the caller must scan again. A delta that changes nothing, such as the echo of
+    /// our own save, leaves the revisions, the tree and the open note alone.
+    pub fn apply_delta(&mut self, delta: IndexDelta, started_at_write: u64) -> ApplyOutcome {
         if self.write_generation != started_at_write {
             return ApplyOutcome::Stale;
         }
-        self.index = index;
+        if !self.index.apply(delta) {
+            return ApplyOutcome::Applied(Vec::new());
+        }
         self.index_swaps += 1;
         self.refresh_tree();
         ApplyOutcome::Applied(self.reconcile_open_note().into_iter().collect())
@@ -625,13 +627,26 @@ mod tests {
     use std::fs;
     use std::time::{Duration, Instant};
 
-    use ns_core::{CoreError, NotePath};
+    use ns_core::{CoreError, LoadCache, LoadDelta, NotePath};
     use tempfile::TempDir;
 
     use super::*;
 
     fn p(raw: &str) -> NotePath {
         NotePath::parse(raw).unwrap()
+    }
+
+    /// Everything on disk, as the first reload of a reloader sees it.
+    fn full_delta(vault: &Vault) -> IndexDelta {
+        IndexDelta::parse_complete(vault.load_changes(&mut LoadCache::default()).unwrap())
+    }
+
+    /// Exactly these notes and nothing else.
+    fn only(notes: &[(&str, &str)]) -> IndexDelta {
+        IndexDelta::parse_complete(LoadDelta {
+            changed: notes.iter().map(|(n, c)| (p(n), (*c).into())).collect(),
+            ..LoadDelta::default()
+        })
     }
 
     fn workspace(files: &[(&str, &str)]) -> (TempDir, Workspace) {
@@ -705,13 +720,25 @@ mod tests {
         ws.create("b", None).unwrap();
         let after_create = ws.index_revision();
         assert_ne!(after_create, start);
-        let rebuilt = Index::from_notes(vec![(p("a.md"), "x".into())]);
         let generation = ws.write_generation();
         assert!(matches!(
-            ws.apply_index(rebuilt, generation),
+            ws.apply_delta(only(&[("a.md", "x")]), generation),
             ApplyOutcome::Applied(_)
         ));
         assert_ne!(ws.index_revision(), after_create);
+    }
+
+    #[test]
+    fn should_leave_revisions_and_tree_alone_when_the_delta_changes_nothing() {
+        let (_dir, mut ws) = workspace(&[("a.md", "x")]);
+        let (index, cross) = (ws.index_revision(), ws.cross_note_revision());
+        let generation = ws.write_generation();
+        let outcome = ws.apply_delta(only(&[("a.md", "x")]), generation);
+        assert!(matches!(outcome, ApplyOutcome::Applied(ref notices) if notices.is_empty()));
+        assert_eq!(
+            (ws.index_revision(), ws.cross_note_revision()),
+            (index, cross)
+        );
     }
 
     #[test]
@@ -739,9 +766,8 @@ mod tests {
         fs::write(dir.path().join("new.md"), "theirs").unwrap();
         ws.keep_unsaved_as_conflict().unwrap();
         assert!(changed(&ws), "conflict note");
-        let rebuilt = Index::from_notes(vec![(p("a.md"), "typed".into())]);
         let generation = ws.write_generation();
-        ws.apply_index(rebuilt, generation);
+        ws.apply_delta(only(&[("a.md", "typed")]), generation);
         assert!(changed(&ws), "index swap");
     }
 
@@ -1101,10 +1127,10 @@ mod tests {
         let (dir, mut ws) = workspace(&[("a.md", "one two")]);
         ws.select(&p("a.md")).unwrap();
         fs::write(dir.path().join("a.md"), "one two three four").unwrap();
-        let rebuilt = ns_core::Index::build(ws.vault()).unwrap();
+        let rebuilt = full_delta(ws.vault());
         let tag = ws.write_generation();
         assert!(matches!(
-            ws.apply_index(rebuilt, tag),
+            ws.apply_delta(rebuilt, tag),
             ApplyOutcome::Applied(_)
         ));
         assert_eq!(ws.word_count(), 4);
@@ -1120,9 +1146,9 @@ mod tests {
         ws.edit("one!".into(), Instant::now());
         assert_eq!(ws.buffer_generation(), selected);
         fs::write(dir.path().join("a.md"), "remote").unwrap();
-        let rebuilt = ns_core::Index::build(ws.vault()).unwrap();
+        let rebuilt = full_delta(ws.vault());
         let tag = ws.write_generation();
-        ws.apply_index(rebuilt, tag);
+        ws.apply_delta(rebuilt, tag);
         assert_eq!(ws.open_note().unwrap().buffer, "remote");
         assert_ne!(ws.buffer_generation(), selected);
     }

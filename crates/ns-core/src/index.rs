@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::Serialize;
 
 use crate::error::{CoreError, Result};
+use crate::load_cache::LoadDelta;
 use crate::markdown::{self, Link, is_attachment_target};
 use crate::path::{NoteKey, NotePath};
 use crate::vault::{Ignored, Vault};
@@ -23,6 +24,53 @@ pub struct NoteEntry {
     pub links: Vec<Link>,
     /// Tags lowercased, sorted, unique.
     pub tags: Vec<String>,
+}
+
+impl NoteEntry {
+    fn parse(path: NotePath, content: String) -> NoteEntry {
+        let parsed = markdown::parse(&content);
+        NoteEntry {
+            path,
+            content,
+            links: parsed.links,
+            tags: parsed.tags,
+        }
+    }
+}
+
+/// A `LoadDelta` with its notes already parsed, built off the UI thread.
+#[derive(Debug)]
+pub struct IndexDelta {
+    changed: Vec<NoteEntry>,
+    removed: Vec<NoteKey>,
+    ignored: Vec<Ignored>,
+    /// The delta lists every note (it came from an empty cache): notes it omits are gone.
+    complete: bool,
+}
+
+impl IndexDelta {
+    /// Parses the changed notes of `delta`.
+    pub fn parse(delta: LoadDelta) -> IndexDelta {
+        IndexDelta {
+            changed: delta
+                .changed
+                .into_iter()
+                .map(|(path, content)| NoteEntry::parse(path, content))
+                .collect(),
+            removed: delta.removed,
+            ignored: delta.ignored,
+            complete: false,
+        }
+    }
+
+    /// Like `parse`, for a delta that lists every note (a scan from an empty cache): an indexed
+    /// note it does not list is removed, since an empty cache cannot report removals.
+    pub fn parse_complete(delta: LoadDelta) -> IndexDelta {
+        IndexDelta {
+            complete: true,
+            ..IndexDelta::parse(delta)
+        }
+    }
 }
 
 /// A link together with the note it points to, if any.
@@ -87,19 +135,45 @@ impl Index {
 
     /// Adds a note or replaces the one with the same key.
     pub fn upsert(&mut self, path: NotePath, content: String) {
-        let parsed = markdown::parse(&content);
-        let key = path.key();
+        self.put(NoteEntry::parse(path, content));
+    }
+
+    fn put(&mut self, entry: NoteEntry) {
+        let key = entry.path.key();
         self.by_stem
             .entry(stem_of_key(&key).to_owned())
             .or_default()
             .insert(key.clone());
-        let entry = NoteEntry {
-            path,
-            content,
-            links: parsed.links,
-            tags: parsed.tags,
-        };
         self.notes.insert(key, entry);
+    }
+
+    /// Applies removals, then changes, then replaces the ignored list. True when anything differs:
+    /// a note whose path and text equal the indexed ones is not a change.
+    pub fn apply(&mut self, delta: IndexDelta) -> bool {
+        let mut removed = delta.removed;
+        if delta.complete {
+            let listed: BTreeSet<NoteKey> = delta.changed.iter().map(|e| e.path.key()).collect();
+            removed.extend(self.notes.keys().filter(|k| !listed.contains(*k)).cloned());
+        }
+        let mut differs = false;
+        for key in &removed {
+            differs |= self.remove(key);
+        }
+        for entry in delta.changed {
+            let same = self
+                .notes
+                .get(&entry.path.key())
+                .is_some_and(|old| old.path == entry.path && old.content == entry.content);
+            if !same {
+                self.put(entry);
+                differs = true;
+            }
+        }
+        if self.ignored != delta.ignored {
+            self.ignored = delta.ignored;
+            differs = true;
+        }
+        differs
     }
 
     /// Removes a note; false when it was not indexed.
@@ -354,6 +428,7 @@ fn line_context(content: &str, line: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::load_cache::LoadCache;
 
     fn fixture() -> Index {
         let n = |p: &str, c: &str| (NotePath::parse(p).unwrap(), c.to_string());
@@ -680,5 +755,90 @@ mod tests {
         assert_eq!(ix.len(), 2);
         assert_eq!(ix.ignored().len(), 1);
         assert_eq!(ix.ignored()[0].path, "bad.md");
+    }
+
+    fn delta(changed: &[(&str, &str)], removed: &[&str]) -> IndexDelta {
+        IndexDelta::parse(LoadDelta {
+            changed: changed
+                .iter()
+                .map(|(n, c)| (p(n), (*c).to_string()))
+                .collect(),
+            removed: removed.iter().map(|n| p(n).key()).collect(),
+            ignored: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn should_report_no_change_when_the_delta_repeats_the_index() {
+        let mut ix = index_of(&[("a.md", "[[b]]"), ("b.md", "#t")]);
+        assert!(!ix.apply(delta(&[("a.md", "[[b]]"), ("b.md", "#t")], &[])));
+        assert!(ix.apply(delta(&[("a.md", "[[b]] edited")], &[])));
+        assert!(ix.apply(delta(&[("c.md", "new")], &[])));
+        assert!(ix.apply(delta(&[], &["c.md"])));
+        assert!(!ix.apply(delta(&[], &["c.md"])));
+    }
+
+    #[test]
+    fn should_apply_removals_before_changes() {
+        let mut ix = index_of(&[("a.md", "old")]);
+        assert!(ix.apply(delta(&[("a.md", "new")], &["a.md"])));
+        assert_eq!(ix.get(&p("a.md").key()).unwrap().content, "new");
+        // A case-only rename arrives as a change under the new spelling and no removal.
+        assert!(ix.apply(delta(&[("A.md", "new")], &[])));
+        assert_eq!(ix.len(), 1);
+        assert_eq!(ix.get(&p("a.md").key()).unwrap().path.as_str(), "A.md");
+    }
+
+    #[test]
+    fn should_drop_notes_missing_from_a_complete_delta() {
+        let mut ix = index_of(&[("a.md", "x"), ("gone.md", "y")]);
+        let listed = LoadDelta {
+            changed: vec![(p("a.md"), "x".to_owned())],
+            ..LoadDelta::default()
+        };
+        assert!(ix.apply(IndexDelta::parse_complete(listed)));
+        assert_eq!(ix.len(), 1);
+        assert!(ix.get(&p("gone.md").key()).is_none());
+    }
+
+    fn assert_same_as_build(vault: &Vault, ix: &Index, step: &str) {
+        let fresh = Index::build(vault).unwrap();
+        let entries = |i: &Index| i.notes().map(|e| format!("{e:?}")).collect::<Vec<_>>();
+        assert_eq!(entries(ix), entries(&fresh), "{step}: notes");
+        assert_eq!(ix.by_stem, fresh.by_stem, "{step}: stems");
+        assert_eq!(ix.ignored, fresh.ignored, "{step}: ignored");
+    }
+
+    #[test]
+    fn should_equal_a_fresh_build_after_every_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        let (root, mut cache, mut ix) = (dir.path(), LoadCache::default(), Index::default());
+        let mut step = |what: &str, act: &dyn Fn()| {
+            act();
+            let loaded = vault.load_changes(&mut cache).unwrap();
+            ix.apply(IndexDelta::parse(loaded));
+            assert_same_as_build(&vault, &ix, what);
+        };
+        step("add", &|| {
+            std::fs::write(root.join("a.md"), "[[b]] #t").unwrap();
+            std::fs::create_dir(root.join("dir")).unwrap();
+            std::fs::write(root.join("dir/b.md"), "[[a]]").unwrap();
+        });
+        step("edit", &|| {
+            std::fs::write(root.join("a.md"), "[[dir/b]] #u").unwrap()
+        });
+        step("remove", &|| {
+            std::fs::remove_file(root.join("dir/b.md")).unwrap()
+        });
+        step("case rename", &|| {
+            std::fs::rename(root.join("a.md"), root.join("A.md")).unwrap();
+        });
+        step("ignored appears", &|| {
+            std::fs::write(root.join("bad.md"), [0xff_u8]).unwrap();
+        });
+        step("ignored disappears", &|| {
+            std::fs::remove_file(root.join("bad.md")).unwrap();
+        });
     }
 }
