@@ -75,6 +75,37 @@ fn should_open_note_when_clicked_in_tree() {
 }
 
 #[test]
+fn should_open_a_note_of_a_large_folder_after_expanding_it() {
+    let scratch = tempfile::tempdir().unwrap();
+    let vault = make_vault(scratch.path());
+    fs::create_dir_all(vault.join("big")).unwrap();
+    for number in 0..3000 {
+        fs::write(vault.join(format!("big/n{number:04}.md")), "x").unwrap();
+    }
+    let (mut harness, _dir) = harness(Some(&vault));
+    run_until(&mut harness, "vault screen", |app| {
+        app.screen_name() == "vault"
+    });
+    harness.run();
+    assert!(harness.query_by_label("n0000").is_none());
+    click_label(&mut harness, "big");
+    click_label(&mut harness, "n0000");
+    assert_eq!(open_path(&harness).as_deref(), Some("big/n0000.md"));
+    assert!(harness.query_by_label("n2999").is_none(), "drew every row");
+}
+
+#[test]
+fn should_toggle_a_focused_folder_with_enter() {
+    let mut f = open_fixture();
+    assert!(f.harness.query_by_label("c").is_none());
+    focus_row(&mut f.harness, "sub");
+    press_enter(&mut f.harness);
+    f.harness.get_by_label("c");
+    press_enter(&mut f.harness);
+    assert!(f.harness.query_by_label("c").is_none());
+}
+
+#[test]
 fn should_create_note_with_ctrl_n() {
     let mut f = open_fixture();
     f.harness.key_press_modifiers(Modifiers::COMMAND, Key::N);

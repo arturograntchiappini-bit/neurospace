@@ -1,16 +1,18 @@
 //! The left panel: search field, folder tree and search results (spec 9.2).
 
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{
-    Button, CollapsingHeader, Id, Key, KeyboardShortcut, Modifiers, Popup, Response, RichText,
-    ScrollArea, SetOpenCommand, TextEdit, TextStyle, Ui, vec2,
+    Atom, Button, Color32, Id, IdSalt, Key, KeyboardShortcut, Modifiers, Popup, Rect, Response,
+    RichText, Role, ScrollArea, SetOpenCommand, Shape, Stroke, TextEdit, TextStyle, Ui, WidgetInfo,
+    vec2,
 };
 use ns_core::NotePath;
 
-use crate::state::tree::Folder;
-use crate::state::{NoteAction, SearchBox, Workspace};
+use crate::state::tree_rows::{RowKind, TreeRow, visible_rows};
+use crate::state::{FilesPanel, NoteAction, SearchBox, Workspace};
 use crate::ui::theme::{self, Palette, Rgba};
 
 /// Text on the search field's hint and its accessible name.
@@ -51,22 +53,19 @@ pub fn show(
     ui: &mut Ui,
     p: &Palette,
     workspace: &Workspace,
-    search: &mut SearchBox,
+    files: &mut FilesPanel,
 ) -> Option<NoteAction> {
     theme::section_label(ui, p, "FILES");
-    search_field(ui, search);
-    if let Some(wait) = search.update(workspace, Instant::now()) {
+    search_field(ui, &mut files.search);
+    if let Some(wait) = files.search.update(workspace, Instant::now()) {
         ui.ctx().request_repaint_after(wait);
     }
-    ScrollArea::vertical()
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            if search.text.is_empty() {
-                tree_view(ui, workspace)
-            } else {
-                results_view(ui, p, search)
-            }
-        })
+    if files.search.text.is_empty() {
+        return tree_view(ui, workspace, &mut files.expanded);
+    }
+    let results = ScrollArea::vertical().auto_shrink(false);
+    results
+        .show(ui, |ui| results_view(ui, p, &files.search))
         .inner
 }
 
@@ -78,24 +77,65 @@ fn search_field(ui: &mut Ui, search: &mut SearchBox) {
     ui.add(field).accessible_name(SEARCH_HINT);
 }
 
-fn tree_view(ui: &mut Ui, workspace: &Workspace) -> Option<NoteAction> {
-    let selected = workspace.open_note().map(|open| &open.path);
-    folder_contents(ui, workspace.tree(), selected)
+/// What the visible tree rows asked for in one frame.
+#[derive(Default)]
+struct RowsOutcome {
+    action: Option<NoteAction>,
+    toggled: Option<String>,
 }
 
-fn folder_contents(
+enum RowEvent {
+    Toggle(String),
+    Act(NoteAction),
+}
+
+/// The tree as a scroll area that draws only the rows in view.
+fn tree_view(
     ui: &mut Ui,
-    folder: &Folder,
-    selected: Option<&NotePath>,
+    workspace: &Workspace,
+    expanded: &mut BTreeSet<String>,
 ) -> Option<NoteAction> {
-    let mut action = None;
-    for child in &folder.folders {
-        action = action.or(folder_row(ui, child, selected));
+    let rows = visible_rows(workspace.tree(), expanded);
+    let height = row_height(ui);
+    let selected = workspace.open_note().map(|open| &open.path);
+    let area = ScrollArea::vertical().auto_shrink(false);
+    let outcome = area
+        .show_rows(ui, height, rows.len(), |ui, range| {
+            draw_rows(ui, &rows[range], selected)
+        })
+        .inner;
+    if let Some(path) = outcome.toggled {
+        if !expanded.remove(&path) {
+            expanded.insert(path);
+        }
+        ui.ctx().request_repaint();
     }
-    for note in &folder.notes {
-        action = action.or(note_row(ui, note, is_selected(selected, note)));
+    outcome.action
+}
+
+/// The height of every row: one line of button text with its padding, never under the touch size.
+/// `show_rows` needs it equal for all rows, so a long name is cut short, never wrapped.
+fn row_height(ui: &Ui) -> f32 {
+    let text = ui.text_style_height(&TextStyle::Button);
+    let padded = text + 2.0 * ui.spacing().button_padding.y;
+    padded.max(ui.spacing().interact_size.y)
+}
+
+fn draw_rows(ui: &mut Ui, rows: &[TreeRow], selected: Option<&NotePath>) -> RowsOutcome {
+    let mut outcome = RowsOutcome::default();
+    for row in rows {
+        let indent = row.depth as f32 * ui.spacing().indent;
+        let shown = ui.horizontal(|ui| {
+            ui.add_space(indent);
+            tree_row(ui, row, selected)
+        });
+        match shown.inner {
+            Some(RowEvent::Toggle(path)) => outcome.toggled = Some(path),
+            Some(RowEvent::Act(action)) => outcome.action = Some(action),
+            None => {}
+        }
     }
-    action
+    outcome
 }
 
 /// The tree marks a note as open by its key, not its spelling: the open path may differ in letter
@@ -104,24 +144,75 @@ fn is_selected(selected: Option<&NotePath>, note: &NotePath) -> bool {
     selected.is_some_and(|open| open.key() == note.key())
 }
 
-fn folder_row(ui: &mut Ui, folder: &Folder, selected: Option<&NotePath>) -> Option<NoteAction> {
-    let shown = CollapsingHeader::new(&folder.name)
-        .id_salt(folder.path.as_str())
-        .show(ui, |ui| folder_contents(ui, folder, selected));
-    let mut action = None;
-    row_menu(&shown.header_response, |ui| {
+/// One row. Its id is its path, so keyboard focus stays on the same row when rows above it
+/// appear or disappear.
+fn tree_row(ui: &mut Ui, row: &TreeRow, selected: Option<&NotePath>) -> Option<RowEvent> {
+    match &row.kind {
+        RowKind::Folder {
+            path,
+            name,
+            expanded,
+        } => {
+            let draw = |ui: &mut Ui| folder_row(ui, path, name, *expanded);
+            ui.push_id(path, draw).inner
+        }
+        RowKind::Note(note) => {
+            let draw = |ui: &mut Ui| note_row(ui, note, is_selected(selected, note));
+            ui.push_id(note.as_str(), draw).inner
+        }
+    }
+}
+
+/// A full-width row button, `row_height` tall: a slot for the folder marker, then `name` cut to fit.
+fn name_button<'a>(ui: &Ui, selected: bool, name: &'a str) -> (Button<'a>, IdSalt) {
+    let slot = IdSalt::new("marker");
+    let side = ui.spacing().icon_width;
+    let button = Button::selectable(selected, (Atom::custom(slot, vec2(side, side)), name));
+    let size = vec2(ui.available_width(), row_height(ui));
+    (button.truncate().min_size(size), slot)
+}
+
+fn folder_row(ui: &mut Ui, path: &str, name: &str, expanded: bool) -> Option<RowEvent> {
+    let (button, slot) = name_button(ui, false, name);
+    let shown = button.atom_ui(ui);
+    let response = &shown.response;
+    response.widget_info(|| WidgetInfo::labeled(Role::DisclosureTriangle, true, name));
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_expanded(expanded);
+    });
+    if let Some(rect) = shown.rect(slot) {
+        let color = ui.style().interact(response).fg_stroke.color;
+        paint_marker(ui, rect, expanded, color);
+    }
+    let mut event = response
+        .clicked()
+        .then(|| RowEvent::Toggle(path.to_owned()));
+    row_menu(response, |ui| {
         if ui.button("New note here…").clicked() {
-            action = Some(NoteAction::NewIn(folder.path.clone()));
+            event = Some(RowEvent::Act(NoteAction::NewIn(path.to_owned())));
             ui.close();
         }
     });
-    action.or(shown.body_returned.flatten())
+    event
 }
 
-fn note_row(ui: &mut Ui, note: &NotePath, is_open: bool) -> Option<NoteAction> {
-    let width = ui.available_width();
-    let row = Button::selectable(is_open, note.stem()).min_size(vec2(width, 0.0));
-    let response = ui.add(row);
+/// A triangle in `slot`: pointing right when the folder is closed, down when open.
+fn paint_marker(ui: &Ui, slot: Rect, expanded: bool, color: Color32) {
+    let centre = slot.center();
+    let r = slot.width() * 0.25;
+    let offsets = if expanded {
+        [(-r, -r / 2.0), (r, -r / 2.0), (0.0, r)]
+    } else {
+        [(-r / 2.0, -r), (r, 0.0), (-r / 2.0, r)]
+    };
+    let points = offsets.iter().map(|&(x, y)| centre + vec2(x, y)).collect();
+    let marker = Shape::convex_polygon(points, color, Stroke::NONE);
+    ui.painter().add(marker);
+}
+
+fn note_row(ui: &mut Ui, note: &NotePath, is_open: bool) -> Option<RowEvent> {
+    let (button, _) = name_button(ui, is_open, note.stem());
+    let response = ui.add(button);
     let mut action = response.clicked().then(|| NoteAction::Open(note.clone()));
     if key_pressed(&response, &RENAME_KEY) {
         action = Some(NoteAction::Rename(note.clone()));
@@ -139,7 +230,7 @@ fn note_row(ui: &mut Ui, note: &NotePath, is_open: bool) -> Option<NoteAction> {
             ui.close();
         }
     });
-    action
+    action.map(RowEvent::Act)
 }
 
 /// True when `shortcut` was pressed while the keyboard focus is on `response`.

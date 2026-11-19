@@ -1,6 +1,7 @@
 //! What the file panel, the links panel, the note dialogs and the status strip show, and what
 //! their actions do. No UI here: the UI draws these values and forwards input.
 
+use std::collections::BTreeSet;
 use std::mem;
 use std::time::{Duration, Instant};
 
@@ -67,6 +68,16 @@ fn failure<T>(result: ns_core::Result<T>) -> Option<Notice> {
 fn open_dialog(slot: &mut Option<NoteDialog>, dialog: NoteDialog) -> Option<Notice> {
     *slot = Some(dialog);
     None
+}
+
+/// What the file panel remembers between frames: the search and the folders the user opened.
+/// It lives as long as the vault is open; folders start closed.
+#[derive(Debug, Default)]
+pub struct FilesPanel {
+    /// The search field and its results.
+    pub search: SearchBox,
+    /// Paths of the open folders.
+    pub expanded: BTreeSet<String>,
 }
 
 /// The search field and its debounced results.
