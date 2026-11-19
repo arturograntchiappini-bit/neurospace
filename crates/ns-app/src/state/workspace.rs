@@ -5,8 +5,8 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io, mem};
 
 use ns_core::{
-    CoreError, DEFAULT_SEARCH_LIMIT, Index, IndexDelta, NotePath, Result, SearchHit, Vault,
-    new_note_path, ops, utc_compact,
+    CoreError, DEFAULT_SEARCH_LIMIT, Index, IndexDelta, NoteKey, NotePath, Result, SearchHit,
+    Vault, new_note_path, ops, utc_compact,
 };
 
 use super::notice::Notice;
@@ -81,6 +81,7 @@ pub struct Workspace {
     write_generation: u64,
     index_swaps: u64,
     other_note_writes: u64,
+    written: Vec<NoteKey>,
     buffer_generation: u64,
     notices: Vec<Notice>,
 }
@@ -102,6 +103,7 @@ impl Workspace {
             write_generation: 0,
             index_swaps: 0,
             other_note_writes: 0,
+            written: Vec::new(),
             buffer_generation: 0,
             notices: Vec::new(),
         })
@@ -223,7 +225,8 @@ impl Workspace {
         open.saved.clone_from(&open.buffer);
         open.last_edit = None;
         open.path = stored.clone();
-        self.index.upsert(stored, open.buffer.clone());
+        let text = open.buffer.clone();
+        self.upsert_written(stored, text);
         self.write_generation += 1;
         Ok(Saved::Written)
     }
@@ -281,7 +284,7 @@ impl Workspace {
         let created = ops::create_note(&self.vault, path, "")?.path;
         self.write_generation += 1;
         self.other_note_writes += 1;
-        self.index.upsert(created.clone(), String::new());
+        self.upsert_written(created.clone(), String::new());
         self.refresh_tree();
         self.select(&created)?;
         Ok(created)
@@ -303,7 +306,7 @@ impl Workspace {
         self.index.remove(&outcome.from.key());
         // An unreadable moved note stays out of the index; the next reload re-indexes it.
         if let Ok(text) = self.vault.read(&outcome.to) {
-            self.index.upsert(outcome.to.clone(), text);
+            self.upsert_written(outcome.to.clone(), text);
         }
         if let Some(open) = self
             .open
@@ -513,7 +516,7 @@ impl Workspace {
         open.kept = true;
         self.write_generation += 1;
         self.other_note_writes += 1;
-        self.index.upsert(created.clone(), buffer);
+        self.upsert_written(created.clone(), buffer);
         self.refresh_tree();
         Ok(Some(created))
     }
@@ -540,6 +543,19 @@ impl Workspace {
         self.open
             .as_ref()
             .is_some_and(|open| open.path.key() == path.key())
+    }
+
+    /// Indexes a note this workspace just wrote and remembers its key for `take_written`.
+    fn upsert_written(&mut self, path: NotePath, text: String) {
+        self.written.push(path.key());
+        self.index.upsert(path, text);
+    }
+
+    /// The keys of the notes written since the last call, which no scan has seen yet. The
+    /// reloader tells its load cache to expect them, so a note that vanishes before a scan reads
+    /// it is still reported as removed.
+    pub fn take_written(&mut self) -> Vec<NoteKey> {
+        mem::take(&mut self.written)
     }
 
     fn refresh_tree(&mut self) {
@@ -627,18 +643,14 @@ mod tests {
     use std::fs;
     use std::time::{Duration, Instant};
 
-    use ns_core::{CoreError, LoadCache, LoadDelta, NotePath};
+    use ns_core::{CoreError, LoadDelta, NotePath};
     use tempfile::TempDir;
 
     use super::*;
+    use crate::state::test_support::full_delta;
 
     fn p(raw: &str) -> NotePath {
         NotePath::parse(raw).unwrap()
-    }
-
-    /// Everything on disk, as the first reload of a reloader sees it.
-    fn full_delta(vault: &Vault) -> IndexDelta {
-        IndexDelta::parse_complete(vault.load_changes(&mut LoadCache::default()).unwrap())
     }
 
     /// Exactly these notes and nothing else.

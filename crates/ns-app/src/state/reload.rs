@@ -83,6 +83,10 @@ impl Reloader {
     /// Applies a finished scan, then starts a new one if a change has been quiet for
     /// `RELOAD_DEBOUNCE` and none is running. A failed scan keeps the old index and cache.
     pub fn tick(&mut self, workspace: &mut Workspace, now: Instant) -> Vec<Notice> {
+        // Before `collect`: a result made stale by one of these writes keeps this cache.
+        for key in workspace.take_written() {
+            self.cache.expect(&key);
+        }
         let notices = self.collect(workspace, now);
         if self.job.is_none() && self.quiet_change_pending(now) {
             self.spawn_scan(workspace.write_generation());
@@ -187,19 +191,15 @@ mod tests {
     use std::fs;
     use std::time::{Duration, Instant};
 
-    use ns_core::{IndexDelta, LoadCache, NotePath, Vault};
+    use ns_core::NotePath;
     use tempfile::TempDir;
 
     use super::*;
+    use crate::state::test_support::full_delta;
     use crate::state::{ApplyOutcome, Notice, NoticeKind, Workspace};
 
     fn p(raw: &str) -> NotePath {
         NotePath::parse(raw).unwrap()
-    }
-
-    /// Everything on disk, as the first reload of a reloader sees it.
-    fn full_delta(vault: &Vault) -> IndexDelta {
-        IndexDelta::parse_complete(vault.load_changes(&mut LoadCache::default()).unwrap())
     }
 
     /// Writes `text` to `name` and dates it `age` seconds ago, so that no scan treats it as racy.
@@ -417,16 +417,106 @@ mod tests {
         assert!(ws.index().get(&p("m.md").key()).is_some());
     }
 
+    fn revisions(ws: &Workspace) -> (u64, u64) {
+        (ws.index_revision(), ws.cross_note_revision())
+    }
+
     #[test]
     fn should_not_bump_revisions_for_the_echo_of_an_own_save() {
         let (_dir, mut ws, mut reloader) = setup(&[("n.md", "old"), ("m.md", "other")]);
         ws.select(&p("n.md")).unwrap();
         ws.edit("mine".into(), Instant::now());
         ws.save().unwrap();
-        let before = (ws.index_revision(), ws.cross_note_revision());
+        let before = revisions(&ws);
         let notices = reload(&mut ws, &mut reloader, Instant::now());
         assert!(notices.is_empty(), "{notices:?}");
-        assert_eq!((ws.index_revision(), ws.cross_note_revision()), before);
+        assert_eq!(revisions(&ws), before);
+    }
+
+    #[test]
+    fn should_not_bump_revisions_for_the_echo_of_an_own_save_that_changes_links_on_a_primed_scan() {
+        let (_dir, mut ws, mut reloader) = setup(&[("n.md", "old"), ("m.md", "other")]);
+        ws.select(&p("n.md")).unwrap();
+        reload(&mut ws, &mut reloader, Instant::now());
+        let primed = revisions(&ws);
+        ws.edit("see [[m]] and #tag".into(), Instant::now());
+        ws.save().unwrap();
+        let saved = revisions(&ws);
+        assert_ne!(
+            saved.0, primed.0,
+            "the save itself moves the index revision"
+        );
+        let notices = reload(&mut ws, &mut reloader, Instant::now());
+        assert!(notices.is_empty(), "{notices:?}");
+        assert_eq!(revisions(&ws), saved);
+        reload(&mut ws, &mut reloader, Instant::now());
+        assert_eq!(revisions(&ws), saved, "a second quiet scan stays quiet");
+        assert_eq!(ws.index().outgoing(&p("n.md").key()).len(), 1);
+    }
+
+    /// Dates `name` far enough back that a scan trusts its cache entry.
+    fn age(dir: &TempDir, name: &str) {
+        let text = fs::read_to_string(dir.path().join(name)).unwrap();
+        write_aged(dir, name, &text, 60);
+    }
+
+    fn assert_gone_after_reload(ws: &mut Workspace, reloader: &mut Reloader, name: &str) {
+        reload(ws, reloader, Instant::now());
+        assert!(ws.index().get(&p(name).key()).is_none(), "{name} lingers");
+        assert!(!ws.tree().notes.contains(&p(name)), "{name} in the tree");
+    }
+
+    #[test]
+    fn should_drop_a_created_note_that_vanished_before_any_scan_saw_it() {
+        let (dir, mut ws, mut reloader) = setup(&[("a.md", "x")]);
+        reload(&mut ws, &mut reloader, Instant::now());
+        ws.create("c", None).unwrap();
+        fs::remove_file(dir.path().join("c.md")).unwrap();
+        assert_gone_after_reload(&mut ws, &mut reloader, "c.md");
+    }
+
+    #[test]
+    fn should_drop_a_saved_note_that_vanished_before_any_scan_saw_it() {
+        let (dir, mut ws, mut reloader) = setup(&[("a.md", "x")]);
+        reload(&mut ws, &mut reloader, Instant::now());
+        write_aged(&dir, "d.md", "unseen", 60);
+        ws.select(&p("d.md")).unwrap();
+        ws.edit("typed".into(), Instant::now());
+        ws.save().unwrap();
+        fs::remove_file(dir.path().join("d.md")).unwrap();
+        assert_gone_after_reload(&mut ws, &mut reloader, "d.md");
+    }
+
+    #[test]
+    fn should_drop_a_rename_target_and_a_conflict_copy_that_vanished_before_any_scan_saw_them() {
+        let (dir, mut ws, mut reloader) = setup(&[("a.md", "x"), ("b.md", "y")]);
+        age(&dir, "a.md");
+        age(&dir, "b.md");
+        reload(&mut ws, &mut reloader, Instant::now());
+        ws.rename(&p("a.md"), "z").unwrap();
+        ws.select(&p("b.md")).unwrap();
+        ws.edit("typed".into(), Instant::now());
+        let conflict = ws.keep_unsaved_as_conflict().unwrap().unwrap();
+        fs::remove_file(dir.path().join("z.md")).unwrap();
+        fs::remove_file(dir.path().join(conflict.as_str())).unwrap();
+        assert_gone_after_reload(&mut ws, &mut reloader, "z.md");
+        assert!(ws.index().get(&conflict.key()).is_none());
+        assert!(ws.index().get(&p("a.md").key()).is_none());
+    }
+
+    #[test]
+    fn should_drop_a_created_note_that_vanished_while_a_scan_went_stale() {
+        let (dir, mut ws, mut reloader) = setup(&[("a.md", "x")]);
+        reload(&mut ws, &mut reloader, Instant::now());
+        ws.create("c", None).unwrap();
+        let t0 = Instant::now();
+        reloader.mark_changed(t0);
+        reloader.tick(&mut ws, t0 + RELOAD_DEBOUNCE);
+        ws.edit("typed".into(), t0);
+        ws.save().unwrap();
+        finish_job(&mut ws, &mut reloader, t0 + RELOAD_DEBOUNCE);
+        fs::remove_file(dir.path().join("c.md")).unwrap();
+        assert_gone_after_reload(&mut ws, &mut reloader, "c.md");
     }
 
     #[test]

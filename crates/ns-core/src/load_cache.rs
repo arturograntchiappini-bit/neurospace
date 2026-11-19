@@ -54,6 +54,26 @@ pub struct LoadCache {
 }
 
 impl LoadCache {
+    /// The caller wrote this note without a scan: the next scan reads its file whatever its size
+    /// and time, and reports the key as removed when the file is gone, also when no scan has
+    /// ever seen it (a placeholder entry stands for it).
+    pub fn expect(&mut self, key: &NoteKey) {
+        if self.entries.contains_key(key) {
+            return self.forget(key);
+        }
+        // A key comes from a valid note path, so it parses; the spelling is never compared
+        // because the placeholder has no stat.
+        if let Ok(spelling) = NotePath::parse(key.as_str()) {
+            let placeholder = Entry {
+                spelling,
+                is_note: true,
+                stat: None,
+                racy: false,
+            };
+            self.entries.insert(key.clone(), placeholder);
+        }
+    }
+
     /// The next scan reads this note's file again, whatever its size and time.
     pub fn forget(&mut self, key: &NoteKey) {
         if let Some(entry) = self.entries.get_mut(key) {
@@ -262,6 +282,44 @@ mod tests {
         assert_eq!(delta.changed, full.notes);
         assert_eq!(delta.ignored, full.ignored);
         assert!(delta.removed.is_empty());
+    }
+
+    #[test]
+    fn should_report_an_expected_unknown_note_as_removed_when_its_file_is_gone() {
+        let (dir, vault) = vault();
+        put_old(dir.path(), "a.md", b"one");
+        let mut cache = LoadCache::default();
+        vault.load_changes(&mut cache).unwrap();
+        cache.expect(&key("ghost.md"));
+        let delta = vault.load_changes(&mut cache).unwrap();
+        assert_eq!(delta.removed, [key("ghost.md")]);
+        assert!(delta.changed.is_empty());
+        assert!(vault.load_changes(&mut cache).unwrap().removed.is_empty());
+    }
+
+    #[test]
+    fn should_report_an_expected_unknown_note_as_changed_when_its_file_is_there() {
+        let (dir, vault) = vault();
+        put_old(dir.path(), "a.md", b"one");
+        let mut cache = LoadCache::default();
+        vault.load_changes(&mut cache).unwrap();
+        put_old(dir.path(), "b.md", b"two");
+        cache.expect(&key("b.md"));
+        let delta = vault.load_changes(&mut cache).unwrap();
+        assert_eq!(changed(&delta), [("b.md", "two")]);
+        assert!(delta.removed.is_empty());
+    }
+
+    #[test]
+    fn should_read_a_known_note_again_when_it_is_expected() {
+        let (dir, vault) = vault();
+        put_old(dir.path(), "a.md", b"one");
+        let mut cache = LoadCache::default();
+        vault.load_changes(&mut cache).unwrap();
+        assert!(vault.load_changes(&mut cache).unwrap().changed.is_empty());
+        cache.expect(&key("a.md"));
+        let delta = vault.load_changes(&mut cache).unwrap();
+        assert_eq!(changed(&delta), [("a.md", "one")]);
     }
 
     #[test]

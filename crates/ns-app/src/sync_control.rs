@@ -88,7 +88,8 @@ impl EngineControl {
         result.map_err(text)
     }
 
-    /// The status from `status.json`, at most 5 s old; an unreadable file keeps the last good one,
+    /// The status from `status.json`; an unreadable file keeps the last good one while that is no
+    /// older than `STATUS_MAX_AGE_SECS`,
     /// because Windows can refuse a read while the engine replaces the file.
     fn file_status(&mut self) -> EngineStatus {
         match control::status(&self.state, unix_now()) {
@@ -103,6 +104,9 @@ impl EngineControl {
             Err(_) => self
                 .last_status
                 .clone()
+                .filter(|last| {
+                    unix_now().saturating_sub(last.updated_unix) <= control::STATUS_MAX_AGE_SECS
+                })
                 .map_or(EngineStatus::Unknown, EngineStatus::Running),
         }
     }
@@ -338,6 +342,21 @@ mod tests {
         assert_eq!(control.status(), EngineStatus::Running(fresh_status(7)));
         std::fs::write(state.file("status.json"), "{ not json").unwrap();
         assert_eq!(control.status(), EngineStatus::Running(fresh_status(7)));
+    }
+
+    #[test]
+    fn should_stop_showing_the_last_status_once_it_is_older_than_the_freshness_limit() {
+        let (mut control, dir) = control();
+        std::fs::write(state_of(&dir).file("status.json"), "{ not json").unwrap();
+        let aged = |secs: u64| ns_sync::Status {
+            updated_unix: unix_now() - secs,
+            ..fresh_status(7)
+        };
+        control.last_status = Some(aged(control::STATUS_MAX_AGE_SECS - 2));
+        let shown = control.status();
+        assert!(matches!(shown, EngineStatus::Running(_)), "{shown:?}");
+        control.last_status = Some(aged(control::STATUS_MAX_AGE_SECS + 2));
+        assert_eq!(control.status(), EngineStatus::Unknown);
     }
 
     #[test]

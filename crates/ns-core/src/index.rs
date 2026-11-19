@@ -809,36 +809,86 @@ mod tests {
         assert_eq!(ix.ignored, fresh.ignored, "{step}: ignored");
     }
 
+    /// A folder followed by deltas through a load cache, files dated at least a minute back (a
+    /// different time each write) so that the cache trusts them and an edit never keeps its old
+    /// size and time.
+    struct Followed {
+        dir: tempfile::TempDir,
+        vault: Vault,
+        cache: LoadCache,
+        ix: Index,
+        serial: u64,
+    }
+
+    impl Followed {
+        fn new() -> Followed {
+            let dir = tempfile::tempdir().unwrap();
+            let vault = Vault::open(dir.path()).unwrap();
+            let (cache, ix, serial) = (LoadCache::default(), Index::default(), 0);
+            Followed {
+                dir,
+                vault,
+                cache,
+                ix,
+                serial,
+            }
+        }
+
+        fn put(&mut self, relative: &str, bytes: &[u8]) {
+            self.serial += 1;
+            let file = self.dir.path().join(relative);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, bytes).unwrap();
+            let back = std::time::Duration::from_secs(60 + self.serial);
+            let open = std::fs::File::options().write(true).open(&file).unwrap();
+            open.set_modified(std::time::SystemTime::now() - back)
+                .unwrap();
+        }
+
+        fn rename(&self, from: &str, to: &str) {
+            std::fs::rename(self.dir.path().join(from), self.dir.path().join(to)).unwrap();
+        }
+
+        fn remove(&self, relative: &str) {
+            std::fs::remove_file(self.dir.path().join(relative)).unwrap();
+        }
+
+        /// Scans, applies the delta, checks `apply`'s answer and equality with a fresh build.
+        fn scan(&mut self, what: &str, changes: bool) {
+            let loaded = self.vault.load_changes(&mut self.cache).unwrap();
+            assert_eq!(self.ix.apply(IndexDelta::parse(loaded)), changes, "{what}");
+            assert_same_as_build(&self.vault, &self.ix, what);
+        }
+    }
+
     #[test]
-    fn should_equal_a_fresh_build_after_every_delta() {
-        let dir = tempfile::tempdir().unwrap();
-        let vault = Vault::open(dir.path()).unwrap();
-        let (root, mut cache, mut ix) = (dir.path(), LoadCache::default(), Index::default());
-        let mut step = |what: &str, act: &dyn Fn()| {
-            act();
-            let loaded = vault.load_changes(&mut cache).unwrap();
-            ix.apply(IndexDelta::parse(loaded));
-            assert_same_as_build(&vault, &ix, what);
-        };
-        step("add", &|| {
-            std::fs::write(root.join("a.md"), "[[b]] #t").unwrap();
-            std::fs::create_dir(root.join("dir")).unwrap();
-            std::fs::write(root.join("dir/b.md"), "[[a]]").unwrap();
-        });
-        step("edit", &|| {
-            std::fs::write(root.join("a.md"), "[[dir/b]] #u").unwrap()
-        });
-        step("remove", &|| {
-            std::fs::remove_file(root.join("dir/b.md")).unwrap()
-        });
-        step("case rename", &|| {
-            std::fs::rename(root.join("a.md"), root.join("A.md")).unwrap();
-        });
-        step("ignored appears", &|| {
-            std::fs::write(root.join("bad.md"), [0xff_u8]).unwrap();
-        });
-        step("ignored disappears", &|| {
-            std::fs::remove_file(root.join("bad.md")).unwrap();
-        });
+    fn should_equal_a_fresh_build_after_adds_edits_and_removals() {
+        let mut f = Followed::new();
+        f.put("a.md", b"[[b]] #t");
+        f.put("dir/b.md", b"[[a]]");
+        f.scan("add", true);
+        f.scan("nothing changed", false);
+        f.put("a.md", b"[[dir/b]] #u");
+        f.scan("edit", true);
+        f.remove("dir/b.md");
+        f.scan("remove", true);
+    }
+
+    #[test]
+    fn should_equal_a_fresh_build_after_renames_and_ignored_files() {
+        let mut f = Followed::new();
+        f.put("a.md", b"[[b]]");
+        f.put("b.md", b"x");
+        f.scan("add", true);
+        f.rename("a.md", "A.md");
+        f.put("A.md", b"[[b]] edited");
+        f.scan("rename with an edit", true);
+        f.rename("A.md", "a.md");
+        f.scan("case-only rename", true);
+        f.put("bad.md", &[0xff]);
+        f.scan("ignored appears", true);
+        f.scan("nothing changed", false);
+        f.remove("bad.md");
+        f.scan("ignored disappears", true);
     }
 }
