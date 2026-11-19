@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{Key, Modifiers};
+use eframe::egui::{Key, Modifiers, Role};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use ns_app::app::NeurospaceApp;
@@ -103,6 +103,59 @@ fn should_toggle_a_focused_folder_with_enter() {
     f.harness.get_by_label("c");
     press_enter(&mut f.harness);
     assert!(f.harness.query_by_label("c").is_none());
+}
+
+/// The folder row's role, whether it reads as expanded, and whether it carries a toggle state.
+fn folder_node(harness: &Harness<'static, NeurospaceApp>) -> (Role, Option<bool>, bool) {
+    let node = harness.get_by_label("sub").accesskit_node();
+    let data = node.data();
+    (data.role(), data.is_expanded(), data.toggled().is_some())
+}
+
+#[test]
+fn should_announce_a_folder_row_as_a_disclosure_row_without_a_toggle_state() {
+    let mut f = open_fixture();
+    focus_row(&mut f.harness, "sub");
+    assert_eq!(
+        folder_node(&f.harness),
+        (Role::DisclosureTriangle, Some(false), false)
+    );
+    press_enter(&mut f.harness);
+    assert_eq!(
+        folder_node(&f.harness),
+        (Role::DisclosureTriangle, Some(true), false)
+    );
+    f.harness.key_press(Key::Space);
+    f.harness.run();
+    assert_eq!(
+        folder_node(&f.harness),
+        (Role::DisclosureTriangle, Some(false), false)
+    );
+}
+
+#[test]
+fn should_close_every_folder_when_another_vault_opens() {
+    let mut f = open_fixture();
+    click_label(&mut f.harness, "sub");
+    f.harness.get_by_label("c");
+    click_label(&mut f.harness, "Menu");
+    click_label(&mut f.harness, "Open another vault");
+    assert_eq!(f.harness.state().screen_name(), "welcome");
+    type_into(
+        &mut f.harness,
+        "Vault folder path",
+        &f.vault.to_string_lossy(),
+    );
+    f.harness.get_by_label("Open").click();
+    run_until(&mut f.harness, "vault screen", |app| {
+        app.screen_name() == "vault"
+    });
+    f.harness.run();
+    f.harness.get_by_label("sub");
+    assert!(
+        f.harness.query_by_label("c").is_none(),
+        "folder stayed open"
+    );
 }
 
 #[test]

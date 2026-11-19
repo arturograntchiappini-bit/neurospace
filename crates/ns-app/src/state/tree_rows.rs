@@ -107,6 +107,16 @@ mod tests {
     }
 
     #[test]
+    fn should_toggle_same_named_folders_independently_by_path() {
+        let tree = tree(&["a/x/n.md", "b/x/n.md"]);
+        let rows = visible_rows(&tree, &open(&["a", "a/x"]));
+        assert_eq!(
+            describe(&rows),
+            ["0a/ true", "1a/x/ true", "2a/x/n.md", "0b/ false"]
+        );
+    }
+
+    #[test]
     fn should_show_nested_rows_only_when_every_ancestor_is_expanded() {
         let tree = tree(&["a/b/y.md", "a/x.md"]);
         let inner_only = visible_rows(&tree, &open(&["a/b"]));

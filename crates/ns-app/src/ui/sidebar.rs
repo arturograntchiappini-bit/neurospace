@@ -144,38 +144,39 @@ fn is_selected(selected: Option<&NotePath>, note: &NotePath) -> bool {
     selected.is_some_and(|open| open.key() == note.key())
 }
 
-/// One row. Its id is its path, so keyboard focus stays on the same row when rows above it
-/// appear or disappear.
+/// One row. Row ids follow the row's position, so they hold while scrolling and change when rows
+/// above appear or disappear.
 fn tree_row(ui: &mut Ui, row: &TreeRow, selected: Option<&NotePath>) -> Option<RowEvent> {
     match &row.kind {
         RowKind::Folder {
             path,
             name,
             expanded,
-        } => {
-            let draw = |ui: &mut Ui| folder_row(ui, path, name, *expanded);
-            ui.push_id(path, draw).inner
-        }
-        RowKind::Note(note) => {
-            let draw = |ui: &mut Ui| note_row(ui, note, is_selected(selected, note));
-            ui.push_id(note.as_str(), draw).inner
-        }
+        } => folder_row(ui, path, name, *expanded),
+        RowKind::Note(note) => note_row(ui, note, is_selected(selected, note)),
     }
 }
 
 /// A full-width row button, `row_height` tall: a slot for the folder marker, then `name` cut to fit.
-fn name_button<'a>(ui: &Ui, selected: bool, name: &'a str) -> (Button<'a>, IdSalt) {
+/// `selected` is `None` for a folder row, which has no selection state.
+fn name_button<'a>(ui: &Ui, selected: Option<bool>, name: &'a str) -> (Button<'a>, IdSalt) {
     let slot = IdSalt::new("marker");
     let side = ui.spacing().icon_width;
-    let button = Button::selectable(selected, (Atom::custom(slot, vec2(side, side)), name));
+    let atoms = (Atom::custom(slot, vec2(side, side)), name);
+    let button = match selected {
+        Some(selected) => Button::selectable(selected, atoms),
+        None => Button::new(atoms).frame_when_inactive(false).frame(true),
+    };
     let size = vec2(ui.available_width(), row_height(ui));
     (button.truncate().min_size(size), slot)
 }
 
 fn folder_row(ui: &mut Ui, path: &str, name: &str, expanded: bool) -> Option<RowEvent> {
-    let (button, slot) = name_button(ui, false, name);
+    let (button, slot) = name_button(ui, None, name);
     let shown = button.atom_ui(ui);
     let response = &shown.response;
+    // The name may be cut to fit the row; the tooltip and the accessible name keep it whole.
+    response.clone().on_hover_text(name);
     response.widget_info(|| WidgetInfo::labeled(Role::DisclosureTriangle, true, name));
     ui.ctx().accesskit_node_builder(response.id, |node| {
         node.set_expanded(expanded);
@@ -211,8 +212,8 @@ fn paint_marker(ui: &Ui, slot: Rect, expanded: bool, color: Color32) {
 }
 
 fn note_row(ui: &mut Ui, note: &NotePath, is_open: bool) -> Option<RowEvent> {
-    let (button, _) = name_button(ui, is_open, note.stem());
-    let response = ui.add(button);
+    let (button, _) = name_button(ui, Some(is_open), note.stem());
+    let response = ui.add(button).on_hover_text(note.stem());
     let mut action = response.clicked().then(|| NoteAction::Open(note.clone()));
     if key_pressed(&response, &RENAME_KEY) {
         action = Some(NoteAction::Rename(note.clone()));
