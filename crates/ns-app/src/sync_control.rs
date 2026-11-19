@@ -326,9 +326,10 @@ mod tests {
     fn should_read_the_status_from_the_file_without_waiting_for_an_engine() {
         let (mut control, dir) = control();
         let state = state_of(&dir);
-        state.write_status(&fresh_status(7)).unwrap();
+        let status = fresh_status(7);
+        state.write_status(&status).unwrap();
         let started = std::time::Instant::now();
-        assert_eq!(control.status(), EngineStatus::Running(fresh_status(7)));
+        assert_eq!(control.status(), EngineStatus::Running(status.clone()));
         assert!(started.elapsed() < std::time::Duration::from_millis(100));
         std::fs::remove_file(state.file("status.json")).unwrap();
         assert_eq!(control.status(), EngineStatus::Unknown);
@@ -338,10 +339,11 @@ mod tests {
     fn should_keep_the_last_status_when_the_file_cannot_be_read() {
         let (mut control, dir) = control();
         let state = state_of(&dir);
-        state.write_status(&fresh_status(7)).unwrap();
-        assert_eq!(control.status(), EngineStatus::Running(fresh_status(7)));
+        let status = fresh_status(7);
+        state.write_status(&status).unwrap();
+        assert_eq!(control.status(), EngineStatus::Running(status.clone()));
         std::fs::write(state.file("status.json"), "{ not json").unwrap();
-        assert_eq!(control.status(), EngineStatus::Running(fresh_status(7)));
+        assert_eq!(control.status(), EngineStatus::Running(status));
     }
 
     #[test]
