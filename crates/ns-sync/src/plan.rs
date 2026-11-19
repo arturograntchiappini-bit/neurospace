@@ -866,6 +866,56 @@ mod tests {
         assert_refresh_equals_scan(&vault, &mut cache);
     }
 
+    /// Two case variants of one note, each tried as the file that changes next, so the winner of
+    /// the collision is covered whichever variant it is.
+    #[cfg(unix)]
+    fn after_a_collision_each_variant_changed(change: impl Fn(&std::path::Path)) {
+        for variant in ["Note.md", "note.md"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let vault = Vault::open(tmp.path()).unwrap();
+            let mut cache = DiskCache::default();
+            std::fs::write(tmp.path().join("Note.md"), "new").unwrap();
+            std::fs::write(tmp.path().join("note.md"), "synced").unwrap();
+            age(&tmp.path().join("Note.md"), 20);
+            age(&tmp.path().join("note.md"), 20);
+            assert_refresh_equals_scan(&vault, &mut cache);
+            change(&tmp.path().join(variant));
+            assert_refresh_equals_scan(&vault, &mut cache);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_refresh_after_the_winner_of_a_case_collision_is_deleted() {
+        after_a_collision_each_variant_changed(|file| std::fs::remove_file(file).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_refresh_after_the_winner_of_a_case_collision_is_edited() {
+        after_a_collision_each_variant_changed(|file| {
+            std::fs::write(file, "edited, and longer").unwrap();
+            age(file, 10);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_refresh_after_a_spelling_only_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).unwrap();
+        let mut cache = DiskCache::default();
+        std::fs::write(tmp.path().join("a.md"), "same").unwrap();
+        age(&tmp.path().join("a.md"), 20);
+        assert_refresh_equals_scan(&vault, &mut cache);
+        std::fs::rename(tmp.path().join("a.md"), tmp.path().join("A.md")).unwrap();
+        assert_refresh_equals_scan(&vault, &mut cache);
+        std::fs::write(tmp.path().join("a.md"), "other").unwrap();
+        assert_refresh_equals_scan(&vault, &mut cache);
+        std::fs::rename(tmp.path().join("a.md"), tmp.path().join("a-b.md")).unwrap();
+        assert_refresh_equals_scan(&vault, &mut cache);
+    }
+
     #[cfg(unix)]
     #[test]
     fn should_refresh_an_unlistable_folder_in_and_out_of_the_scan() {
