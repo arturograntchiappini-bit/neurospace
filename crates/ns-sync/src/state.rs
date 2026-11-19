@@ -264,6 +264,19 @@ fn rename_over(from: &Path, to: &Path) -> io::Result<()> {
     std::fs::rename(from, to)
 }
 
+/// Calls `read` until it finds something, at most three times, 10 ms apart; an error ends it at once.
+fn read_until_found<T>(mut read: impl FnMut() -> Result<Option<T>>) -> Result<Option<T>> {
+    let mut found = read()?;
+    for _ in 0..2 {
+        if found.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        found = read()?;
+    }
+    Ok(found)
+}
+
 pub(crate) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
     match read_file(path) {
         Ok(bytes) => Ok(Some(bytes)),
@@ -583,9 +596,10 @@ impl StateDir {
         write_json(&self.file("status.json"), status)
     }
 
-    /// The last published status, if any.
+    /// The last published status, if any. A missing file is read twice more, 10 ms apart: the
+    /// engine replaces it all the time, and a reader can hit the instant between two names.
     pub fn read_status(&self) -> Result<Option<Status>> {
-        read_json(&self.file("status.json"))
+        read_until_found(|| read_json(&self.file("status.json")))
     }
 
     /// Forgets the sync group but keeps the device key, device id and vault path. Leftover
@@ -1139,6 +1153,46 @@ mod tests {
         });
         assert_eq!(result.unwrap_err().kind(), ErrorKind::NotFound);
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn should_find_a_status_that_appears_between_two_reads() {
+        let (_tmp, state) = fresh();
+        let status = Status::default();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                state.write_status(&status).unwrap();
+            });
+            assert_eq!(state.read_status().unwrap(), Some(status.clone()));
+        });
+    }
+
+    #[test]
+    fn should_read_three_times_before_calling_a_status_missing() {
+        let mut reads = 0;
+        let missing = read_until_found(|| {
+            reads += 1;
+            Ok::<Option<u8>, SyncError>(None)
+        });
+        assert_eq!((missing.unwrap(), reads), (None, 3));
+        let mut reads = 0;
+        let found = read_until_found(|| {
+            reads += 1;
+            Ok((reads == 2).then_some(7))
+        });
+        assert_eq!((found.unwrap(), reads), (Some(7), 2));
+    }
+
+    #[test]
+    fn should_report_a_failed_status_read_at_once() {
+        let mut reads = 0;
+        let failed = read_until_found(|| {
+            reads += 1;
+            Err::<Option<u8>, _>(SyncError::NotConfigured)
+        });
+        assert!(failed.is_err());
+        assert_eq!(reads, 1);
     }
 
     #[test]
