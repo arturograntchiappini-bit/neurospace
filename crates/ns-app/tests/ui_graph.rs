@@ -268,7 +268,7 @@ fn should_say_so_when_the_vault_has_no_notes() {
 
 #[test]
 fn should_show_a_simplified_layout_that_still_opens_notes_when_the_vault_is_large() {
-    let files: Vec<(String, String)> = (0..2001)
+    let files: Vec<(String, String)> = (0..10_001)
         .map(|i| (format!("n{i}.md"), String::new()))
         .collect();
     let mut f = open_vault(&files);

@@ -322,6 +322,9 @@ impl GraphView {
                     colour.gamma_multiply(DIMMED)
                 };
                 let ends = [i, j].map(|n| self.to_screen(self.layout.position(n)));
+                if !edge_visible(scene.painter.clip_rect(), ends[0], ends[1]) {
+                    continue;
+                }
                 scene
                     .painter
                     .line_segment(ends, Stroke::new(EDGE_WIDTH, shade));
@@ -388,6 +391,12 @@ impl GraphView {
     }
 }
 
+/// True when the segment's bounding box meets `clip`. A diagonal that only clips a corner of
+/// the box may still be drawn; the painter cuts it.
+fn edge_visible(clip: Rect, a: Pos2, b: Pos2) -> bool {
+    clip.intersects(Rect::from_two_pos(a, b))
+}
+
 fn paint_focus_ring(painter: &Painter, p: &Palette, pane: Rect) {
     let ring = Stroke::new(FOCUS_RING_WIDTH, p.accent.to_color32());
     painter.rect_stroke(pane, CornerRadius::ZERO, ring, StrokeKind::Inside);
@@ -403,4 +412,26 @@ fn focused_keys(ui: &Ui, response: &Response) -> (bool, bool) {
         let activated = input.key_pressed(Key::Enter) || input.key_pressed(Key::Space);
         (activated, input.key_pressed(Key::Home))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CLIP: Rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0));
+
+    #[test]
+    fn should_draw_an_edge_inside_the_view() {
+        assert!(edge_visible(CLIP, pos2(10.0, 10.0), pos2(90.0, 40.0)));
+    }
+
+    #[test]
+    fn should_skip_an_edge_wholly_to_one_side_of_the_view() {
+        assert!(!edge_visible(CLIP, pos2(-50.0, 10.0), pos2(-10.0, 90.0)));
+    }
+
+    #[test]
+    fn should_draw_an_edge_that_crosses_the_view_with_both_ends_outside() {
+        assert!(edge_visible(CLIP, pos2(-50.0, 50.0), pos2(150.0, 60.0)));
+    }
 }
