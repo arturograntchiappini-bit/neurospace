@@ -240,7 +240,7 @@ impl LocalReplica {
         Ok(())
     }
 
-    /// A file that no longer has the content the scan saw makes the cache read it again.
+    /// A refused action makes the cache read the file again: the scan may have seen stale content.
     fn carry_out(&mut self, step: &Step) -> std::result::Result<bool, BlockedNote> {
         let Some(action) = &step.disk else {
             return Ok(false);
@@ -249,9 +249,7 @@ impl LocalReplica {
         let Err(reason) = apply_disk_action(&self.vault, action) else {
             return Ok(true);
         };
-        if reason == CHANGED_WHILE_SYNCING {
-            self.disk.forget(&path.key());
-        }
+        self.disk.forget(&path.key());
         Err(BlockedNote {
             path: path.to_string(),
             reason,
@@ -936,6 +934,26 @@ mod tests {
             .collect();
         in_doc.sort_unstable();
         assert_eq!(in_doc, texts);
+    }
+
+    #[test]
+    fn should_read_a_file_again_after_any_refused_trash() {
+        let dirs = Dirs::new(&[("x.md", "abcd")]);
+        let mut replica = dirs.open();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        set_modified(&dirs, "x.md", old);
+        replica.reconcile().unwrap();
+        let id = note(&replica, "x.md").unwrap().id;
+        replica.doc.tombstone(&id).unwrap();
+        let steps = replica.run_doc_stage().unwrap();
+        // Same size and old time: only a forgotten cache entry makes the next scan see it.
+        dirs.write("x.md", [0xff; 4]);
+        set_modified(&dirs, "x.md", old);
+        let outcome = replica.run_disk_stage(steps).unwrap();
+        assert!(outcome.blocked[0].reason.contains("UTF-8"));
+        let scan = replica.disk.refresh(&replica.vault).unwrap();
+        let entry = scan.disk.get(&np("x.md").key());
+        assert!(matches!(entry, Some(DiskEntry::Blocked { .. })), "{entry:?}");
     }
 
     #[test]
