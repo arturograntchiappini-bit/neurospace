@@ -208,7 +208,8 @@ impl SyncDoc {
     }
 
     /// Drops the cache entries that changed since the cache was last used. Call before reading
-    /// through [`SyncDoc::cached`].
+    /// through [`SyncDoc::cached`]. It depends on `LoroDoc::diff`: any `Err` falls back to a full
+    /// rebuild, but a panic inside loro (its restore step unwraps) is not caught.
     fn refresh_cache(&self) {
         let mut guard = self.cache.borrow_mut();
         let cache = &mut *guard;
