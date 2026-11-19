@@ -106,6 +106,8 @@ struct ViewCache {
     notes: HashMap<NoteId, CachedNote>,
     #[cfg(test)]
     recomputed: usize,
+    #[cfg(test)]
+    diffs: usize,
 }
 
 /// The CRDT document that mirrors the notes of one replica. It is `Send` but not `Sync` (the view
@@ -208,18 +210,24 @@ impl SyncDoc {
     /// Drops the cache entries that changed since the cache was last used. Call before reading
     /// through [`SyncDoc::cached`].
     fn refresh_cache(&self) {
-        let mut cache = self.cache.borrow_mut();
+        let mut guard = self.cache.borrow_mut();
+        let cache = &mut *guard;
         // An error path that left a transaction open would otherwise hide its edits from the frontiers.
         self.doc.commit();
         let now = self.doc.state_frontiers();
         let atoms = self.atom_count();
         let stale = match &cache.frontiers {
             Some(seen) if *seen == now => return,
-            Some(seen) if atoms.saturating_sub(cache.atoms) <= MAX_DIFF_ATOMS => self
-                .doc
-                .diff(seen, &now)
-                .ok()
-                .and_then(|batch| changed_notes(&batch)),
+            Some(seen) if atoms.saturating_sub(cache.atoms) <= MAX_DIFF_ATOMS => {
+                #[cfg(test)]
+                {
+                    cache.diffs += 1;
+                }
+                self.doc
+                    .diff(seen, &now)
+                    .ok()
+                    .and_then(|batch| changed_notes(&batch))
+            }
             _ => None,
         };
         match stale {
@@ -325,8 +333,7 @@ impl SyncDoc {
         if self.path_of(id).is_none() {
             return Ok(());
         }
-        self.refresh_cache();
-        let (_, hash, _) = self.cached(id);
+        let hash = content_hash(&self.text_of(id));
         self.tombs()
             .insert(&tomb_key(id, &hash), true)
             .map_err(doc_error)?;
@@ -1061,6 +1068,21 @@ mod tests {
         doc.cache.borrow_mut().recomputed = 0;
         assert_eq!(doc.view().len(), 99);
         assert_eq!(doc.cache.borrow().recomputed, 1);
+    }
+
+    #[test]
+    fn should_not_diff_the_document_once_per_tombstone() {
+        let mut doc = SyncDoc::new();
+        let ids: Vec<NoteId> = (0..50)
+            .map(|i| doc.create_note(&p(&format!("n{i}.md")), "t
+").unwrap())
+            .collect();
+        doc.view();
+        doc.cache.borrow_mut().diffs = 0;
+        ids.iter().for_each(|id| doc.tombstone(id).unwrap());
+        assert!(doc.cache.borrow().diffs <= 1);
+        assert!(doc.view().is_empty());
+        assert_matches_scratch(&doc);
     }
 
     #[test]
