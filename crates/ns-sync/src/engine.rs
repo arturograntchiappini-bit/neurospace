@@ -548,6 +548,7 @@ impl Actor {
         if let Some(notice) = self.watching.notice.clone() {
             self.emit(EngineEvent::Notice(notice));
         }
+        self.hand_network_facts_to_replica();
         self.round();
         let mut running = self.tick();
         while running {
@@ -667,11 +668,17 @@ impl Actor {
         self.busy(Self::run_tick)
     }
 
-    fn run_tick(&mut self) -> bool {
-        self.schedule.tick_done(Instant::now());
+    /// What `ns sync status` and `invite` show; also set before the first round, so the status
+    /// the keeper writes during that long round already has them.
+    fn hand_network_facts_to_replica(&mut self) {
         self.replica.set_addresses(self.network.addresses());
         self.replica.set_mode(self.network.mode());
         self.replica.set_relay(self.network.relay());
+    }
+
+    fn run_tick(&mut self) -> bool {
+        self.schedule.tick_done(Instant::now());
+        self.hand_network_facts_to_replica();
         let was_waiting = self.replica.is_waiting_for_first_state();
         match self.replica.tick(self.started.elapsed()) {
             Ok(tick) => {
@@ -810,16 +817,19 @@ impl Actor {
     }
 
     fn refresh_network(&mut self) {
-        let state = &self.replica.local().state;
-        let (secret, peers) = match (state.secret(), state.peers()) {
-            (Ok(Some(secret)), Ok(peers)) => (secret, peers),
-            (Ok(None), _) => return,
-            (Err(error), _) | (_, Err(error)) => return self.report(&error),
+        let secret = match self.replica.local().state.secret() {
+            Ok(Some(secret)) => secret,
+            Ok(None) => return,
+            Err(error) => return self.report(&error),
         };
         // The same secret the network authenticates with, so a failed read at one tick heals at the next.
         let tag = group_tag(&secret);
         self.group = Some(tag);
         self.close_sessions_of_other_groups(tag);
+        let peers = match self.replica.local().state.peers() {
+            Ok(peers) => peers,
+            Err(error) => return self.report(&error),
+        };
         let connected = self.replica.connected_peers();
         self.network.refresh(secret, &peers, &connected);
     }
@@ -1353,6 +1363,9 @@ mod tests {
         wait_until("the session to be closed", || {
             rig.calls.lock().unwrap().closed.contains(&5)
         });
+        let _kept = open_session(&rig, 6, [8; 32]);
+        expect_event(&rig.events, &EngineEvent::PeerConnected(to_hex(&[8; 32])));
+        assert!(!rig.calls.lock().unwrap().closed.contains(&6));
         rig.handle.shutdown().unwrap();
     }
 

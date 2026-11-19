@@ -361,6 +361,7 @@ impl Replica {
         self.local.reset_to_empty()?;
         self.local.state.clear_group()?;
         self.end_wait_in_memory();
+        self.forget_notices_of_the_old_group();
         Ok(Tick {
             close_sessions: self.drop_sessions(),
             left: true,
@@ -375,12 +376,19 @@ impl Replica {
         self.local.state.save_secret(&secret)?;
         self.waiting = true;
         self.outcome.notes = 0;
+        self.forget_notices_of_the_old_group();
         self.wait_deadline = Some(now + FRESH_JOIN_WAIT);
         Ok(Tick {
             close_sessions: self.drop_sessions(),
             secret_changed: true,
             ..Tick::default()
         })
+    }
+
+    /// The last round's notice and the full device list belong to the group being left.
+    fn forget_notices_of_the_old_group(&mut self) {
+        self.round_notice = None;
+        self.peers_full = false;
     }
 
     fn drop_sessions(&mut self) -> Vec<SessionId> {
@@ -808,7 +816,7 @@ mod tests {
     fn should_replace_the_round_notice_at_the_next_round() {
         let mut fixture = fixture();
         fixture.replica.local.compact_over = 0;
-        std::fs::create_dir(fixture.state.path().join("doc.snap.tmp")).unwrap();
+        std::fs::create_dir(fixture.state.path().join("doc.snap")).unwrap();
         std::fs::write(
             fixture._vault.path().join("x.md"),
             "x
@@ -823,9 +831,31 @@ mod tests {
             status.notices
         );
         assert_eq!(status.last_error, None);
-        std::fs::remove_dir(fixture.state.path().join("doc.snap.tmp")).unwrap();
+        std::fs::remove_dir(fixture.state.path().join("doc.snap")).unwrap();
         fixture.replica.reconcile().unwrap();
         assert!(fixture.replica.status().notices.is_empty());
+    }
+
+    #[test]
+    fn should_forget_the_old_groups_notices_when_leaving_or_joining_another_group() {
+        let mut fixture = fixture();
+        let state = StateDir::at(fixture.state.path()).unwrap();
+        state.save_secret(&[7; 32]).unwrap();
+        let ticket = Ticket {
+            device_id: [9; 32],
+            secret: [8; 32],
+            addrs: Vec::new(),
+        };
+        for leave in [false, true] {
+            fixture.replica.round_notice = Some("old round".to_string());
+            fixture.replica.peers_full = true;
+            if leave {
+                fixture.replica.leave().unwrap();
+            } else {
+                fixture.replica.join(&ticket, Duration::ZERO).unwrap();
+            }
+            assert!(fixture.replica.status().notices.is_empty());
+        }
     }
 
     #[test]

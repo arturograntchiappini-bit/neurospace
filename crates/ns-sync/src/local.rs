@@ -621,7 +621,7 @@ mod tests {
         )]);
         let mut replica = dirs.open();
         replica.reconcile().unwrap();
-        std::fs::create_dir(dirs.state_file("doc.snap.tmp")).unwrap();
+        std::fs::create_dir(dirs.state_file("doc.snap")).unwrap();
         let notice = replica.compact_when_over(0).unwrap();
         assert!(notice.contains("compaction"), "{notice}");
         dirs.write(

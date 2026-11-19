@@ -1,6 +1,7 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -280,9 +281,14 @@ fn write_temporary(tmp: &Path, bytes: &[u8]) -> Result<()> {
     })
 }
 
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Writes through a temporary file no other writer shares (the engine thread and the status keeper
+/// both write `status.json`). A crash can leave one behind; the state directory is ours.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
-    tmp_name.push(".tmp");
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    tmp_name.push(format!(".{}-{counter}.tmp", std::process::id()));
     let tmp = path.with_file_name(tmp_name);
     write_temporary(&tmp, bytes)?;
     std::fs::rename(&tmp, path).map_err(|source| {
@@ -771,12 +777,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn should_not_keep_the_mode_of_a_stale_temporary_file() {
+    fn should_create_the_secret_readable_by_the_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let (_tmp, state) = fresh();
-        let tmp = state.file("secret.tmp");
-        std::fs::write(&tmp, "old").unwrap();
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
         state.save_secret(&[1; 32]).unwrap();
         let mode = std::fs::metadata(state.file("secret"))
             .unwrap()
@@ -917,6 +920,39 @@ mod tests {
         assert_eq!(status.mode, None);
         assert!(status.notices.is_empty());
         assert!(!status.busy);
+    }
+
+    #[test]
+    fn should_never_tear_status_json_when_two_threads_write_it() {
+        use std::sync::atomic::AtomicUsize;
+        let (_tmp, state) = fresh();
+        let status = Status::default();
+        state.write_status(&status).unwrap();
+        let writers_left = AtomicUsize::new(2);
+        let failures = AtomicUsize::new(0);
+        let mut torn_reads = 0;
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    for _ in 0..200 {
+                        if state.write_status(&status).is_err() {
+                            failures.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                    writers_left.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+            while writers_left.load(Ordering::SeqCst) > 0 {
+                // Windows may refuse to open a file for an instant while a rename replaces it; that is
+                // the rename's doing, not a torn file, so only a missing or unparsable file counts.
+                match state.read_status() {
+                    Ok(Some(read)) if read == status => {}
+                    Err(SyncError::Io { .. }) => {}
+                    _ => torn_reads += 1,
+                }
+            }
+        });
+        assert_eq!((failures.into_inner(), torn_reads), (0, 0));
     }
 
     #[test]

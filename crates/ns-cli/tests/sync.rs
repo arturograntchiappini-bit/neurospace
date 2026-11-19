@@ -171,7 +171,7 @@ fn should_print_the_mode_from_status_without_reading_config() {
     });
     fs::write(a.state.join("status.json"), status.to_string()).unwrap();
     let text = ok(&a, &["sync", "status"]);
-    assert!(text.contains("lan"), "{text}");
+    assert!(text.lines().any(|line| line == "mode: lan"), "{text}");
     assert!(text.contains("a sync round is running"), "{text}");
 }
 
