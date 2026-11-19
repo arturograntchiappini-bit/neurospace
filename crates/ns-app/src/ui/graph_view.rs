@@ -391,10 +391,12 @@ impl GraphView {
     }
 }
 
-/// True when the segment's bounding box meets `clip`. A diagonal that only clips a corner of
-/// the box may still be drawn; the painter cuts it.
+/// True when the segment's bounding box meets `clip` grown by half the stroke, so a horizontal or
+/// vertical edge whose stroke reaches into the view is drawn. A diagonal that only clips a corner
+/// of the box may still be drawn; the painter cuts it.
 fn edge_visible(clip: Rect, a: Pos2, b: Pos2) -> bool {
-    clip.intersects(Rect::from_two_pos(a, b))
+    clip.expand(EDGE_WIDTH / 2.0)
+        .intersects(Rect::from_two_pos(a, b))
 }
 
 fn paint_focus_ring(painter: &Painter, p: &Palette, pane: Rect) {
@@ -428,6 +430,29 @@ mod tests {
     #[test]
     fn should_skip_an_edge_wholly_to_one_side_of_the_view() {
         assert!(!edge_visible(CLIP, pos2(-50.0, 10.0), pos2(-10.0, 90.0)));
+    }
+
+    #[test]
+    fn should_draw_an_edge_whose_stroke_reaches_into_the_view() {
+        let just_outside = CLIP.right() + EDGE_WIDTH / 2.0 - 0.1;
+        assert!(edge_visible(
+            CLIP,
+            pos2(just_outside, 10.0),
+            pos2(just_outside, 90.0)
+        ));
+        let too_far = CLIP.right() + EDGE_WIDTH / 2.0 + 0.1;
+        assert!(!edge_visible(
+            CLIP,
+            pos2(too_far, 10.0),
+            pos2(too_far, 90.0)
+        ));
+    }
+
+    #[test]
+    fn should_draw_an_edge_that_touches_the_view_edge_or_has_no_length() {
+        assert!(edge_visible(CLIP, pos2(100.0, 10.0), pos2(150.0, 20.0)));
+        assert!(edge_visible(CLIP, pos2(50.0, 50.0), pos2(50.0, 50.0)));
+        assert!(!edge_visible(CLIP, pos2(500.0, 500.0), pos2(500.0, 500.0)));
     }
 
     #[test]
