@@ -29,9 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The project is renamed from Second Brain to Neurospace: binaries `neurospace` and `ns`, crates `ns-*`, vault folder `.neurospace/`, `NS_*` environment variables, tickets `ns1/`.
 - Desktop app: a Markdown link to a note (`[text](Other.md#heading)`, percent-decoded) now opens that note from the preview instead of saying only web links open; «Turn sync off» is also offered when the engine failed to start or ended, and the window says «Sync is not running: …»; when another process released the engine (for example `ns sync run` was stopped) the app takes it over at the next status refresh; the folder watcher starts before the index is built, so a change made during opening is not missed.
-- Desktop app: saving the open note no longer recomputes its backlinks or reruns the search at once; only the note's own links and tags are refreshed, and backlinks and search results update when another note may have changed (create, rename, delete, conflict note, rebuilt index) or the open note changes. With the folder watcher running they are still recomputed once after the background index rebuild that follows each save (which a later release will remove with an incremental index), so the typing hitch at 10 000 notes is delayed, not gone. Search results for the open note itself are refreshed at the next such change or query.
-- Graph view: «Fit graph» zooms in up to 200 % so the labels of a small graph show.
-- Graph view: «Fit graph» can zoom out to 5 % (it stopped at 20 %), so every node of a vault of several thousand notes shows; with «Reduce motion» one frame spends at most 200 ms (it was 500 ms) on layout steps before the next frame is drawn.
+- Desktop app: saving the open note no longer recomputes its backlinks or reruns the search at once; only the note's own links and tags are refreshed, and backlinks and search results update when another note may have changed (create, rename, delete, conflict note, rebuilt index) or the open note changes. The echo of your own save, seen by the folder watcher, no longer replaces the index, so nothing is recomputed because of it. Search results for the open note itself are refreshed at the next such change or query.
+- Graph view: «Fit graph» zooms in up to 200 %, so the labels of a small graph show, and out to 5 % (it stopped at 20 %), so every node of a vault of several thousand notes shows; with «Reduce motion» one frame spends at most 200 ms (it was 500 ms) on layout steps before the next frame is drawn.
 - Attachment links (`![[image.png]]`, `[[report.pdf]]`) are no longer ghost notes in the graph: they produce no node and no edge.
 - The ghost of a `./` link is named by the note a click would create, so `[[./new]]` in two folders gives two ghosts; ghosts of plain names and of `/` links are unchanged. A link for which no valid note path exists produces no ghost.
 - Reading a note larger than 4 MiB is refused instead of loading it; writing over a note that is a symbolic link is refused; replacing a note keeps its file permissions.
@@ -44,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Housekeeping: `loro` is pinned to `~1.17`, the workspace declares `rust-version = "1.98"` (the oldest toolchain tested), `ns sync run` retries for one second while `ns sync invite` holds the lock, a stop request no longer waits for the first status, and `ns sync run` says when it creates a new group.
 - MCP tool descriptions now state limits, result shapes and that rename does not rewrite links; read-only and destructive tools carry annotations.
 
+- Sync at scale: a round reads only the files whose size or modification time changed (a file modified within the last 3 seconds is always read again), keeps the disk state between rounds, and the sync document keeps a per-note view that a change updates for the notes it touched, so one change no longer costs several full reads of the vault and copies of every text. A program that rewrites a file with the same size and puts its time back is not noticed until the file changes again; the engine still re-reads a file before it replaces, moves or trashes it.
+- Status file: a keeper thread rewrites `status.json` at least every 5 seconds while a long round runs, so the first round of a large vault no longer reads as «engine not running»; the file carries `mode`, `notices` and `busy`, and `ns sync status` says «a sync round is running» (see the README).
+- Desktop app: the index follows the vault folder by differences instead of rebuilding in full, and the sync window reads the engine's state from `status.json` instead of asking the engine, so it never waits for a busy round (a status up to 30 seconds old stays on screen if the file cannot be read).
+
 ### Fixed
 
 - Renaming a note onto an existing file could replace it without a trace (on Windows, by naming it with its 8.3 short name); rename now refuses whenever anything is at the destination.
@@ -52,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `[[Note#Heading\|Alias]]` link inside a table kept a backslash in its heading.
 - Sync read a vault that disappeared during a scan (a pulled drive, an unmount) as "every note deleted" and sent the deletions to the other devices; the marker folder is now checked again after the scan. A note whose name differs only in case from another is blocked instead of taking over the synced note.
 - `ns sync leave` now works when the vault lost its `.neurospace` folder or a state file is corrupt, an unreadable `base.json` is reset instead of stopping sync, and the "folder is missing" error says how to get out.
+
+- On Windows, an indexer or antivirus holding a note or a state file for a moment could make `ns append`, a save or a status read fail; a denied replacing rename or read is now tried again up to five times within about 150 ms (a read-only note is still refused at once).
+- A crash while a sync state file was written could leave a temporary file with the group secret or a full snapshot that `ns sync leave` did not delete; `leave` now removes them, and the engine removes stale ones when it starts.
+- After a queued `ns sync leave`, the app or `ns sync status` could show «a sync round is running» for up to 30 seconds for a group that was already left.
+- A note the app wrote over a file that was not valid UTF-8 stayed in the index and the tree if the file vanished before the next scan.
+- Graph view: an edge whose line reaches into the view by half its width is drawn.
 
 ### Security
 
