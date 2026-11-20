@@ -1,5 +1,9 @@
+<p align="center">
+  <img src="assets/logo/neurospace.svg" alt="Neurospace logo" width="120">
+</p>
+
 <h1 align="center">
-  <img src="docs/images/pixel/banner.svg" alt="Neurospace: a pixel-art brain, the word NEUROSPACE and the tag LEVEL 1, EXPERIMENTAL" width="900">
+  <img src="docs/images/pixel/banner.svg" alt="Neurospace" width="726">
 </h1>
 
 <p align="center">
@@ -48,10 +52,10 @@ Version 0.1.0, the first release. It runs on Windows and on Linux (macOS is not 
 
 <table>
   <tr>
-    <td align="center" width="25%"><img src="docs/images/pixel/note.svg" alt="Pixel icon of a note page with a folded corner" width="48"><br><b>Plain Markdown</b><br><sub>A vault is a folder of <code>.md</code> files.</sub></td>
-    <td align="center" width="25%"><img src="docs/images/pixel/graph.svg" alt="Pixel icon of three linked nodes" width="48"><br><b>Link graph</b><br><sub>Every <code>[[wikilink]]</code> becomes an edge.</sub></td>
-    <td align="center" width="25%"><img src="docs/images/pixel/sync.svg" alt="Pixel icon of two devices with arrows between them" width="48"><br><b>P2P sync</b><br><sub>Windows and Linux, no server, no account.</sub></td>
-    <td align="center" width="25%"><img src="docs/images/pixel/agent.svg" alt="Pixel icon of a robot head" width="48"><br><b>Agent gateway</b><br><sub>An MCP server and a CLI with <code>--json</code>.</sub></td>
+    <td align="center" width="25%"><img src="docs/images/pixel/note.svg" alt="Pixel icon of a note page with a folded corner and three lines of text" width="64"><br><b>Plain Markdown</b><br><sub>A vault is a folder of <code>.md</code> files.</sub></td>
+    <td align="center" width="25%"><img src="docs/images/pixel/graph.svg" alt="Pixel icon of five nodes joined by lines, with a larger blue node in the middle" width="64"><br><b>Link graph</b><br><sub>Every <code>[[wikilink]]</code> becomes an edge.</sub></td>
+    <td align="center" width="25%"><img src="docs/images/pixel/sync.svg" alt="Pixel icon of two monitors with a two-way arrow between them" width="64"><br><b>P2P sync</b><br><sub>Windows and Linux, no server, no account.</sub></td>
+    <td align="center" width="25%"><img src="docs/images/pixel/agent.svg" alt="Pixel icon of a robot head with an antenna and two eyes" width="64"><br><b>Agent gateway</b><br><sub>An MCP server and a CLI with <code>--json</code>.</sub></td>
   </tr>
 </table>
 
