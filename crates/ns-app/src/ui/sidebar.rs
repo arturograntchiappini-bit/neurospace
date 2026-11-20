@@ -162,7 +162,8 @@ fn tree_row(ui: &mut Ui, row: &TreeRow, selected: Option<&NotePath>) -> Option<R
 fn name_button<'a>(ui: &Ui, selected: Option<bool>, name: &'a str) -> (Button<'a>, IdSalt) {
     let slot = IdSalt::new("marker");
     let side = ui.spacing().icon_width;
-    let atoms = (Atom::custom(slot, vec2(side, side)), name);
+    // The trailing grow atom takes the spare width, which keeps the marker and name at the left.
+    let atoms = (Atom::custom(slot, vec2(side, side)), name, Atom::grow());
     let button = match selected {
         Some(selected) => Button::selectable(selected, atoms),
         None => Button::new(atoms).frame_when_inactive(false).frame(true),

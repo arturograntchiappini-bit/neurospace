@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{Key, Modifiers, Role};
+use eframe::egui::{Key, Modifiers, Rect, Role, Shape};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use ns_app::app::NeurospaceApp;
@@ -365,6 +365,47 @@ fn should_show_word_count_and_ignored_files() {
 fn focus_row(harness: &mut Harness<'static, NeurospaceApp>, label: &str) {
     harness.get_by_label(label).focus();
     harness.run();
+}
+
+/// Where the text `text` was painted inside `row`: the left edge of the first matching glyph run.
+fn painted_text_x(harness: &Harness<'static, NeurospaceApp>, text: &str, row: Rect) -> f32 {
+    fn find(shape: &Shape, text: &str, row: Rect) -> Option<f32> {
+        match shape {
+            Shape::Text(run) if run.galley.text() == text && row.contains(run.pos) => {
+                Some(run.pos.x)
+            }
+            Shape::Vec(shapes) => shapes.iter().find_map(|inner| find(inner, text, row)),
+            _ => None,
+        }
+    }
+    let shapes = &harness.output().shapes;
+    shapes
+        .iter()
+        .find_map(|clipped| find(&clipped.shape, text, row))
+        .unwrap_or_else(|| panic!("no text {text:?} painted in the row {row:?}"))
+}
+
+#[test]
+fn should_align_row_names_to_the_left_one_indent_per_level() {
+    let mut f = open_fixture();
+    click_label(&mut f.harness, "sub");
+    let spacing = f.harness.ctx.global_style().spacing.clone();
+    let name_offset = |f: &Fixture, label: &str| {
+        let row = f.harness.get_by_label(label).rect();
+        painted_text_x(&f.harness, label, row) - row.min.x
+    };
+    // Inside a row: button padding, the marker slot, the gap, then the name.
+    let before_name = spacing.button_padding.x + spacing.icon_width + spacing.icon_spacing;
+    for label in ["a", "sub", "c"] {
+        let offset = name_offset(&f, label);
+        assert!(
+            (offset - before_name).abs() < 1.0,
+            "{label}: name starts {offset} into its row, expected {before_name}"
+        );
+    }
+    let row_x = |f: &Fixture, label: &str| f.harness.get_by_label(label).rect().min.x;
+    let indent = row_x(&f, "c") - row_x(&f, "sub");
+    assert!((indent - spacing.indent).abs() < 1.0, "indent {indent}");
 }
 
 #[test]
