@@ -9,3 +9,5 @@ assets/logo/*.png
 assets/logo/*.ico
 crates/ns-app/assets/*.ttf
 assets/logo/
+docs/demo-vault/
+docs/images/
