@@ -519,8 +519,8 @@ fn measure_graph_painting(clusters: usize, size: usize) -> (Duration, usize) {
 fn should_paint_a_large_graph_in_a_few_milliseconds() {
     // 10 000 notes, about 41 000 edges: too many to draw, so only the notes are (measured before
     // the change: 365 408 vertices and 1 280 136 indices in 21–24 ms). Then 3 400 notes, about
-    // 14 300 edges: just under the limit, so every edge is drawn, at 6 vertices each.
-    for (clusters, size, max_vertices) in [(100, 100, 60_000), (100, 34, 110_000)] {
+    // 14 300 edges: just under the limit, so every edge is drawn, at 8 vertices each.
+    for (clusters, size, max_vertices) in [(100, 100, 60_000), (100, 34, 175_000)] {
         let (median, vertices) = measure_graph_painting(clusters, size);
         assert!(median < PAINT_BUDGET, "{median:?} is over {PAINT_BUDGET:?}");
         assert!(vertices < max_vertices, "{vertices} vertices");
@@ -625,6 +625,15 @@ fn should_keep_the_edges_of_the_open_note_when_the_others_are_hidden() {
     let open = NotePath::parse("e.md").unwrap();
     c.workspace.select(&open).unwrap();
     assert_eq!(c.core_vertices(None), 4, "the one edge of e");
+}
+
+#[test]
+fn should_draw_an_edge_once_when_the_hovered_and_the_open_note_share_it() {
+    let mut c = crowd(2);
+    let open = NotePath::parse("e.md").unwrap();
+    c.workspace.select(&open).unwrap();
+    let f = c.view.node_rect("f.md").unwrap().center();
+    assert_eq!(c.core_vertices(Some(f)), 4, "the edge of e and f, once");
 }
 
 /// The edge colour dimmed as a hovered node dims what it is not linked to.

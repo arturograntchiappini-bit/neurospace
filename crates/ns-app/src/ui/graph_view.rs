@@ -412,14 +412,25 @@ impl GraphView {
     fn edges_to_draw(&self, scene: &Scene, screen: &[Pos2]) -> (Vec<(usize, usize)>, bool) {
         let clip = scene.painter.clip_rect();
         let in_view = |&(i, j): &(usize, usize)| edge_visible(clip, screen[i], screen[j]);
-        let mut edges: Vec<(usize, usize)> = self.edges().filter(in_view).collect();
-        let crowded = edges.len() > self.max_drawn_edges;
-        if crowded {
-            let open = scene.open.and_then(|id| self.layout.index_of(id));
-            let focus = [scene.hovered, open];
-            edges.retain(|&(i, j)| focus.iter().flatten().any(|&n| n == i || n == j));
+        // Counting stops at the limit: a crowded view never collects its (up to 100 000s of) edges.
+        let crowded = self
+            .edges()
+            .filter(in_view)
+            .nth(self.max_drawn_edges)
+            .is_some();
+        if !crowded {
+            return (self.edges().filter(in_view).collect(), false);
         }
-        (edges, crowded)
+        let open = scene.open.and_then(|id| self.layout.index_of(id));
+        let focus = [scene.hovered, open].into_iter().flatten();
+        let touching = focus.flat_map(|n| self.layout.neighbours(n).iter().map(move |&j| (n, j)));
+        let mut edges: Vec<(usize, usize)> = touching
+            .map(|(n, j)| (n.min(j), n.max(j)))
+            .filter(in_view)
+            .collect();
+        edges.sort_unstable();
+        edges.dedup();
+        (edges, true)
     }
 
     /// Draws node `i`; a note too small to show a circle goes into `dots` instead of a shape.
