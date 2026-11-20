@@ -3,7 +3,7 @@
 # rust:1-bullseye (Debian 11, glibc 2.31); needs no apt package.
 set -eu
 
-MAX_GLIBC=2.31
+MAX_GLIBC="${MAX_GLIBC:-2.31}"
 target_dir="${CARGO_TARGET_DIR:-target}"
 version=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml)
 [ -n "$version" ] || { echo "cannot read the workspace version from Cargo.toml" >&2; exit 1; }
@@ -23,7 +23,8 @@ highest_glibc() {
 }
 
 for bin in ns neurospace; do
-    echo "$bin: highest glibc $(highest_glibc "$target_dir/release/$bin")"
+    highest=$(highest_glibc "$target_dir/release/$bin")
+    echo "$bin: highest glibc $highest"
 done
 
 stage=$(mktemp -d)
