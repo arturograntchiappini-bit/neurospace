@@ -37,7 +37,7 @@ const CENTRE_PULL: f32 = 0.002;
 const DAMPING: f32 = 0.8;
 const MAX_STEP: f32 = 30.0;
 /// The move cap cools by this much per step, from `MAX_STEP` at a wake down to `COOLED_MOVE`.
-const COOLING_PER_STEP: f32 = 0.1;
+const COOLING_PER_STEP: f32 = 0.12;
 /// Once the move cap has cooled to this, the layout counts as settled.
 const COOLED_MOVE: f32 = 0.5;
 const SETTLED_BELOW: f32 = 0.05;
@@ -228,6 +228,42 @@ fn spiral(i: usize) -> Point {
     [radius * angle.cos(), radius * angle.sin()]
 }
 
+/// Fills in each node's neighbours from the edges, ignoring direction, duplicates and edges to
+/// unknown nodes. `nodes` is sorted by id.
+fn connect(nodes: &mut [NodeInfo], graph: &Graph) {
+    let by_id: HashMap<&str, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| (node.id.as_str(), i))
+        .collect();
+    let mut pairs: Vec<(usize, usize)> = graph
+        .edges
+        .iter()
+        .filter_map(|edge| {
+            Some((
+                *by_id.get(edge.from.as_str())?,
+                *by_id.get(edge.to.as_str())?,
+            ))
+        })
+        .filter(|(a, b)| a != b)
+        .map(|(a, b)| (a.min(b), a.max(b)))
+        .collect();
+    pairs.sort_unstable();
+    pairs.dedup();
+    for (a, b) in pairs {
+        nodes[a].neighbours.push(b);
+        nodes[b].neighbours.push(a);
+    }
+}
+
+/// True when both lists hold the same ids, each with the same neighbours.
+fn same_links(a: &[NodeInfo], b: &[NodeInfo]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x.id == y.id && x.neighbours == y.neighbours)
+}
+
 impl Layout {
     /// A layout of `graph` with every node on its starting spiral position.
     pub fn new(graph: &Graph) -> Layout {
@@ -245,18 +281,14 @@ impl Layout {
     }
 
     /// Adopts `graph`: nodes still present keep their position, new ones start on the spiral.
-    pub fn update(&mut self, graph: &Graph) {
-        let old_ids = mem::take(&mut self.nodes).into_iter().map(|node| node.id);
-        let mut known: HashMap<String, Point> =
-            old_ids.zip(mem::take(&mut self.positions)).collect();
+    ///
+    /// Returns whether the nodes or the links changed. When they did not (a note's text changed,
+    /// not what it links to) positions, velocities and temperature stay and the layout does not
+    /// wake; only labels and ghost flags are refreshed.
+    pub fn update(&mut self, graph: &Graph) -> bool {
         let mut sorted: Vec<_> = graph.nodes.iter().collect();
         sorted.sort_by(|a, b| a.id.cmp(&b.id));
-        self.positions = sorted
-            .iter()
-            .enumerate()
-            .map(|(i, node)| known.remove(&node.id).unwrap_or_else(|| spiral(i)))
-            .collect();
-        self.nodes = sorted
+        let mut nodes: Vec<NodeInfo> = sorted
             .iter()
             .map(|node| NodeInfo {
                 id: node.id.clone(),
@@ -265,8 +297,30 @@ impl Layout {
                 neighbours: Vec::new(),
             })
             .collect();
+        connect(&mut nodes, graph);
+        let changed = !same_links(&self.nodes, &nodes);
+        let old = mem::replace(&mut self.nodes, nodes);
+        if changed {
+            self.restart_from(old);
+        }
+        changed
+    }
+
+    /// Keeps the position of every node of `old` that is still there, puts new ones on the
+    /// spiral, and wakes.
+    fn restart_from(&mut self, old: Vec<NodeInfo>) {
+        let mut known: HashMap<String, Point> = old
+            .into_iter()
+            .map(|node| node.id)
+            .zip(mem::take(&mut self.positions))
+            .collect();
+        self.positions = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| known.remove(&node.id).unwrap_or_else(|| spiral(i)))
+            .collect();
         self.velocities = vec![[0.0; 2]; self.nodes.len()];
-        self.connect(graph);
         self.pinned = None;
         self.wake();
     }
@@ -280,35 +334,6 @@ impl Layout {
         } else {
             f32::INFINITY
         };
-    }
-
-    /// Fills in each node's neighbours from the edges, ignoring direction, duplicates and
-    /// edges to unknown nodes.
-    fn connect(&mut self, graph: &Graph) {
-        let by_id: HashMap<&str, usize> = self
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(i, node)| (node.id.as_str(), i))
-            .collect();
-        let mut pairs: Vec<(usize, usize)> = graph
-            .edges
-            .iter()
-            .filter_map(|edge| {
-                Some((
-                    *by_id.get(edge.from.as_str())?,
-                    *by_id.get(edge.to.as_str())?,
-                ))
-            })
-            .filter(|(a, b)| a != b)
-            .map(|(a, b)| (a.min(b), a.max(b)))
-            .collect();
-        pairs.sort_unstable();
-        pairs.dedup();
-        for (a, b) in pairs {
-            self.nodes[a].neighbours.push(b);
-            self.nodes[b].neighbours.push(a);
-        }
     }
 
     /// One step of the simulation. Returns the largest distance any node moved, or would have
@@ -389,7 +414,7 @@ impl Layout {
     /// `MAX_STEPS_PER_WAKE` steps have run since the layout was last woken.
     pub fn is_settled(&self) -> bool {
         self.last_move < SETTLED_BELOW
-            || (self.temperature <= COOLED_MOVE && self.last_move <= COOLED_MOVE)
+            || self.temperature <= COOLED_MOVE
             || self.steps_since_wake >= MAX_STEPS_PER_WAKE
     }
 
@@ -588,6 +613,66 @@ mod tests {
         }
         let added = layout.position(index_of(&layout, "!new.md"));
         assert!(added.iter().all(|c| c.is_finite()));
+    }
+
+    fn rested(graph: &Graph) -> Layout {
+        let mut layout = Layout::new(graph);
+        steps_to_rest(&mut layout);
+        layout
+    }
+
+    #[test]
+    fn should_keep_the_layout_at_rest_when_the_graph_is_unchanged() {
+        let g = ring_graph(8, 2);
+        let mut layout = rested(&g);
+        let before: Vec<Point> = (0..layout.len()).map(|i| layout.position(i)).collect();
+        let mut relabelled = g.clone();
+        relabelled.nodes[0].label = "renamed".into();
+        assert!(!layout.update(&relabelled), "nothing but a label changed");
+        assert!(
+            layout.is_settled(),
+            "an unchanged graph must not wake the layout"
+        );
+        let after: Vec<Point> = (0..layout.len()).map(|i| layout.position(i)).collect();
+        assert_eq!(before, after);
+        assert_eq!(
+            layout.label(index_of(&layout, &relabelled.nodes[0].id)),
+            "renamed"
+        );
+    }
+
+    #[test]
+    fn should_wake_the_layout_when_a_link_or_a_node_changes() {
+        let g = ring_graph(8, 0);
+        let mut layout = rested(&g);
+        let mut linked = g.clone();
+        linked.edges.push(GraphEdge {
+            from: "n0.md".into(),
+            to: "n4.md".into(),
+        });
+        assert!(layout.update(&linked), "a new link is a change");
+        assert!(!layout.is_settled());
+        steps_to_rest(&mut layout);
+        let mut fewer = linked.clone();
+        fewer.nodes.pop();
+        fewer.edges.retain(|e| e.from != "n7.md" && e.to != "n7.md");
+        assert!(layout.update(&fewer), "a removed node is a change");
+        assert!(!layout.is_settled());
+    }
+
+    #[test]
+    fn should_cool_to_rest_within_two_hundred_and_fifty_steps() {
+        let mut layout = Layout::new(&clustered_graph(10, 30, 3));
+        let steps = steps_to_rest(&mut layout);
+        assert!(steps <= 250, "{steps} steps");
+    }
+
+    #[test]
+    fn should_rest_by_its_own_rule_on_a_dense_graph() {
+        let mut layout = Layout::new(&random_graph_with_degree(300, 40, 5));
+        let steps = steps_to_rest(&mut layout);
+        assert!(steps < MAX_STEPS_PER_WAKE, "hit the step cap");
+        assert!(steps <= STEPS_WITHIN_WAKE_CAP, "{steps} steps");
     }
 
     #[test]
@@ -791,9 +876,10 @@ mod tests {
         }
     }
 
-    /// 10 s of wake cap over the 25 ms a frame is expected to cost at ten thousand nodes once
-    /// painting is cheap (one layout step per frame): 10 000 ms / 25 ms = 400 steps.
-    const STEPS_WITHIN_WAKE_CAP: usize = 400;
+    /// 10 s of wake cap over 1.5 times the 14 ms a frame measured in release at 10 000 notes
+    /// (the median of 296 frames of `GraphView::show`, one layout step each): 10 000 / 21 = 476,
+    /// rounded down.
+    const STEPS_WITHIN_WAKE_CAP: usize = 450;
 
     /// Steps until the layout's own rule settles it; `MAX_STEPS_PER_WAKE` when it never does.
     fn steps_to_rest(layout: &mut Layout) -> usize {
@@ -858,6 +944,7 @@ mod tests {
         assert!(steps < MAX_STEPS_PER_WAKE, "hit the step cap");
         assert!(steps <= STEPS_WITHIN_WAKE_CAP, "{steps} steps");
         let ratio = separation_ratio(&layout);
+        println!("{steps} steps, separation ratio {ratio}");
         assert!(
             ratio <= 0.5,
             "clusters not apart: ratio {ratio} after {steps} steps"

@@ -593,6 +593,56 @@ fn should_bound_the_mesh_bytes_of_a_frame_at_every_zoom() {
     assert!(worst < MAX_FRAME_BYTES, "{worst} bytes");
 }
 
+/// The wake cap of the app; a machine 1.5 times slower than the test host must still rest by the
+/// layout's own rule before it.
+const WAKE_TIME_CAP: Duration = Duration::from_secs(10);
+
+/// The wall time of each frame of `GraphView::show` (and its tessellation), from the first until the
+/// layout comes to rest by its own rule: the wake cap is out of reach.
+fn frames_until_rest(vault: &Path) -> Vec<Duration> {
+    let workspace = Workspace::open(vault).unwrap();
+    let ctx = Context::default();
+    prepare_context(&ctx);
+    let mut view = GraphView::default();
+    view.set_wake_cap(Duration::from_secs(3600));
+    let mut frames = Vec::new();
+    while frames.is_empty() || !view.is_settled() {
+        let started = Instant::now();
+        tessellate(&ctx, paint_frame(&ctx, &mut view, &workspace, None));
+        frames.push(started.elapsed());
+        assert!(frames.len() < 1500, "the layout never came to rest");
+    }
+    frames
+}
+
+#[test]
+#[ignore = "release only: cargo test --release -p ns-app --test ui_graph should_animate_ten_thousand -- --ignored --nocapture"]
+fn should_animate_ten_thousand_notes_in_frames_under_thirty_milliseconds() {
+    let (_scratch, vault) = write_vault(&random_vault(10_000, 20, 5));
+    let frames = frames_until_rest(&vault);
+    let total: Duration = frames.iter().sum();
+    let mut sorted = frames.clone();
+    sorted.sort();
+    let (median, p90, worst) = (
+        sorted[sorted.len() / 2],
+        sorted[sorted.len() * 9 / 10],
+        sorted[sorted.len() - 1],
+    );
+    println!(
+        "{} frames, median {median:?}, p90 {p90:?}, worst {worst:?}, total {total:?}",
+        frames.len()
+    );
+    assert!(
+        median < Duration::from_millis(30),
+        "median frame {median:?}"
+    );
+    let slower = total.mul_f32(1.5);
+    assert!(
+        slower < WAKE_TIME_CAP,
+        "{total:?} here is {slower:?} on a slower machine"
+    );
+}
+
 const HINT: &str = "Zoom in to see every link";
 
 /// What a pane test holds: a pane over a six-note vault in which `a` links to `b`, `c` and `d`
