@@ -5,5 +5,5 @@ Comment=Markdown notes with links, graph and peer-to-peer sync
 Exec=neurospace %f
 Icon=neurospace
 Terminal=false
-Categories=Office;Utility;
+Categories=Office;
 StartupWMClass=neurospace

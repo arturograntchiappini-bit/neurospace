@@ -24,7 +24,7 @@ mod tests {
             "Exec=neurospace %f",
             "Icon=neurospace",
             "Terminal=false",
-            "Categories=Office;Utility;",
+            "Categories=Office;",
             &format!("StartupWMClass={APP_ID}"),
         ];
         for line in expected {

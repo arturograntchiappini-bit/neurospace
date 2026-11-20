@@ -14,6 +14,7 @@ cargo build --release --locked -p ns-cli -p ns-app
 # Prints the highest GLIBC_x.y version a binary needs; fails if it exceeds MAX_GLIBC.
 highest_glibc() {
     highest=$(objdump -T "$1" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' | sort -Vu | tail -n 1)
+    [ -n "$highest" ] || { echo "$1: no GLIBC version found (is objdump installed?)" >&2; exit 1; }
     newest=$(printf '%s\n%s\n' "$highest" "$MAX_GLIBC" | sort -V | tail -n 1)
     if [ "$newest" != "$MAX_GLIBC" ]; then
         echo "$1 needs GLIBC_$highest, newer than GLIBC_$MAX_GLIBC" >&2
@@ -39,3 +40,5 @@ mkdir -p dist
 rm -f "dist/$name.tar.gz"
 tar -czf "dist/$name.tar.gz" -C "$stage" "$name"
 echo "wrote dist/$name.tar.gz"
+# In a container on a Linux host the files belong to root; hand them back to the repository's owner.
+chown -R "$(stat -c %u:%g .)" dist
