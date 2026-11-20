@@ -533,7 +533,7 @@ Ogni prompt di dispatch a un implementer contiene, oltre al template della skill
 
 ## Verità assoluta
 
-Ultimo aggiornamento: 2026-11-20 (progetto completato: M4, v0.1.0 su GitHub privato, grafo aggiornato, nuovo logo su main)
+Ultimo aggiornamento: 2026-11-20 (livello 1 completato e installato su questo PC; repository pubblico, sperimentale; cronologia riscritta con l'email noreply)
 
 **Legenda stati.** **[Confermato]** = detto o approvato dall'utente. **[Proposto — applicato su delega]** = deciso dall'orchestratore in base alla delega totale del 2026-11-15, non approvato voce per voce dall'utente: vale finché l'utente non lo cambia. **[Aperto]** = non deciso. Ciò che non è verificato è scritto come «non verificato».
 
@@ -546,6 +546,7 @@ Ultimo aggiornamento: 2026-11-20 (progetto completato: M4, v0.1.0 su GitHub priv
 - **[Confermato]** (richiesta dell'utente, 2026-11-18, testo integrale): «as logo and icon use assets/logo/second-brain.svg». L'SVG è la sola fonte del logo e dell'icona (spec 9.6, «Logo and icon»); dal cambio di nome si chiama `assets/logo/neurospace.svg`.
 - **[Confermato]** (richiesta dell'utente, 2026-11-18, testo integrale, arrivata durante l'aggiornamento del grafo dopo M3): «change the name of the app/project to "neurospace"». Le voci datate di V.7 e V.8, i piani M1–M3 e i ledger restano con il vecchio nome «Second Brain», perché registrano ciò che è successo.
 - **[Confermato]** (richiesta dell'utente, 2026-11-20, testo integrale, arrivata durante la revisione finale di M4): «and build the whole readme on github, very precise, professional, production ready, tags and everything», poi «and with many visible artifacts». Risposte alle domande dell'orchestratore, stesso giorno: **repository GitHub privato, con push** (main, tag `v0.1.0`, GitHub Release, topic); **licenza MIT**. Questo supera, solo per GitHub e licenza, i ruling «Merge locali» (nessun remote, nessun push) e «nessuna licenza del progetto» della pianificazione di M4.
+- **[Confermato]** (richieste dell'utente, 2026-11-20 sera, testo integrale): «installalo su questo pc»; «and make the github repo more aesteathic, it has to be nice, add some pixelart here and there aswell»; «and make the repo public, add an experimental work in progress label, this is the first level of architecture we have built, several levels more are to come». Risposta alla domanda dell'orchestratore sull'email nei commit: **riscrivere la cronologia con l'indirizzo noreply di GitHub, poi rendere pubblico**. Quindi: Neurospace 0.1 è il **livello 1** dell'architettura; seguiranno altri livelli, non ancora definiti.
 
 ### V.2 Fonti
 
@@ -737,6 +738,12 @@ Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nel
   - Disegno: il cervello di profilo con l'orbita, il disegno più recente dell'utente che l'orchestratore aveva distrutto il 2026-11-18; il suo segno sopravvissuto (`second-brain-mark.svg`, non tracciato, solo copiato) è posato sulla piastrella scura dell'icona di prima, sulla stessa griglia 1024, senza riscalare. PNG 16–512 e ICO rigenerati con i comandi di `assets/logo/README.md`.
   - Verificato: `fmt`, `clippy -D warnings` e la suite di ns-app (208 più le suite UI) puliti; tarball Linux ricostruito (glibc minima 2.30) e cattura `welcome.png` rifatta nel container; guardate dall'orchestratore le immagini a 512 e 32 px e la cattura del benvenuto. Le altre sei catture sono rimaste uguali.
   - Non verificato: l'icona nella barra delle applicazioni di Windows e nell'eseguibile ricompilato (solo build e test); a 16 px il disegno si riduce a una sagoma blu.
+- 2026-11-20 sera — **Installazione, README in pixel art, repository pubblico.**
+  - Installato su questo PC da `main` (`f95c5ce`, logo nuovo), build di release: `%LOCALAPPDATA%\Programs\Neurospace` (`neurospace.exe`, `ns.exe`, LICENSE, README, licenza di Inter), collegamento nel menu Start, cartella aggiunta al `PATH` dell'utente. Verificato: `ns --version` = `ns 0.1.0`, collegamento presente. Non verificato: l'avvio della GUI dal menu Start.
+  - README ridisegnato (subagente `sonnet`, branch `docs/readme-pixel`): striscione in pixel art con il cervello pixel dell'utente (dalla sua bozza `second-brain-pixel.svg`, solo copiata), quattro icone 16×16, divisori, barra «LEVEL 1»; badge e avviso «Experimental — work in progress», livello 1 di più livelli. Tutti SVG statici di soli `<rect>`; guardati dall'orchestratore su fondo bianco e su `#0d1117`. Ledger: `.superpowers/sdd/2026-11-20-readme-pixel/`.
+  - Cronologia riscritta con `git filter-repo` 2.47.0 in un clone pulito: autore e committente di ogni commit = `225177383+arturograntchiappini-bit@users.noreply.github.com`; i percorsi personali nei piani sostituiti da segnaposto; il commit che li toglieva è diventato vuoto ed è sparito (204 → 203 commit su `main`, albero finale identico). Push forzato di `main` (`cf885d1`) e del tag `v0.1.0` (`923985a`); cancellate le 5 esecuzioni CI vecchie; la Release è rimasta attaccata al tag con i due archivi. `main` locale riallineato (alberi identici). Email del repository impostata a noreply (`git config --local`).
+  - Repository reso **pubblico**; descrizione e topic `experimental`, `work-in-progress`; la Release 0.1.0 è segnata come pre-release.
+  - Non verificato: che GitHub abbia eliminato gli oggetti vecchi (un commit vecchio resta forse raggiungibile per SHA finché GitHub non li pulisce); l'animazione del cursore nello striscione in un browser.
 - Rischio chiuso il 2026-11-17: il preset di rete di iroh che «non risultava mai online» su questa macchina era il firewall applicativo, non il codice né iroh.
 - Non verificabile in questo progetto: uso interattivo della GUI da parte di una persona. La GUI si verifica con test headless e con l'avvio del binario.
 
@@ -866,4 +873,10 @@ Formato: decisione — perché — costo se sbagliata.
   - v0.1.0 (tag e GitHub Release) resta com'è, con l'icona vecchia; il logo è sotto `[Unreleased]` nel CHANGELOG. Costo: il README su `main` mostra il logo nuovo, i binari 0.1.0 quello vecchio.
   - Nessuna revisione `opus` né ri-revisione: soli asset e due righe di documenti, guardati dall'orchestratore. La riga di `assets/logo/README.md` cita un file (`second-brain-mark.svg`) che nel repository non c'è. Costo: un lettore di GitHub non trova quel file.
   - I volumi Docker `ns-logo-target` e `ns-logo-cargo` restano (cache di compilazione). Costo: spazio su disco; si tolgono con `docker volume rm`.
+- 2026-11-20 sera — **Rulings dell'installazione e della pubblicazione aperta:**
+  - Installazione per utente, senza installer né diritti di amministratore, da una build di `main` (logo nuovo) invece dell'archivio 0.1.0. Costo: aggiornare vuol dire ricopiare due file.
+  - Pixel art: palette del logo, sfondo scuro proprio in ogni immagine (leggibile su GitHub chiaro e scuro), nessun numero totale di livelli. Costo: nessun arancione nella pixel art; l'arancione sta nel badge e nell'avviso.
+  - Prima di rendere pubblico: riscrittura con l'email noreply (scelta dell'utente), cancellazione delle esecuzioni CI vecchie che puntavano ai commit vecchi. Il repository non è stato cancellato e ricreato. Costo: oggetti vecchi forse raggiungibili per SHA per un po' su GitHub.
+  - La Release 0.1.0 diventa pre-release, coerente con «sperimentale». Costo: GitHub non la mostra come «Latest».
+  - I branch e i worktree locali delle milestone conservano la cronologia vecchia (solo in locale, mai pubblicati). Costo: nessuno, finché non si pubblicano.
 - 2026-11-15 — **Domanda 7 (chi fa le prove a mano, connettività in M4).** Le prove «a mano» le esegue l'orchestratore con comandi; la GUI non è verificata da una persona e lo si dichiara; la prova Windows↔Linux usa un ticket con indirizzi e porta fissa; `internet` resta la modalità predefinita e il suo stato reale si registra in M2. — Docker è disponibile; mDNS non attraversa la rete di Docker. — Costo: se `internet` non funziona sulle reti dell'utente, il sync tra reti diverse non va finché non si indaga.
