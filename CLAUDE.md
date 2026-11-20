@@ -595,7 +595,7 @@ Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nel
 
 ### V.6 Esclusioni dal grafo graphify
 
-- `target/`, `.git/`, `.superpowers/`, `.claude/`, `.worktrees/`, `graphify-out/`, `dist/`, vault di prova e fixture binarie.
+- `target/`, `.git/`, `.superpowers/`, `.claude/`, `.worktrees/`, `graphify-out/`, `dist/`, vault di prova e fixture binarie (dal 2026-11-20 anche `docs/demo-vault/` e `docs/images/`).
 
 ### V.7 Stato e avanzamento
 
@@ -729,6 +729,10 @@ Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nel
   - Pubblicato: repository **privato** https://github.com/arturograntchiappini-bit/neurospace, push di `main` e del tag `v0.1.0` (spostato in locale, prima del push, dal merge di M4 a `3c1472f`), GitHub Release «Neurospace 0.1.0» con i due asset, descrizione e 14 topic.
   - CI sul primo push (`3c1472f`): verde su Ubuntu (11 min) e su Windows (23 min). Unico avviso: `actions/checkout@v4` gira su Node 20, deprecato.
   - Non verificato: la resa del README sulla pagina di GitHub (immagini, Mermaid, badge) guardata da una persona: il repository è privato e l'orchestratore non apre il browser dell'utente; il contenuto degli asset scaricati dalla release (verificati solo i nomi e le dimensioni).
+- 2026-11-20 — `graphify --update` dopo M4 e la pubblicazione (subagente `haiku` in due fasi; estrazione semantica di 8 documenti in 4 blocchi `haiku` lanciati dalla sessione principale, con gli ID esistenti da riusare): da 3989 nodi, 10 935 archi e 157 comunità a 4202 nodi, 11 300 archi e 215 comunità. `.graphifyignore` esclude ora anche `docs/demo-vault/` e `docs/images/` (`5272a35`).
+  - La guardia di restringimento ha rifiutato la prima scrittura (20 nodi in uscita). Controllati uno per uno dall'orchestratore: 10 dal codice sono uscite vere (`MIN_DISTANCE_SQUARED`, `paint_disc`, `show_empty_hint` tolti in M4; `connect` con un ID AST nuovo; sei segnaposto di tipi senza file); 10 dai documenti sono nei file estratti, ma la fusione li unisce a nodi con la stessa etichetta di altri documenti (per esempio «iroh transport» del piano M2, «Inter font» del README). Forzata solo dopo aver verificato che l'insieme in uscita era esattamente quei 20.
+  - Verificato dall'orchestratore in `graph.json`: conteggi, nessun nodo dalle cartelle escluse, nessun ID con il vecchio nome.
+  - Non fatto: etichette delle comunità scritte da un modello (restano automatiche); graphifyy 0.9.93 più vecchio della skill 0.9.105, non aggiornato; `cost.json` registra 0 token.
 - Rischio chiuso il 2026-11-17: il preset di rete di iroh che «non risultava mai online» su questa macchina era il firewall applicativo, non il codice né iroh.
 - Non verificabile in questo progetto: uso interattivo della GUI da parte di una persona. La GUI si verifica con test headless e con l'avvio del binario.
 
