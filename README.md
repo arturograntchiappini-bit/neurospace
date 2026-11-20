@@ -1,20 +1,22 @@
-<p align="center">
-  <img src="assets/logo/neurospace.svg" alt="Neurospace logo" width="120">
-</p>
-
-<h1 align="center">Neurospace</h1>
+<h1 align="center">
+  <img src="docs/images/pixel/banner.svg" alt="Neurospace: a pixel-art brain, the word NEUROSPACE and the tag LEVEL 1, EXPERIMENTAL" width="900">
+</h1>
 
 <p align="center">
   <strong>Markdown notes, a link graph, serverless peer-to-peer sync and a native gateway for AI agents. Written entirely in Rust.</strong>
 </p>
 
 <p align="center">
+  <img alt="Status: experimental, work in progress" src="https://img.shields.io/badge/status-experimental%20%C2%B7%20work%20in%20progress-orange">
   <a href="https://github.com/arturograntchiappini-bit/neurospace/releases/tag/v0.1.0"><img alt="Version 0.1.0" src="https://img.shields.io/badge/version-0.1.0-blue"></a>
   <a href="LICENSE"><img alt="Licence MIT" src="https://img.shields.io/badge/licence-MIT-green"></a>
   <img alt="Rust 1.98 or newer" src="https://img.shields.io/badge/rust-1.98%2B-orange">
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux-lightgrey">
   <a href="https://github.com/arturograntchiappini-bit/neurospace/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/arturograntchiappini-bit/neurospace/actions/workflows/ci.yml/badge.svg"></a>
 </p>
+
+> [!WARNING]
+> **Experimental — work in progress.** Neurospace 0.1 is the first level of its architecture: the core, sync, the desktop app and the agent gateway. Several more levels are coming, and they may change the vault layout, the sync protocol and the command line without a migration path. Keep a backup of your notes.
 
 <p align="center">
   <img src="docs/images/graph-dark.png" alt="The Neurospace desktop app showing the link graph of the demo vault in the dark theme" width="900">
@@ -44,6 +46,15 @@ Version 0.1.0, the first release. It runs on Windows and on Linux (macOS is not 
 
 ## Highlights
 
+<table>
+  <tr>
+    <td align="center" width="25%"><img src="docs/images/pixel/note.svg" alt="Pixel icon of a note page with a folded corner" width="48"><br><b>Plain Markdown</b><br><sub>A vault is a folder of <code>.md</code> files.</sub></td>
+    <td align="center" width="25%"><img src="docs/images/pixel/graph.svg" alt="Pixel icon of three linked nodes" width="48"><br><b>Link graph</b><br><sub>Every <code>[[wikilink]]</code> becomes an edge.</sub></td>
+    <td align="center" width="25%"><img src="docs/images/pixel/sync.svg" alt="Pixel icon of two devices with arrows between them" width="48"><br><b>P2P sync</b><br><sub>Windows and Linux, no server, no account.</sub></td>
+    <td align="center" width="25%"><img src="docs/images/pixel/agent.svg" alt="Pixel icon of a robot head" width="48"><br><b>Agent gateway</b><br><sub>An MCP server and a CLI with <code>--json</code>.</sub></td>
+  </tr>
+</table>
+
 - **Plain Markdown files.** A vault is a folder of `.md` files that stay readable by any other tool. `[[wikilinks]]`, backlinks and inline `#tags` are indexed; the files on disk are the source of truth, and the index, the graph and the sync state are derived from them.
 - **A link graph.** A force-directed graph of the whole vault with pan, zoom, drag, hover highlighting and a keyboard-reachable list view; links to notes that do not exist yet appear as dimmer discs and a click creates the note.
 - **Serverless P2P sync between Windows and Linux.** Devices pair with a ticket and sync directly over an end-to-end encrypted [iroh](https://www.iroh.computer) connection. Edits to the same note merge line by line, divergences become conflict copies, and nothing the sync removes is erased: it goes to the vault's trash.
@@ -52,6 +63,10 @@ Version 0.1.0, the first release. It runs on Windows and on Linux (macOS is not 
 - **No silent data loss.** Creating a note never replaces an existing file, a file that cannot be read is «blocked» and never treated as deleted, and every path from the command line, MCP or a peer is validated and confined to the vault.
 - **Two native programs.** `neurospace` (the app) and `ns` (the console tool), in four Rust crates. No web frontend, no other language in the product.
 - **Designed for about 10 000 notes and 100 MB of text.** See [Performance](#performance) for the measurements and their conditions.
+
+<p align="center">
+  <img src="docs/images/pixel/divider.svg" alt="" width="640">
+</p>
 
 ## Screenshots
 
@@ -310,6 +325,10 @@ The engine keeps its state outside the vault, in `<base>/vaults/<one folder per 
 
 </details>
 
+<p align="center">
+  <img src="docs/images/pixel/divider.svg" alt="" width="640">
+</p>
+
 ## Architecture
 
 ```mermaid
@@ -420,7 +439,17 @@ These are left out on purpose:
 - Installers, AppImage, auto-update.
 - Encryption of notes on disk: they are plain files, as in Obsidian.
 
+<p align="center">
+  <img src="docs/images/pixel/divider.svg" alt="" width="640">
+</p>
+
 ## Roadmap
+
+<p align="center">
+  <img src="docs/images/pixel/level.svg" alt="Progress bar: level 1 reached, further levels still to come" width="420">
+</p>
+
+This is level 1. Further levels of the architecture are planned; what is listed below is what level 1 left open.
 
 There is no schedule and no promise. The limits above are where a later version could go if there is a reason to:
 
@@ -451,3 +480,9 @@ The standards the code follows:
 ## Licence
 
 Neurospace is released under the [MIT licence](LICENSE). The Inter font embedded in the app is used under the SIL Open Font License 1.1; its text is in [`crates/ns-app/assets/Inter-LICENSE.txt`](crates/ns-app/assets/Inter-LICENSE.txt) and ships in both release archives; the MIT `LICENSE` ships in both release archives as well.
+
+<p align="center">
+  <img src="docs/images/pixel/divider.svg" alt="" width="640">
+  <br>
+  <sub>Made with Rust · MIT</sub>
+</p>

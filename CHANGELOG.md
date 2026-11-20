@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- README redesigned with pixel art and marked experimental (level 1 of the architecture).
 - New logo and icon: a side-view brain with an orbit on the dark tile (window, taskbar, `neurospace.exe`, welcome screen, README).
 
 ## [0.1.0] - 2026-11-20
