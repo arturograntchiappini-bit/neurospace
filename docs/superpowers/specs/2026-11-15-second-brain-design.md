@@ -589,6 +589,14 @@ A force-directed layout of the whole vault graph drawn in the centre pane:
 
 The layout is a spring-and-repulsion simulation. From M3b the repulsion is computed with a Barnes–Hut quadtree (opening angle θ = 0.8), so a step costs about n·log n, and the layout simulates graphs up to 10 000 nodes; above that it shows the simplified layout of M3. An edge whose bounding box does not meet the visible area is not drawn (M3b).
 
+**Convergence at scale (M4).** Measured at the end of M3b on a generated vault of 10 000 notes: a layout step costs about 15 ms, but at every step the largest, the 99th-percentile and the 90th-percentile moves all sit at the 30-unit speed limit (mean 21–29) whatever the link density (6, 20 or 40 links per note), so the layout never rests by its own rule and only the 10-second wake cap stops it; the picture is a dense mass. A frame costs 53–74 ms, most of it painting the nodes and about 100 000 edges, and the process holds 0.8–1.15 GB while that graph is open (228 MB before). M4 makes the layout come to rest by its own rule at that size and makes painting cheap enough for the rest to arrive inside the wake cap:
+- every wake ends by the layout's own settle rule after a bounded number of steps, at any size (for example a temperature that cools step by step and caps the move); the step cap and the 10-second wake cap stay as safety nets, not as the normal way to stop;
+- close pairs no longer explode (for example a softened repulsion with a minimum distance of the order of the node spacing), and the forces stay stable for nodes with many links;
+- a vault made of clusters comes to rest with its clusters visibly apart (a measurable ratio, section 11.2);
+- small graphs keep their present look and the existing graph tests keep passing; where a test pins an old constant it is updated, never deleted;
+- painting at 10 000 nodes costs far less than a layout step's worth of the frame, and the memory held while the graph is open is bounded (section 11.2). How (fewer shapes, one mesh for the edges, edges hidden below a zoom level with a hint, …) is left to the builder, within section 9.6.
+The layout module stays free of clocks and UI types, as in M3b.
+
 ### 9.5 Sync window
 
 Opened from the top bar: whether sync is on; this device's id; **Create invite** (shows the ticket with a copy button); **Join** (paste a ticket, with a note that where a local note differs from the group's both are kept); **Turn sync off** (leave the group); the list of peers with their state; notes the engine could not sync and why; the mode switch (Internet / LAN only).
@@ -653,7 +661,7 @@ Linux has no portable blur for a window (appendix A.5), so it always gets `Simul
 - the icon of `neurospace.exe` in Explorer (Windows resource, from the `.ico`, built only for Windows targets);
 - the welcome screen shows the logo (about 96 points) above the folder picker, with the accessible name «Neurospace»; it is decoded into a texture by the application itself, so the egui image loaders stay without `image`, `file` and `http` features (section 9.3, the preview fetches nothing);
 - the top of the README shows the logo.
-The Linux `.desktop` file and icon installation belong to M4.
+The Linux `.desktop` file and icon installation belong to M4 (section 10).
 
 **Settings** are kept in `<state base>/app.json` with the last vault: `{"last_vault": path or null, "theme": "system" | "light" | "dark", "reduce_transparency": bool, "zoom": number}`. A missing, unreadable or invalid file means the defaults (`null`, `"system"`, `false`, `1.0`); a zoom outside 0.75–2.0 is clamped. The application never fails to start because of this file.
 
@@ -661,7 +669,10 @@ The Linux `.desktop` file and icon installation belong to M4.
 
 - Windows: `cargo build --release` produces `neurospace.exe` and `ns.exe`.
 - Linux: a script builds both binaries in a Docker container based on an old-glibc distribution (Debian 11, glibc 2.31) so that they run on almost every current distribution. The GUI needs a working OpenGL driver and X11 or Wayland at run time.
+- **Linux release (call, M4).** `scripts/linux-release.sh` runs inside the `rust:1-bullseye` image (Debian 11, glibc 2.31; the build needs no `apt` package, which matters because Debian 11 has reached its end of life and its security archive has left the mirrors). It builds both binaries in release with `--locked`, refuses to package if either binary needs a glibc symbol newer than 2.31, and writes `dist/neurospace-<version>-linux-x86_64.tar.gz` holding `neurospace`, `ns`, `neurospace.desktop`, `neurospace.png` (the 256 px icon), `README.md` and the Inter licence. The README gives the one `docker run` line that calls it, for a Linux shell and for Windows PowerShell, and the commands that install the binaries, the `.desktop` file and the icon for the current user (`~/.local/bin`, `~/.local/share/applications`, `~/.local/share/icons/hicolor/256x256/apps`). No install script and no distribution package (`.deb`, AppImage, Flatpak) in version 1.
+- **`.desktop` file (call, M4):** `packaging/linux/neurospace.desktop` with `Type=Application`, `Name=Neurospace`, `Comment=Markdown notes with links, graph and peer-to-peer sync`, `Exec=neurospace %f`, `Icon=neurospace`, `Terminal=false`, `Categories=Office;Utility;`, `StartupWMClass=neurospace`. `StartupWMClass` equals the app id the window sets (`with_app_id`), so the window groups under the launcher icon; a unit test pins that.
 - The README states the Linux run-time requirements, how to register the MCP server with Claude Code and Claude Desktop, how sync and tickets work, what `internet` mode contacts, and the non-goals.
+- **Version (call, M4).** The first release is 0.1.0, the version the workspace already carries: the CHANGELOG's `[Unreleased]` section becomes `[0.1.0] - <date>`, and a local git tag `v0.1.0` marks it. Nothing is published or pushed.
 
 ## 11. Verification
 
@@ -711,10 +722,16 @@ Checks described as «by the orchestrator» are run by the orchestrating session
 - By the orchestrator in the GUI with the 10 000-note vault: saving the open note causes no index swap (a unit test pins this too); the graph view simulates (not the simplified layout) and the window stays responsive while it settles; the file tree with a folder of several thousand notes expanded scrolls without visible stalls.
 
 **M4 — Linux and release**
-- Both binaries build in the Linux container and the full test suite passes there.
-- A Windows replica and a Linux-container replica sync in both directions, connected through a ticket with address hints and a fixed port.
-- The GUI binary starts in the Linux container under a virtual display with software rendering.
-- README and CHANGELOG are complete, including what was and was not verified.
+- Both binaries build in the Linux container and the full test suite passes there; `scripts/linux-release.sh` produces the tarball of section 10, and no binary in it needs a glibc symbol newer than 2.31.
+- A Windows replica and a Linux-container replica sync in both directions, connected through a ticket with address hints and a fixed port. The hints may be written into the ticket by hand (section 8.8 documents the format), because the container's own addresses are not reachable from Windows; the container's port is published to the host.
+- The GUI binary starts in a Linux container under a virtual display with software rendering (Xvfb, Mesa), opens a vault, is captured and looked at, and stops cleanly on SIGTERM. Because Debian 11's packages are no longer installable, that container is a current distribution (Debian 12) running the binary built on Debian 11, which also shows the old-glibc binary running on a newer system.
+- Graph at scale (section 9.4), in headless tests in release, ignored by default and run by the orchestrator:
+  - a clustered graph of 10 000 nodes (100 clusters of 100; inside a cluster each node links to 4 random others of its cluster; one node in five also links to a random node of another cluster; fixed seed) comes to rest by the layout's own rule within a number of steps whose measured cost fits in 10 seconds of frames in the release GUI (the arithmetic is written in the test), and at rest the mean distance from a node to its cluster's centroid is at most half the mean distance between neighbouring centroids;
+  - a random graph of 10 000 nodes with 6 links per node (fixed seed) comes to rest by the layout's own rule within the same number of steps;
+  - every existing graph test passes.
+- By the orchestrator, in the release GUI with the 10 000-note vault of M3b: the graph comes to rest before the 10-second wake cap; the median frame while it settles is under 30 ms; the working set with the graph open stays under 600 MB. The numbers are recorded next to the M3b ones.
+- The engine's first round at 10 000 notes (about 119 s in M2 and M3b, against 6.7 s for the same work inside the scale test): the cause is measured and recorded; if it is in this project's code it is fixed, and the first round of a release `ns sync run` on that vault takes at most three times the in-process figure measured in the same sitting. A cause outside the code (for example antivirus scanning) is recorded with its evidence instead.
+- README and CHANGELOG are complete, including what was and was not verified; the CHANGELOG has the `[0.1.0]` section and the tag `v0.1.0` exists locally.
 
 ## 12. Left to the builder
 
