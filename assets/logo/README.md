@@ -1,5 +1,7 @@
 # Logo
 
+The drawing is the side-view brain with an orbit from the user's `second-brain-mark.svg`, on the app tile.
+
 `neurospace.svg` (1024×1024) is the only source. Every other file here is generated from it and must be regenerated, never edited by hand.
 
 | File | Made with |

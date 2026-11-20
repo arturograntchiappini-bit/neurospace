@@ -14,63 +14,93 @@
       <stop offset="0" stop-color="#ffffff" stop-opacity="0.1"/>
       <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
     </radialGradient>
-    <filter id="filter-1" filterUnits="userSpaceOnUse" x="279.6" y="282.6" width="464.8" height="464.8" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="32"/></filter>
-    <linearGradient id="linear-gradient-3" x1="342.439" y1="256.741" x2="342.439" y2="767.423" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.12"/>
-      <stop offset="1" stop-color="#8cbbff" stop-opacity="0.04"/>
+    <filter id="mark-filter-1" filterUnits="userSpaceOnUse" x="123.088" y="189.56" width="782.54" height="532.586" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="13"/></filter>
+    <filter id="mark-filter-2" filterUnits="userSpaceOnUse" x="185.04" y="174.96" width="669.6" height="669.6" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="40"/></filter>
+    <linearGradient id="mark-linear-gradient-1" x1="504.16" y1="610.56" x2="504.16" y2="763.284" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#4da3ff" stop-opacity="0.08"/>
     </linearGradient>
-    <linearGradient id="linear-gradient-4" x1="342.439" y1="245.741" x2="342.439" y2="778.423" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#8fbfff"/>
-    </linearGradient>
-    <linearGradient id="linear-gradient-5" x1="681.561" y1="256.741" x2="681.561" y2="767.423" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.12"/>
-      <stop offset="1" stop-color="#8cbbff" stop-opacity="0.04"/>
-    </linearGradient>
-    <linearGradient id="linear-gradient-6" x1="681.561" y1="244.421" x2="681.561" y2="779.743" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#8fbfff"/>
-    </linearGradient>
-    <linearGradient id="linear-gradient-7" x1="512" y1="465.72" x2="512" y2="564.28" gradientUnits="userSpaceOnUse">
+    <linearGradient id="mark-linear-gradient-2" x1="504.16" y1="601.56" x2="504.16" y2="772.284" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#4da3ff"/>
       <stop offset="1" stop-color="#0a6fe0"/>
     </linearGradient>
+    <linearGradient id="mark-linear-gradient-3" x1="343.213" y1="594.88" x2="343.213" y2="715.898" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#4da3ff" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="mark-linear-gradient-4" x1="343.213" y1="585.88" x2="343.213" y2="724.898" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4da3ff"/>
+      <stop offset="1" stop-color="#0a6fe0"/>
+    </linearGradient>
+    <linearGradient id="mark-linear-gradient-5" x1="514.358" y1="230.56" x2="514.358" y2="681.146" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#4da3ff" stop-opacity="0.1"/>
+    </linearGradient>
+    <linearGradient id="mark-linear-gradient-6" x1="514.358" y1="219.56" x2="514.358" y2="692.146" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4da3ff"/>
+      <stop offset="1" stop-color="#0a6fe0"/>
+    </linearGradient>
+    <filter id="mark-filter-3" filterUnits="userSpaceOnUse" x="533.64" y="243.56" width="386.8" height="330.8" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="19"/></filter>
+    <linearGradient id="mark-linear-gradient-7" x1="475.04" y1="450.4" x2="475.04" y2="535.52" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5ab0ff"/>
+      <stop offset="1" stop-color="#0a6fe0"/>
+    </linearGradient>
+    <filter id="mark-filter-4" filterUnits="userSpaceOnUse" x="398" y="25" width="106" height="106" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="7"/></filter>
+    <filter id="mark-filter-5" filterUnits="userSpaceOnUse" x="877" y="615" width="94" height="94" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="6"/></filter>
   </defs>
   <title>Neurospace</title>
-  <g id="Layer_1" data-name="Layer 1">
+  <g id="Tile_layer" data-name="Tile layer">
     <path id="Tile" d="M232 0 L792 0 C920.13 0 1024 103.87 1024 232 L1024 792 C1024 920.13 920.13 1024 792 1024 L232 1024 C103.87 1024 0 920.13 0 792 L0 232 C0 103.87 103.87 0 232 0 Z" fill="url(#linear-gradient-1)"/>
     <path id="Glass_edge" data-name="Glass edge" d="M232 4 L792 4 C917.921 4 1020 106.079 1020 232 L1020 792 C1020 917.921 917.921 1020 792 1020 L232 1020 C106.079 1020 4 917.921 4 792 L4 232 C4 106.079 106.079 4 232 4 Z" fill="none" stroke="url(#linear-gradient-2)" stroke-width="6" stroke-miterlimit="10"/>
     <path id="Tile_light" data-name="Tile light" d="M232 0 L792 0 C920.13 0 1024 103.87 1024 232 L1024 792 C1024 920.13 920.13 1024 792 1024 L232 1024 C103.87 1024 0 920.13 0 792 L0 232 C0 103.87 103.87 0 232 0 Z" fill="url(#radial-gradient-1)"/>
-    <g filter="url(#filter-1)">
-      <circle id="Hub_glow" data-name="Hub glow" cx="512" cy="515" r="134.4" fill="#0a84ff" opacity="0.6"/>
+  </g>
+  <g id="Layer_1" data-name="Layer 1">
+    <g filter="url(#mark-filter-1)">
+      <path id="Shadow" d="M167.04 509.76 C150.24 408.96 206.24 308.16 307.04 268.96 C407.84 224.16 519.84 218.56 620.64 252.16 C721.44 280.16 822.24 341.76 855.84 431.36 C878.24 487.36 855.84 543.36 811.04 560.16 C788.64 599.36 721.44 599.36 687.84 588.16 C665.44 644.16 609.44 688.96 542.24 680 C486.24 672.16 452.64 644.16 430.24 610.56 C363.04 599.36 273.44 599.36 217.44 582.56 C183.84 571.36 170.4 543.36 167.04 509.76 Z" fill="#000000" opacity="0.55"/>
     </g>
-    <path id="Left_lobe" data-name="Left lobe" d="M487.36 282.04 C444.8 246.2 377.6 248.44 341.76 288.76 C288 282.04 234.24 322.36 238.72 382.84 C184.96 414.2 184.96 499.32 232 532.92 C202.88 593.4 232 660.6 283.52 676.28 C292.48 736.76 359.68 777.08 413.44 747.96 C444.8 781.56 487.36 768.12 487.36 734.52 C464.96 660.6 464.96 358.2 487.36 282.04 Z" fill="url(#linear-gradient-3)" stroke="url(#linear-gradient-4)" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
-    <path id="Left_lobe-2" data-name="Left lobe" d="M536.64 282.04 C579.2 246.2 646.4 248.44 682.24 288.76 C736 282.04 789.76 322.36 785.28 382.84 C839.04 414.2 839.04 499.32 792 532.92 C821.12 593.4 792 660.6 740.48 676.28 C731.52 736.76 664.32 777.08 610.56 747.96 C579.2 781.56 536.64 768.12 536.64 734.52 C559.04 660.6 559.04 358.2 536.64 282.04 Z" fill="url(#linear-gradient-5)" stroke="url(#linear-gradient-6)" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
-    <path id="Sulcus_1" data-name="Sulcus 1" d="M294.72 354.84 C332.8 377.24 348.48 426.52 319.36 473.56" fill="none" stroke="#eaf1ff" stroke-width="9" stroke-linecap="round" stroke-miterlimit="10" opacity="0.28"/>
-    <path id="Sulcus_1-2" data-name="Sulcus 1" d="M729.28 354.84 C691.2 377.24 675.52 426.52 704.64 473.56" fill="none" stroke="#eaf1ff" stroke-width="9" stroke-linecap="round" stroke-miterlimit="10" opacity="0.28"/>
-    <path id="Sulcus_2" data-name="Sulcus 2" d="M422.4 314.52 C456 354.84 449.28 413.08 413.44 444.44" fill="none" stroke="#eaf1ff" stroke-width="9" stroke-linecap="round" stroke-miterlimit="10" opacity="0.28"/>
-    <path id="Sulcus_2-2" data-name="Sulcus 2" d="M601.6 314.52 C568 354.84 574.72 413.08 610.56 444.44" fill="none" stroke="#eaf1ff" stroke-width="9" stroke-linecap="round" stroke-miterlimit="10" opacity="0.28"/>
-    <path id="Sulcus_3" data-name="Sulcus 3" d="M274.56 596.76 C326.08 594.52 359.68 637.08 348.48 695.32" fill="none" stroke="#eaf1ff" stroke-width="9" stroke-linecap="round" stroke-miterlimit="10" opacity="0.28"/>
-    <path id="Sulcus_3-2" data-name="Sulcus 3" d="M749.44 596.76 C697.92 594.52 664.32 637.08 675.52 695.32" fill="none" stroke="#eaf1ff" stroke-width="9" stroke-linecap="round" stroke-miterlimit="10" opacity="0.28"/>
-    <path id="Sulcus_4" data-name="Sulcus 4" d="M462.72 572.12 C429.12 594.52 429.12 646.04 447.04 690.84" fill="none" stroke="#eaf1ff" stroke-width="9" stroke-linecap="round" stroke-miterlimit="10" opacity="0.28"/>
-    <path id="Sulcus_4-2" data-name="Sulcus 4" d="M561.28 572.12 C594.88 594.52 594.88 646.04 576.96 690.84" fill="none" stroke="#eaf1ff" stroke-width="9" stroke-linecap="round" stroke-miterlimit="10" opacity="0.28"/>
-    <path id="Mesh_links" data-name="Mesh links" d="M303.68 464.6 L382.08 354.84 L444.8 386.2 L397.76 473.56 L303.68 464.6 L337.28 599 L397.76 473.56 L420.16 666.2 L337.28 599 M382.08 354.84 L397.76 473.56 M512 515 L397.76 473.56 M512 515 L337.28 599 M512 515 L420.16 666.2" fill="none" stroke="#6fb1ff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
-    <path id="Mesh_links-2" data-name="Mesh links" d="M720.32 464.6 L641.92 354.84 L579.2 386.2 L626.24 473.56 L720.32 464.6 L686.72 599 L626.24 473.56 L603.84 666.2 L686.72 599 M641.92 354.84 L626.24 473.56 M512 515 L626.24 473.56 M512 515 L686.72 599 M512 515 L603.84 666.2" fill="none" stroke="#6fb1ff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle id="Node_A" data-name="Node A" cx="382.08" cy="354.84" r="22.4" fill="#eaf1ff"/>
-    <circle id="Node_A-2" data-name="Node A" cx="641.92" cy="354.84" r="22.4" fill="#eaf1ff"/>
-    <circle id="Node_B" data-name="Node B" cx="303.68" cy="464.6" r="29.12" fill="#eaf1ff"/>
-    <circle id="Node_B-2" data-name="Node B" cx="720.32" cy="464.6" r="29.12" fill="#eaf1ff"/>
-    <circle id="Node_C" data-name="Node C" cx="397.76" cy="473.56" r="17.92" fill="#9cc8ff"/>
-    <circle id="Node_C-2" data-name="Node C" cx="626.24" cy="473.56" r="17.92" fill="#9cc8ff"/>
-    <circle id="Node_D" data-name="Node D" cx="337.28" cy="599" r="24.64" fill="#eaf1ff"/>
-    <circle id="Node_D-2" data-name="Node D" cx="686.72" cy="599" r="24.64" fill="#eaf1ff"/>
-    <circle id="Node_E" data-name="Node E" cx="420.16" cy="666.2" r="20.16" fill="#eaf1ff"/>
-    <circle id="Node_E-2" data-name="Node E" cx="603.84" cy="666.2" r="20.16" fill="#eaf1ff"/>
-    <circle id="Node_F" data-name="Node F" cx="444.8" cy="386.2" r="13.44" fill="#9cc8ff"/>
-    <circle id="Node_F-2" data-name="Node F" cx="579.2" cy="386.2" r="13.44" fill="#9cc8ff"/>
-    <path id="Bridge_links" data-name="Bridge links" d="M444.8 386.2 C478.4 377.24 545.6 377.24 579.2 386.2 M413.44 444.44 C464.96 431 559.04 431 610.56 444.44 M420.16 666.2 C464.96 681.88 559.04 681.88 603.84 666.2" fill="none" stroke="#0a84ff" stroke-width="10" stroke-linecap="round" stroke-miterlimit="10" stroke-dasharray="0.5 17" opacity="0.9"/>
-    <circle id="Hub_halo" data-name="Hub halo" cx="512" cy="515" r="89.6" fill="none" stroke="#5aa9ff" stroke-width="5" stroke-miterlimit="10" opacity="0.55"/>
-    <circle id="Hub" cx="512" cy="515" r="49.28" fill="url(#linear-gradient-7)" stroke="#eaf1ff" stroke-width="11" stroke-miterlimit="10"/>
-    <circle id="Hub_core" data-name="Hub core" cx="512" cy="515" r="14.56" fill="#eaf1ff"/>
+    <g filter="url(#mark-filter-2)">
+      <circle id="Core_glow" data-name="Core glow" cx="519.84" cy="509.76" r="212.8" fill="#0a84ff" opacity="0.3"/>
+    </g>
+    <path id="Brainstem_base" data-name="Brainstem base" d="M448.16 610.56 C452.64 666.56 463.84 711.36 459.36 758.4 C486.24 767.36 517.6 762.88 537.76 753.92 C533.28 711.36 537.76 666.56 560.16 630.72 Z" fill="#1f2229"/>
+    <path id="Brainstem" d="M448.16 610.56 C452.64 666.56 463.84 711.36 459.36 758.4 C486.24 767.36 517.6 762.88 537.76 753.92 C533.28 711.36 537.76 666.56 560.16 630.72 Z" fill="url(#mark-linear-gradient-1)" stroke="url(#mark-linear-gradient-2)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="Cerebellum_base" data-name="Cerebellum base" d="M230.88 594.88 C210.72 655.36 273.44 718.08 363.04 715.84 C436.96 711.36 468.32 666.56 457.12 621.76 C403.36 637.44 307.04 635.2 230.88 594.88 Z" fill="#1f2229"/>
+    <path id="Cerebellum" d="M230.88 594.88 C210.72 655.36 273.44 718.08 363.04 715.84 C436.96 711.36 468.32 666.56 457.12 621.76 C403.36 637.44 307.04 635.2 230.88 594.88 Z" fill="url(#mark-linear-gradient-3)" stroke="url(#mark-linear-gradient-4)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="Cerebellum_grooves" data-name="Cerebellum grooves" d="M273.44 644.16 C329.44 666.56 396.64 666.56 430.24 644.16 M293.6 680 C340.64 695.68 396.64 693.44 430.24 675.52" fill="none" stroke="#eaf1ff" stroke-width="8" stroke-linecap="round" stroke-miterlimit="10" opacity="0.45"/>
+    <path id="Cerebrum_base" data-name="Cerebrum base" d="M167.04 509.76 C150.24 408.96 206.24 308.16 307.04 268.96 C407.84 224.16 519.84 218.56 620.64 252.16 C721.44 280.16 822.24 341.76 855.84 431.36 C878.24 487.36 855.84 543.36 811.04 560.16 C788.64 599.36 721.44 599.36 687.84 588.16 C665.44 644.16 609.44 688.96 542.24 680 C486.24 672.16 452.64 644.16 430.24 610.56 C363.04 599.36 273.44 599.36 217.44 582.56 C183.84 571.36 170.4 543.36 167.04 509.76 Z" fill="#1f2229"/>
+    <path id="Cerebrum" d="M167.04 509.76 C150.24 408.96 206.24 308.16 307.04 268.96 C407.84 224.16 519.84 218.56 620.64 252.16 C721.44 280.16 822.24 341.76 855.84 431.36 C878.24 487.36 855.84 543.36 811.04 560.16 C788.64 599.36 721.44 599.36 687.84 588.16 C665.44 644.16 609.44 688.96 542.24 680 C486.24 672.16 452.64 644.16 430.24 610.56 C363.04 599.36 273.44 599.36 217.44 582.56 C183.84 571.36 170.4 543.36 167.04 509.76 Z" fill="url(#mark-linear-gradient-5)" stroke="url(#mark-linear-gradient-6)" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+    <g filter="url(#mark-filter-3)">
+      <ellipse id="Frontal_glow" data-name="Frontal glow" cx="727.04" cy="408.96" rx="134.4" ry="106.4" fill="#4da3ff" opacity="0.32"/>
+    </g>
+    <path id="Specular" d="M188.32 453.76 C177.12 386.56 226.4 321.6 313.76 292.48 C412.32 254.4 515.36 249.92 609.44 276.8" fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" stroke-miterlimit="10" opacity="0.5"/>
+    <path id="Gyri_minor" data-name="Gyri minor" d="M273.44 296.96 C307.04 285.76 329.44 263.36 363.04 274.56 M430.24 352.96 C463.84 366.4 497.44 344 531.04 358.56 M654.24 296.96 C687.84 321.6 721.44 308.16 755.04 336.16 M721.44 487.36 C755.04 496.32 788.64 480.64 822.24 492.96 M230.88 431.36 C239.84 406.72 260 391.04 284.64 392.16 M497.44 599.36 C531.04 612.8 564.64 597.12 598.24 612.8 M631.84 453.76 C665.44 467.2 699.04 451.52 721.44 476.16 M340.64 509.76 C363.04 523.2 385.44 509.76 407.84 527.68" fill="none" stroke="#ffffff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" opacity="0.45"/>
+    <path id="Gyri" d="M811.04 453.76 C766.24 453.76 755.04 408.96 710.24 420.16 C665.44 431.36 665.44 380.96 620.64 380.96 C592.64 380.96 581.44 358.56 564.64 344 M307.04 375.36 C351.84 366.4 363.04 310.4 419.04 314.88 C458.24 319.36 469.44 288 497.44 281.28 M217.44 487.36 C262.24 487.36 273.44 444.8 318.24 453.76 C363.04 462.72 368.64 422.4 407.84 433.6 M580.32 258.88 C555.68 299.2 575.84 319.36 564.64 344 M681.12 583.68 C631.84 543.36 587.04 529.92 542.24 509.76 M273.44 554.56 C329.44 543.36 363.04 571.36 419.04 560.16 M613.92 655.36 C569.12 628.48 573.6 590.4 604.96 576.96" fill="none" stroke="#ffffff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" opacity="0.92"/>
+    <path id="Constellation" d="M363.04 274.56 L497.44 281.28 L531.04 358.56 L564.64 344 L755.04 336.16 L822.24 492.96 M284.64 392.16 L407.84 433.6 M598.24 612.8 L604.96 576.96 M531.04 358.56 L542.24 509.76" fill="none" stroke="#9cc8ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
+    <path id="Hub_links" data-name="Hub links" d="M475.04 492.96 L407.84 433.6 M475.04 492.96 L497.44 281.28 M475.04 492.96 L564.64 344 M475.04 492.96 L542.24 509.76 M475.04 492.96 L419.04 560.16 M475.04 492.96 L604.96 576.96" fill="none" stroke="#5ab0ff" stroke-width="6" stroke-linecap="round" stroke-miterlimit="10" stroke-dasharray="1 13" opacity="0.75"/>
+    <circle id="Dot_1" data-name="Dot 1" cx="363.04" cy="274.56" r="8.96" fill="#bbd8ff"/>
+    <circle id="Dot_2" data-name="Dot 2" cx="531.04" cy="358.56" r="8.96" fill="#bbd8ff"/>
+    <circle id="Dot_3" data-name="Dot 3" cx="755.04" cy="336.16" r="10.08" fill="#bbd8ff"/>
+    <circle id="Dot_4" data-name="Dot 4" cx="822.24" cy="492.96" r="10.08" fill="#bbd8ff"/>
+    <circle id="Dot_5" data-name="Dot 5" cx="284.64" cy="392.16" r="8.96" fill="#bbd8ff"/>
+    <circle id="Dot_6" data-name="Dot 6" cx="598.24" cy="612.8" r="8.96" fill="#bbd8ff"/>
+    <circle id="Node_a" data-name="Node a" cx="564.64" cy="344" r="17.92" fill="#ffffff" stroke="#0a84ff" stroke-width="6" stroke-miterlimit="10"/>
+    <circle id="Node_b" data-name="Node b" cx="497.44" cy="281.28" r="15.68" fill="#ffffff" stroke="#0a84ff" stroke-width="6" stroke-miterlimit="10"/>
+    <circle id="Node_c" data-name="Node c" cx="407.84" cy="433.6" r="15.68" fill="#ffffff" stroke="#0a84ff" stroke-width="6" stroke-miterlimit="10"/>
+    <circle id="Node_d" data-name="Node d" cx="542.24" cy="509.76" r="15.68" fill="#ffffff" stroke="#0a84ff" stroke-width="6" stroke-miterlimit="10"/>
+    <circle id="Node_e" data-name="Node e" cx="419.04" cy="560.16" r="15.68" fill="#ffffff" stroke="#0a84ff" stroke-width="6" stroke-miterlimit="10"/>
+    <circle id="Node_f" data-name="Node f" cx="604.96" cy="576.96" r="15.68" fill="#ffffff" stroke="#0a84ff" stroke-width="6" stroke-miterlimit="10"/>
+    <circle id="Hub_halo_outer" data-name="Hub halo outer" cx="475.04" cy="492.96" r="123.2" fill="none" stroke="#7db8ff" stroke-width="3" stroke-miterlimit="10" opacity="0.28"/>
+    <circle id="Hub_halo" data-name="Hub halo" cx="475.04" cy="492.96" r="89.6" fill="none" stroke="#7db8ff" stroke-width="4" stroke-miterlimit="10" opacity="0.55"/>
+    <circle id="Hub" cx="475.04" cy="492.96" r="42.56" fill="url(#mark-linear-gradient-7)" stroke="#ffffff" stroke-width="9" stroke-miterlimit="10"/>
+    <circle id="Hub_core" data-name="Hub core" cx="475.04" cy="492.96" r="13.44" fill="#ffffff"/>
+    <path id="Orbit_arcs" data-name="Orbit arcs" d="M100.4 362.2 C155.798 210.03 290.637 100.844 451 78.3 M923.6 661.8 C868.202 813.97 733.363 923.156 573 945.7" fill="none" stroke="#3d95f5" stroke-width="4" stroke-linecap="round" stroke-miterlimit="10" opacity="0.4"/>
+    <path id="Orbit_ticks" data-name="Orbit ticks" d="M122 336 C187.034 201.46 319.819 112.682 469 104 M902 688 C836.966 822.54 704.181 911.318 555 920" fill="none" stroke="#3d95f5" stroke-width="10" stroke-miterlimit="10" stroke-dasharray="2 20" opacity="0.28"/>
+    <g filter="url(#mark-filter-4)">
+      <circle id="Satellite_glow_A" data-name="Satellite glow A" cx="451" cy="78" r="30" fill="#0a84ff" opacity="0.7"/>
+    </g>
+    <circle id="Satellite_A" data-name="Satellite A" cx="451" cy="78" r="12" fill="#ffffff" stroke="#0a84ff" stroke-width="6" stroke-miterlimit="10"/>
+    <g filter="url(#mark-filter-5)">
+      <circle id="Satellite_glow_B" data-name="Satellite glow B" cx="924" cy="662" r="27" fill="#0a84ff" opacity="0.6"/>
+    </g>
+    <circle id="Satellite_B" data-name="Satellite B" cx="923.5" cy="662.5" r="10.5" fill="#ffffff" stroke="#0a84ff" stroke-width="5" stroke-miterlimit="10"/>
   </g>
 </svg>
