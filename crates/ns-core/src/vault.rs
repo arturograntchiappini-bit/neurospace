@@ -829,8 +829,23 @@ mod tests {
         io::ErrorKind::PermissionDenied.into()
     }
 
+    /// Holds `file` open without delete sharing for the whole `call`, so Windows denies every
+    /// rename over it: deterministic, unlike the timed variant below.
+    #[cfg(windows)]
+    fn call_while_held<T>(file: &Path, call: impl FnOnce() -> T) -> T {
+        use std::os::windows::fs::OpenOptionsExt;
+        const SHARE_READ: u32 = 1;
+        let _held = OpenOptions::new()
+            .read(true)
+            .share_mode(SHARE_READ)
+            .open(file)
+            .unwrap();
+        call()
+    }
+
     /// Holds `file` open without delete sharing, so Windows denies a rename over it, and
     /// releases it after 20 ms: inside the window of a retrying rename, long before any other.
+    /// Use only where the release must land mid-call; under load it can pass without retrying.
     #[cfg(windows)]
     fn call_while_held_briefly<T>(file: &Path, call: impl FnOnce() -> T) -> T {
         use std::os::windows::fs::OpenOptionsExt;
@@ -866,8 +881,7 @@ mod tests {
         let (dir, vault) = vault();
         vault.write(&p("n.md"), "old").unwrap();
         let file = dir.path().join("n.md");
-        let result =
-            call_while_held_briefly(&file, || vault.replace_if(&p("n.md"), "new", &|_| true));
+        let result = call_while_held(&file, || vault.replace_if(&p("n.md"), "new", &|_| true));
         assert!(matches!(
             result,
             Err(CoreError::Io { ref source, .. }) if source.kind() == io::ErrorKind::PermissionDenied
