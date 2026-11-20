@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use ns_core::{NotePath, Vault};
-use ns_sync::{LocalReplica, StateDir};
+use ns_sync::{LocalReplica, Message, Replica, StateDir, SyncDoc};
 
 const NOTES: usize = 10_000;
 const PER_FOLDER: usize = 100;
@@ -51,6 +51,31 @@ fn ms(d: Duration) -> u128 {
     d.as_millis()
 }
 
+const DEVICE_A: [u8; 32] = [1; 32];
+
+/// Hands `updates` to `device` as a peer's `Updates` message, the way a session does.
+fn deliver(device: &mut Replica, updates: Vec<u8>, version: Vec<u8>) {
+    device
+        .on_message(1, Message::Updates { version, updates })
+        .unwrap();
+}
+
+/// A second device that holds every note of `first`, written to its own vault. Its files are
+/// left to age past the racy window (spec 5.3), as a device that has been running would have.
+fn device_with_copy_of(first: &LocalReplica, vault: &Path, state: &Path) -> Replica {
+    fs::create_dir_all(vault.join(".neurospace")).unwrap();
+    let vault = Vault::open(vault).unwrap();
+    let mut device = Replica::open(vault, StateDir::at(state).unwrap(), [2; 32]).unwrap();
+    device.session_opened(1, DEVICE_A);
+    let everything = first.doc.updates_since(&SyncDoc::new().version()).unwrap();
+    deliver(&mut device, everything, first.doc.version());
+    std::thread::sleep(Duration::from_millis(3_100));
+    for _ in 0..3 {
+        device.reconcile().unwrap();
+    }
+    device
+}
+
 #[test]
 #[ignore = "scale timing; run in release"]
 fn should_reconcile_ten_thousand_notes_within_budget() {
@@ -66,6 +91,8 @@ fn should_reconcile_ten_thousand_notes_within_budget() {
         timed(&mut replica),
         timed(&mut replica),
     ];
+    let (b_vault, b_state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut other = device_with_copy_of(&replica, b_vault.path(), b_state.path());
 
     let edited = note_rel(4242);
     assert_eq!(edited, "f42/n4242.md");
@@ -73,14 +100,29 @@ fn should_reconcile_ten_thousand_notes_within_budget() {
     fs::write(&full, format!("{}edited\n", note_text(4242))).unwrap();
     let one_change = timed(&mut replica);
 
+    let updates = replica
+        .doc
+        .updates_since(&other.local().doc.version())
+        .unwrap();
+    let start = Instant::now();
+    deliver(&mut other, updates, replica.doc.version());
+    let remote = start.elapsed();
+
     eprintln!(
-        "scale: first={} quiet={},{},{} one_change={}",
+        "scale: first={} quiet={},{},{} one_change={} remote={}",
         ms(first),
         ms(quiet[0]),
         ms(quiet[1]),
         ms(quiet[2]),
-        ms(one_change)
+        ms(one_change),
+        ms(remote)
     );
+    let written = fs::read_to_string(b_vault.path().join(&edited)).unwrap();
+    assert!(
+        written.ends_with("edited\n"),
+        "the other device has the edit"
+    );
+    assert!(remote < Duration::from_millis(500), "remote round");
 
     let view = replica.doc.view();
     let note = view.get(&NotePath::parse(&edited).unwrap().key()).unwrap();

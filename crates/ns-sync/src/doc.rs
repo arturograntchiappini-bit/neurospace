@@ -8,10 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
 use std::sync::Arc;
 
-use loro::event::{Diff, DiffBatch};
 use loro::{
-    ContainerID, ContainerType, ExportMode, Frontiers, LoroDoc, LoroMap, LoroValue, UpdateOptions,
-    VersionVector,
+    ContainerID, ContainerType, ExportMode, JsonMapOp, JsonOpContent, JsonSchema, LoroDoc, LoroMap,
+    LoroValue, UpdateOptions, VersionVector,
 };
 use ns_core::{NoteKey, NotePath};
 
@@ -22,9 +21,9 @@ const MAX_RESOLVE_ROUNDS: usize = 16;
 // Mirrors the per-component limit of `NotePath::parse` (spec section 5.2).
 const MAX_COMPONENT_BYTES: usize = 255;
 const NOTE_ID_LEN: usize = 32;
-// Measured (release, 10 KB notes): `LoroDoc::diff` costs about 1 ms per edited note and grows
-// faster than linearly with the size of a new text (1 MB: 10 s), while recomputing a note costs
-// about 30 us. Past this many new operations a full rebuild is cheaper than the diff.
+// Measured (release, 10 KB notes): listing the changed notes costs about 1 ms per edited note and
+// grows faster than linearly with the size of a new text, while recomputing a note costs about
+// 30 us. Past this many new operations a full rebuild is cheaper than listing them.
 const MAX_DIFF_ATOMS: usize = 20_000;
 
 /// A 32-byte content hash.
@@ -100,7 +99,7 @@ struct CachedNote {
 /// Per-note cache plus the document version it reflects; `None` means nothing is cached yet.
 #[derive(Default)]
 struct ViewCache {
-    frontiers: Option<Frontiers>,
+    version: Option<VersionVector>,
     /// Operations in the document when the cache last reflected it.
     atoms: usize,
     notes: HashMap<NoteId, CachedNote>,
@@ -123,6 +122,14 @@ impl Default for SyncDoc {
     }
 }
 
+/// How many operations a document at `version` holds, counted from the version vector.
+fn atom_count(version: &VersionVector) -> usize {
+    version
+        .values()
+        .map(|&counter| usize::try_from(counter).unwrap_or(0))
+        .sum()
+}
+
 fn tomb_key(id: &NoteId, hash: &Hash32) -> String {
     format!("{}:{}", id.as_str(), to_hex(hash))
 }
@@ -134,26 +141,26 @@ fn parse_entry(key: &str, value: &LoroValue) -> Option<(NoteId, NotePath)> {
     Some((NoteId::parse(key)?, NotePath::parse(path).ok()?))
 }
 
-/// The notes whose cached entry a change batch may have invalidated: a changed text `t:<id>` or a
-/// changed tombstone `<id>:<hash>`. `None` when anything is not of that shape: the cache is then
-/// rebuilt in full rather than trusted.
-fn changed_notes(batch: &DiffBatch) -> Option<Vec<NoteId>> {
+/// The notes whose cached entry the operations of a change range may have invalidated: a changed
+/// text `t:<id>` or a changed tombstone `<id>:<hash>`. `None` when anything is not of that shape:
+/// the cache is then rebuilt in full rather than trusted.
+fn changed_notes(range: &JsonSchema) -> Option<Vec<NoteId>> {
     let mut ids = Vec::new();
-    for (container, diff) in batch.iter() {
+    for op in range.changes.iter().flat_map(|change| &change.ops) {
         let ContainerID::Root {
             name,
             container_type,
-        } = container
+        } = &op.container
         else {
             return None;
         };
-        match (name.as_str(), container_type, diff) {
+        match (name.as_str(), container_type, &op.content) {
             ("paths", ContainerType::Map, _) => {}
-            ("tombs", ContainerType::Map, Diff::Map(delta)) => {
-                for key in delta.updated.keys() {
-                    ids.push(NoteId::parse(key.split_once(':')?.0)?);
-                }
-            }
+            (
+                "tombs",
+                ContainerType::Map,
+                JsonOpContent::Map(JsonMapOp::Insert { key, .. } | JsonMapOp::Delete { key }),
+            ) => ids.push(NoteId::parse(key.split_once(':')?.0)?),
             (text, ContainerType::Text, _) => ids.push(NoteId::parse(text.strip_prefix("t:")?)?),
             _ => return None,
         }
@@ -208,26 +215,28 @@ impl SyncDoc {
     }
 
     /// Drops the cache entries that changed since the cache was last used. Call before reading
-    /// through [`SyncDoc::cached`]. It depends on `LoroDoc::diff`: any `Err` falls back to a full
-    /// rebuild, but a panic inside loro (its restore step unwraps) is not caught.
+    /// through [`SyncDoc::cached`]. The operations between the cached version and the current one
+    /// name the changed notes; any `Err` falls back to a full rebuild.
+    /// (`LoroDoc::diff` was dropped for this: it costs about 90 ms to 230 ms for one edited note in
+    /// a document of 10 000 notes, however small the edit.)
     fn refresh_cache(&self) {
         let mut guard = self.cache.borrow_mut();
         let cache = &mut *guard;
-        // An error path that left a transaction open would otherwise hide its edits from the frontiers.
+        // An error path that left a transaction open would otherwise hide its edits from the version.
         self.doc.commit();
-        let now = self.doc.state_frontiers();
-        let atoms = self.atom_count();
-        let stale = match &cache.frontiers {
+        let now = self.doc.oplog_vv();
+        let atoms = atom_count(&now);
+        let stale = match &cache.version {
             Some(seen) if *seen == now => return,
-            Some(seen) if atoms.saturating_sub(cache.atoms) <= MAX_DIFF_ATOMS => {
+            Some(seen)
+                if now.includes_vv(seen) && atoms.saturating_sub(cache.atoms) <= MAX_DIFF_ATOMS =>
+            {
                 #[cfg(test)]
                 {
                     cache.diffs += 1;
                 }
-                self.doc
-                    .diff(seen, &now)
-                    .ok()
-                    .and_then(|batch| changed_notes(&batch))
+                let range = self.doc.export_json_updates(seen, &now);
+                range.ok().and_then(|range| changed_notes(&range))
             }
             _ => None,
         };
@@ -237,17 +246,8 @@ impl SyncDoc {
             }),
             None => cache.notes.clear(),
         }
-        cache.frontiers = Some(now);
+        cache.version = Some(now);
         cache.atoms = atoms;
-    }
-
-    /// How many operations the document holds, counted from its version vector.
-    fn atom_count(&self) -> usize {
-        let version = self.doc.oplog_vv();
-        version
-            .values()
-            .map(|&counter| usize::try_from(counter).unwrap_or(0))
-            .sum()
     }
 
     /// The cached state of a note, computed on first use. Needs a prior `refresh_cache`.
