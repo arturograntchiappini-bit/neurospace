@@ -533,7 +533,7 @@ Ogni prompt di dispatch a un implementer contiene, oltre al template della skill
 
 ## Verità assoluta
 
-Ultimo aggiornamento: 2026-11-20 (M4 completata; v0.1.0 pubblicata su GitHub, repository privato; restano graphify e il logo)
+Ultimo aggiornamento: 2026-11-20 (progetto completato: M4, v0.1.0 su GitHub privato, grafo aggiornato, nuovo logo su main)
 
 **Legenda stati.** **[Confermato]** = detto o approvato dall'utente. **[Proposto — applicato su delega]** = deciso dall'orchestratore in base alla delega totale del 2026-11-15, non approvato voce per voce dall'utente: vale finché l'utente non lo cambia. **[Aperto]** = non deciso. Ciò che non è verificato è scritto come «non verificato».
 
@@ -733,6 +733,10 @@ Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nel
   - La guardia di restringimento ha rifiutato la prima scrittura (20 nodi in uscita). Controllati uno per uno dall'orchestratore: 10 dal codice sono uscite vere (`MIN_DISTANCE_SQUARED`, `paint_disc`, `show_empty_hint` tolti in M4; `connect` con un ID AST nuovo; sei segnaposto di tipi senza file); 10 dai documenti sono nei file estratti, ma la fusione li unisce a nodi con la stessa etichetta di altri documenti (per esempio «iroh transport» del piano M2, «Inter font» del README). Forzata solo dopo aver verificato che l'insieme in uscita era esattamente quei 20.
   - Verificato dall'orchestratore in `graph.json`: conteggi, nessun nodo dalle cartelle escluse, nessun ID con il vecchio nome.
   - Non fatto: etichette delle comunità scritte da un modello (restano automatiche); graphifyy 0.9.93 più vecchio della skill 0.9.105, non aggiornato; `cost.json` registra 0 token.
+- 2026-11-20 — **Logo rifatto, ultimo lavoro del progetto** (branch `feat/logo`, worktree `.claude/worktrees/logo`; `3de0907`, `f95c5ce`, avanzamento rapido di `main` e push). Ledger: `.superpowers/sdd/2026-11-20-logo/progress.md`.
+  - Disegno: il cervello di profilo con l'orbita, il disegno più recente dell'utente che l'orchestratore aveva distrutto il 2026-11-18; il suo segno sopravvissuto (`second-brain-mark.svg`, non tracciato, solo copiato) è posato sulla piastrella scura dell'icona di prima, sulla stessa griglia 1024, senza riscalare. PNG 16–512 e ICO rigenerati con i comandi di `assets/logo/README.md`.
+  - Verificato: `fmt`, `clippy -D warnings` e la suite di ns-app (208 più le suite UI) puliti; tarball Linux ricostruito (glibc minima 2.30) e cattura `welcome.png` rifatta nel container; guardate dall'orchestratore le immagini a 512 e 32 px e la cattura del benvenuto. Le altre sei catture sono rimaste uguali.
+  - Non verificato: l'icona nella barra delle applicazioni di Windows e nell'eseguibile ricompilato (solo build e test); a 16 px il disegno si riduce a una sagoma blu.
 - Rischio chiuso il 2026-11-17: il preset di rete di iroh che «non risultava mai online» su questa macchina era il firewall applicativo, non il codice né iroh.
 - Non verificabile in questo progetto: uso interattivo della GUI da parte di una persona. La GUI si verifica con test headless e con l'avvio del binario.
 
@@ -856,4 +860,10 @@ Formato: decisione — perché — costo se sbagliata.
   - Il README dentro gli archivi della release ha i link alle immagini rotti, perché sono relativi. Costo: niente immagini nella copia letta fuori da GitHub.
   - `dtolnay/rust-toolchain@master` resta così (uso documentato dall'azione; la toolchain è fissata a 1.98) e il trailer dei commit dei subagenti è quello del loro harness. Costo: un cambio a monte dell'azione può rompere la CI.
   - La cronologia di git conserva il vecchio percorso personale dei due piani. Costo: il nome utente di Windows dell'utente resta visibile nei vecchi commit del suo repository privato.
+- 2026-11-20 — **Rulings del logo** (dettaglio nel ledger del logo):
+  - Il nuovo logo è il cervello di profilo con l'orbita dell'utente, ricomposto dal segno sopravvissuto sulla piastrella dell'icona. Bozze guardate e non scelte: «thread» (labirinto a zig-zag, provenienza ignota) e «pixel» (sagoma bianca a blocchi, senza piastrella). Costo: se l'utente voleva un'altra bozza, si cambia un SVG e si rigenera; la versione v2 resta in git (`13bf4b0`).
+  - Le bozze `second-brain-*` dell'utente restano non tracciate e intatte. Costo: nessuno.
+  - v0.1.0 (tag e GitHub Release) resta com'è, con l'icona vecchia; il logo è sotto `[Unreleased]` nel CHANGELOG. Costo: il README su `main` mostra il logo nuovo, i binari 0.1.0 quello vecchio.
+  - Nessuna revisione `opus` né ri-revisione: soli asset e due righe di documenti, guardati dall'orchestratore. La riga di `assets/logo/README.md` cita un file (`second-brain-mark.svg`) che nel repository non c'è. Costo: un lettore di GitHub non trova quel file.
+  - I volumi Docker `ns-logo-target` e `ns-logo-cargo` restano (cache di compilazione). Costo: spazio su disco; si tolgono con `docker volume rm`.
 - 2026-11-15 — **Domanda 7 (chi fa le prove a mano, connettività in M4).** Le prove «a mano» le esegue l'orchestratore con comandi; la GUI non è verificata da una persona e lo si dichiara; la prova Windows↔Linux usa un ticket con indirizzi e porta fissa; `internet` resta la modalità predefinita e il suo stato reale si registra in M2. — Docker è disponibile; mDNS non attraversa la rete di Docker. — Costo: se `internet` non funziona sulle reti dell'utente, il sync tra reti diverse non va finché non si indaga.
