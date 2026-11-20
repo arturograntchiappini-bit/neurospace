@@ -1031,3 +1031,90 @@ fn should_stop_fitting_the_view_once_the_user_pans() {
     let outside = s.node_rects().iter().any(|r| !pane.intersects(*r));
     assert!(outside, "the view was fitted again after the pan");
 }
+
+/// A `settling()` pane after its first frames, while the layout still moves.
+fn settling_underway() -> Settling {
+    let mut s = settling();
+    for _ in 0..3 {
+        s.frame(vec![]);
+    }
+    s
+}
+
+fn some_node_is_outside_the_pane(s: &Settling) -> bool {
+    let pane = s.pane();
+    s.node_rects().iter().any(|r| !pane.intersects(*r))
+}
+
+#[test]
+fn should_stop_fitting_the_view_once_the_user_zooms() {
+    let mut s = settling_underway();
+    let at = s.pane().left_top() + vec2(30.0, 30.0);
+    s.frame(vec![Event::PointerMoved(at), Event::Zoom(4.0)]);
+    s.run_to_rest();
+    assert!(some_node_is_outside_the_pane(&s), "refitted after the zoom");
+}
+
+#[test]
+fn should_stop_fitting_the_view_once_the_user_drags_a_node() {
+    let mut s = settling_underway();
+    let from = s.view.node_rect("n0.md").unwrap().center();
+    s.frame(vec![Event::PointerMoved(from), button(from, true)]);
+    let mut at = from;
+    for _ in 0..8 {
+        at += vec2(150.0, 0.0);
+        s.frame(vec![Event::PointerMoved(at)]);
+    }
+    let dragged = s.view.node_rect("n0.md").unwrap();
+    assert!(
+        !s.pane().intersects(dragged),
+        "the view refitted onto the node"
+    );
+}
+
+#[test]
+fn should_keep_the_layout_at_rest_and_the_view_still_when_only_text_changes() {
+    let mut s = settling();
+    s.run_to_rest();
+    let before = s.node_rects();
+    let open = NotePath::parse("n0.md").unwrap();
+    s.workspace.select(&open).unwrap();
+    s.frame(vec![]);
+    assert!(s.view.is_settled(), "a text-only change woke the layout");
+    assert_eq!(s.node_rects(), before);
+}
+
+#[test]
+fn should_wake_and_refit_when_a_note_is_added_and_the_view_was_never_moved() {
+    let mut s = settling();
+    s.run_to_rest();
+    s.workspace.create("fresh", None).unwrap();
+    s.frame(vec![]);
+    assert!(!s.view.is_settled(), "a new note must wake the layout");
+    s.run_to_rest();
+    let all = s
+        .node_rects()
+        .iter()
+        .fold(Rect::NOTHING, |a, r| a.union(*r));
+    assert!(
+        s.pane().contains_rect(all),
+        "{all:?} is outside {:?}",
+        s.pane()
+    );
+}
+
+#[test]
+fn should_not_refit_when_the_graph_changes_after_the_user_zoomed() {
+    let mut s = settling();
+    s.run_to_rest();
+    let at = s.pane().center();
+    s.frame(vec![Event::PointerMoved(at), Event::Zoom(2.0)]);
+    let size = s.view.node_rect("n0.md").unwrap().size();
+    s.workspace.create("fresh", None).unwrap();
+    s.run_to_rest();
+    let after = s.view.node_rect("n0.md").unwrap().size();
+    assert!(
+        (after.x - size.x).abs() < 0.1,
+        "the zoom was reset: {size:?} -> {after:?}"
+    );
+}

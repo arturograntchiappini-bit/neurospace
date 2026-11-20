@@ -4,8 +4,8 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    Align2, Button, Color32, ColorImage, Context, CornerRadius, Event, FontId, Key, Label, Mesh,
-    Painter, Pos2, Rect, Response, RichText, Role, Sense, Shape, Stroke, StrokeKind, TextStyle,
+    Align2, Button, Color32, ColorImage, Context, CornerRadius, FontId, Key, Label, Mesh, Painter,
+    Pos2, Rect, Response, RichText, Role, Sense, Shape, Stroke, StrokeKind, TextStyle,
     TextureFilter, TextureHandle, TextureId, TextureOptions, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
 use ns_core::{Graph, NotePath};
@@ -92,6 +92,9 @@ pub struct GraphView {
     /// Whether the view is refitted every frame: from a wake of the layout until the user moves
     /// the view or the layout is at rest.
     auto_fit: bool,
+    /// Whether the user has panned, zoomed or dragged a node since the graph was opened or since
+    /// the last «Fit graph» or Home. A change of the graph then no longer refits the view.
+    camera_moved: bool,
 }
 
 impl Default for GraphView {
@@ -110,6 +113,7 @@ impl Default for GraphView {
             max_labels: MAX_LABELS,
             disc: None,
             auto_fit: false,
+            camera_moved: false,
         }
     }
 }
@@ -141,10 +145,7 @@ impl GraphView {
         response.widget_info(|| WidgetInfo::labeled(Role::Canvas, true, GRAPH_NAME));
         self.pane = Some(response.rect);
         let (activated, home) = focused_keys(ui, &response);
-        if self.navigate(ui, &response) || key_pressed(ui, &response) {
-            self.auto_fit = false;
-        }
-        self.auto_fit |= fit || home;
+        self.steer(ui, &response, fit || home);
         self.settle(ui.ctx());
         self.keep_fitted();
         let disc = self.disc_texture(ui.ctx());
@@ -242,13 +243,14 @@ impl GraphView {
         ))
     }
 
-    /// Rebuilds the layout when the index changed since the last frame.
+    /// Rebuilds the layout when the index changed since the last frame, and refits the view if
+    /// the nodes or links changed and the user has not moved the view.
     fn follow(&mut self, workspace: &Workspace) {
         let revision = Some(workspace.index_revision());
         if self.revision != revision {
-            self.layout.update(&workspace.index().graph());
+            let changed = self.layout.update(&workspace.index().graph());
             self.revision = revision;
-            self.auto_fit = true;
+            self.auto_fit |= changed && !self.camera_moved;
         }
     }
 
@@ -279,6 +281,17 @@ impl GraphView {
         if self.auto_fit {
             self.fit();
             self.auto_fit = !self.layout.is_settled();
+        }
+    }
+
+    /// Applies the user's navigation, then a request to fit (the «Fit graph» button, Home): moving
+    /// the view stops fitting, and a request starts it again.
+    fn steer(&mut self, ui: &Ui, response: &Response, refit: bool) {
+        if self.navigate(ui, response) {
+            (self.auto_fit, self.camera_moved) = (false, true);
+        }
+        if refit {
+            (self.auto_fit, self.camera_moved) = (true, false);
         }
     }
 
@@ -654,12 +667,6 @@ fn disc_image() -> ColorImage {
 fn paint_focus_ring(painter: &Painter, p: &Palette, pane: Rect) {
     let ring = Stroke::new(FOCUS_RING_WIDTH, p.accent.to_color32());
     painter.rect_stroke(pane, CornerRadius::ZERO, ring, StrokeKind::Inside);
-}
-
-/// True when a key went down while the graph has the keyboard focus.
-fn key_pressed(ui: &Ui, response: &Response) -> bool {
-    let pressed = |event: &Event| matches!(event, Event::Key { pressed: true, .. });
-    response.has_focus() && ui.input(|input| input.events.iter().any(pressed))
 }
 
 /// Enter or Space (activate: open the list view) and Home (fit) pressed while the graph has
