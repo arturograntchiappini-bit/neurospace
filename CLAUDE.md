@@ -533,7 +533,7 @@ Ogni prompt di dispatch a un implementer contiene, oltre al template della skill
 
 ## Verità assoluta
 
-Ultimo aggiornamento: 2026-11-20 (M4 in chiusura; richiesta di pubblicazione su GitHub)
+Ultimo aggiornamento: 2026-11-20 (M4 completata e validata; segue la pubblicazione su GitHub)
 
 **Legenda stati.** **[Confermato]** = detto o approvato dall'utente. **[Proposto — applicato su delega]** = deciso dall'orchestratore in base alla delega totale del 2026-11-15, non approvato voce per voce dall'utente: vale finché l'utente non lo cambia. **[Aperto]** = non deciso. Ciò che non è verificato è scritto come «non verificato».
 
@@ -699,6 +699,26 @@ Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nel
   - Prova della GUI su Linux prima del piano: il binario `neurospace` compilato in `rust:1-bullseye` parte in un container `debian:bookworm` (glibc 2.36) sotto Xvfb con Mesa in software, apre un vault di tre note con il vetro simulato, stderr vuoto, si ferma con SIGTERM. Cattura guardata dall'orchestratore. Build di debug; il criterio di M4 si rifà con il binario di release.
   - Trovato: Debian 11 ha finito il supporto e i pacchetti di sicurezza non sono più sui mirror, quindi `apt` non installa nulla in `rust:1-bullseye`. La build non ne ha bisogno; la prova della GUI usa Debian 12.
   - Spec aggiornata: 9.4 (convergenza del grafo e costo del disegno a 10 000 note), 10 (script di release Linux, file `.desktop`, versione 0.1.0), 11.2 «M4» (criteri misurabili per grafo, primo giro, release).
+- 2026-11-20 — **M4 completata e validata** (Linux, prova Windows↔Linux, release 0.1.0): branch `feat/m4-linux-release`, worktree `.claude/worktrees/m4-linux-release`, testa `792055d` più questo documento. Ledger con ogni ruling: `.superpowers/sdd/2026-11-20-m4-linux-release/progress.md` del worktree.
+  - Cinque task:
+    - script di release Linux (`scripts/linux-release.sh` in `rust:1-bullseye`, glibc massima 2.31 controllata e rifiutata se non si trova, tarball di sei file, `dist` restituita al proprietario) e `packaging/linux/neurospace.desktop`;
+    - convergenza del grafo (repulsione e molle saturanti, raffreddamento lineare, riposo per regola in 246 passi);
+    - costo del disegno a 10 000 note (archi in una mesh, al massimo 7 000 archi e 500 etichette in vista, nodi come quadrati con una texture di disco: circa 1 MB di mesh per fotogramma invece di 12,7);
+    - primo giro lento: causa misurata, è la scansione all'accesso di Windows Defender (circa 12–15 ms alla prima lettura di ogni file appena scritto); sullo stesso vault già scansionato il primo giro è 4,6–5,6 s, entro 3 volte il test in processo; nessuna modifica al motore;
+    - README e CHANGELOG `[0.1.0] - 2026-11-20`.
+  - Revisione finale `opus` (sola lettura): «con correzioni», 0 critici, 4 importanti (picco di memoria 764 MB col grafo, fotogramma mediano non dimostrato, ogni cambio dell'indice riadattava e riscaldava il grafo, lanciatore dipendente da `~/.local/bin` nel `PATH`), 12 minori. Un'ondata di correzioni (5 commit), ri-revisione con 3 minori, un secondo giro piccolo (`4d64acf`), poi i numeri dei documenti (`792055d`).
+  - Validazione dell'orchestratore:
+    - Windows su `4d64acf`: `fmt`, `clippy -D warnings` e ogni suite puliti (ns-app 208 più le suite UI, ns-core 149, ns-sync 257, scenari 26, membership 18, ns-cli).
+    - Linux `rust:1-bullseye` (rustc 1.98) su `4d64acf`: `fmt`, `clippy` e ogni suite puliti da root (ns-app 209, ns-core 152, ns-sync 268), gli 11 test sui permessi passati da `nobody`.
+    - Tarball da `4d64acf`: glibc minima 2.30 per entrambi i binari; installato in `debian:bookworm` con i comandi del README (riga `sed` con `Exec` assoluto), `desktop-file-validate` senza avvisi, `ns --version` = `ns 0.1.0`, `neurospace` sotto Xvfb con Mesa in software apre un vault di tre note, stderr vuoto, si ferma con SIGTERM.
+    - Prova Windows↔Linux (su `c5a5514`, modalità `lan`, porta del container pubblicata, indirizzi scritti a mano nel ticket): primo sync in entrambi i versi sotto 1 s; modifiche Linux→Windows 0,21–0,36 s, Windows→Linux 0,46–0,51 s; una cancellazione su Windows finisce nel cestino del container; il segreto non compare in nessuno dei 4 log.
+    - Grafo a 10 000 note, test di release headless su Windows: primo fotogramma 540 ms, mediana 20 ms, riposo per regola a 5,86 s (limite 10 s); separazione dei grappoli 0,37 (limite 0,5).
+    - GUI di release in Linux (Xvfb, Mesa llvmpipe, `xdotool` dentro il container), 10 000 note, grafo aperto: picco 282 MB residenti (195 MB anonimi), nessuna crescita durante l'animazione (criterio < 600 MB). Su Windows, prima della correzione dei nodi, il picco era 764 MB.
+  - Non verificato:
+    - la memoria su Windows con il driver della GPU dopo la correzione dei nodi: la finestra dell'app è stata ridotta a icona tre volte durante le misure;
+    - il riposo per regola in una GUI con GPU vera: sotto llvmpipe l'animazione l'ha chiusa probabilmente il limite di 10 s;
+    - il file `.desktop` da un menu di una sessione desktop reale, Wayland, un display fisico;
+    - tutto ciò che il README elenca sotto «Not verified».
 - Rischio chiuso il 2026-11-17: il preset di rete di iroh che «non risultava mai online» su questa macchina era il firewall applicativo, non il codice né iroh.
 - Non verificabile in questo progetto: uso interattivo della GUI da parte di una persona. La GUI si verifica con test headless e con l'avvio del binario.
 
@@ -800,4 +820,16 @@ Formato: decisione — perché — costo se sbagliata.
   - CI GitHub Actions (fmt, clippy, test su Ubuntu e Windows) per un badge vero. Costo: minuti di Actions del piano privato dell'utente; si può disattivare.
   - Creare repository, release e topic richiede l'API di GitHub: `gh` non è installato e serve il login dell'utente (`gh auth login`, interattivo). Git ha già una credenziale per github.com, quindi il push funziona. L'orchestratore non usa la credenziale salvata per chiamare l'API. Costo: un passo dell'utente alla fine.
   - I commit portano l'identità git locale dell'utente (nome ed email): con il push finiscono nel repository privato dell'utente. Lo si dice all'utente prima del push.
+  - Aggiornamento: l'utente ha installato `gh` e fatto il login (2026-11-20). Il repository si crea solo al passo di pubblicazione, così il primo push contiene già README, licenza e CI. Costo: nessuno.
+- 2026-11-20 — **Rulings nate durante M4 e alla sua chiusura** (dettaglio e costo nel ledger di M4; spec 9.4 e 10 allineate):
+  - Raffreddamento 0,12 per passo, non 0,15: con 0,15 la separazione dei grappoli sale a 1,04, oltre il limite 0,5. Costo: meno margine sul limite di 10 s, sempre 246 passi.
+  - Al massimo 7 000 archi e 500 etichette in vista; l'etichetta della nota aperta si vede sempre. Costo: in una vista molto affollata si vedono meno etichette e collegamenti finché non si ingrandisce.
+  - Il test del fotogramma separa il primo fotogramma (costruzione del grafo, < 1 s) dall'animazione (mediana < 30 ms, somma × 1,5 < 10 s). Costo: aprire un grafo di 10 000 note può fermare la finestra fino a 1 s.
+  - Un cambio dell'indice che non tocca note né link non sveglia il grafo; la vista si riadatta solo se l'utente non l'ha mossa da quando il grafo è aperto o dall'ultimo «Adatta grafo». Nessun tasto ferma più l'adattamento. Costo: nessuno noto.
+  - Il primo giro lento è la scansione di Windows Defender, non il codice: nessuna modifica al motore, il README lo dice. Costo: su Windows il primo giro su un vault appena copiato resta di circa 2 minuti a 10 000 note.
+  - Le misure della GUI si spostano nel container Linux sotto Xvfb (l'utente riduceva a icona la finestra dell'app): il criterio di memoria è dimostrato su Linux con llvmpipe, non con il driver Windows. Costo: il picco su Windows potrebbe essere diverso.
+  - La finestra bloccata dopo riduzione a icona e ripristino si è vista solo con input sintetico e senza attivazione vera: non è trattata come difetto del prodotto. Costo: se lo incontra un utente, una segnalazione.
+  - Il «8 s» di apertura della revisione finale era il ciclo di attesa dell'orchestratore (tre campioni uguali a 2 s), non un difetto. Costo: nessuno.
+  - Le ri-revisioni del secondo giro piccolo e dei numeri dei documenti sono state sostituite dalla lettura del diff da parte dell'orchestratore. Costo: un difetto sottile arriva alla pubblicazione.
+  - Il README dice ancora «installed with the four commands above» mentre il blocco di installazione ha cinque righe: si corregge nel task 3 del piano GitHub, che riscrive il README. Costo: nessuno.
 - 2026-11-15 — **Domanda 7 (chi fa le prove a mano, connettività in M4).** Le prove «a mano» le esegue l'orchestratore con comandi; la GUI non è verificata da una persona e lo si dichiara; la prova Windows↔Linux usa un ticket con indirizzi e porta fissa; `internet` resta la modalità predefinita e il suo stato reale si registra in M2. — Docker è disponibile; mDNS non attraversa la rete di Docker. — Costo: se `internet` non funziona sulle reti dell'utente, il sync tra reti diverse non va finché non si indaga.
