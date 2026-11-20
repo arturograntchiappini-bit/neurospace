@@ -76,6 +76,78 @@ fn device_with_copy_of(first: &LocalReplica, vault: &Path, state: &Path) -> Repl
     device
 }
 
+/// How long `device` takes to handle everything `replica` holds that it lacks.
+fn timed_delivery(replica: &LocalReplica, device: &mut Replica) -> Duration {
+    let updates = replica
+        .doc
+        .updates_since(&device.local().doc.version())
+        .unwrap();
+    let start = Instant::now();
+    deliver(device, updates, replica.doc.version());
+    start.elapsed()
+}
+
+/// What the scale test measured.
+struct Timings {
+    first: Duration,
+    quiet: [Duration; 3],
+    one_change: Duration,
+    remote: Duration,
+}
+
+impl Timings {
+    fn report_and_check(mut self) {
+        let [a, b, c] = self.quiet;
+        eprintln!(
+            "scale: first={} quiet={},{},{} one_change={} remote={}",
+            ms(self.first),
+            ms(a),
+            ms(b),
+            ms(c),
+            ms(self.one_change),
+            ms(self.remote)
+        );
+        self.quiet.sort();
+        assert!(self.quiet[1] < Duration::from_millis(300), "quiet median");
+        assert!(self.one_change < Duration::from_millis(500), "one change");
+        assert!(self.remote < Duration::from_millis(500), "remote round");
+    }
+}
+
+/// Appends a line to one note of the vault at `root` and returns its path.
+fn edit_a_note(root: &Path) -> String {
+    let edited = note_rel(4242);
+    assert_eq!(edited, "f42/n4242.md");
+    fs::write(
+        root.join(&edited),
+        format!(
+            "{}edited
+",
+            note_text(4242)
+        ),
+    )
+    .unwrap();
+    edited
+}
+
+/// The edit reached the document of `replica` and the file of the other vault.
+fn assert_edit_arrived(replica: &LocalReplica, other_vault: &Path, edited: &str) {
+    let written = fs::read_to_string(other_vault.join(edited)).unwrap();
+    assert!(
+        written.ends_with(
+            "edited
+"
+        ),
+        "the other device has it"
+    );
+    let view = replica.doc.view();
+    let note = view.get(&NotePath::parse(edited).unwrap().key()).unwrap();
+    assert!(note.text.ends_with(
+        "edited
+"
+    ));
+}
+
 #[test]
 #[ignore = "scale timing; run in release"]
 fn should_reconcile_ten_thousand_notes_within_budget() {
@@ -86,7 +158,7 @@ fn should_reconcile_ten_thousand_notes_within_budget() {
     let mut replica = LocalReplica::open(vault, StateDir::at(state_dir.path()).unwrap()).unwrap();
 
     let first = timed(&mut replica);
-    let mut quiet = [
+    let quiet = [
         timed(&mut replica),
         timed(&mut replica),
         timed(&mut replica),
@@ -94,40 +166,16 @@ fn should_reconcile_ten_thousand_notes_within_budget() {
     let (b_vault, b_state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut other = device_with_copy_of(&replica, b_vault.path(), b_state.path());
 
-    let edited = note_rel(4242);
-    assert_eq!(edited, "f42/n4242.md");
-    let full = vault_dir.path().join(&edited);
-    fs::write(&full, format!("{}edited\n", note_text(4242))).unwrap();
+    let edited = edit_a_note(vault_dir.path());
     let one_change = timed(&mut replica);
+    let remote = timed_delivery(&replica, &mut other);
 
-    let updates = replica
-        .doc
-        .updates_since(&other.local().doc.version())
-        .unwrap();
-    let start = Instant::now();
-    deliver(&mut other, updates, replica.doc.version());
-    let remote = start.elapsed();
-
-    eprintln!(
-        "scale: first={} quiet={},{},{} one_change={} remote={}",
-        ms(first),
-        ms(quiet[0]),
-        ms(quiet[1]),
-        ms(quiet[2]),
-        ms(one_change),
-        ms(remote)
-    );
-    let written = fs::read_to_string(b_vault.path().join(&edited)).unwrap();
-    assert!(
-        written.ends_with("edited\n"),
-        "the other device has the edit"
-    );
-    assert!(remote < Duration::from_millis(500), "remote round");
-
-    let view = replica.doc.view();
-    let note = view.get(&NotePath::parse(&edited).unwrap().key()).unwrap();
-    assert!(note.text.ends_with("edited\n"));
-    quiet.sort();
-    assert!(quiet[1] < Duration::from_millis(300), "quiet median");
-    assert!(one_change < Duration::from_millis(500), "one change");
+    assert_edit_arrived(&replica, b_vault.path(), &edited);
+    let timings = Timings {
+        first,
+        quiet,
+        one_change,
+        remote,
+    };
+    timings.report_and_check();
 }

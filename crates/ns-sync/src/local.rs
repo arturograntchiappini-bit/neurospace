@@ -66,6 +66,8 @@ struct StageRecord {
     /// The document version right after the stage was persisted.
     version: Vec<u8>,
     doc_changed: bool,
+    /// Whether path claims were settled, which the steps of the pass do not cover.
+    claims_resolved: bool,
     scan_blocked: Vec<BlockedNote>,
     notes: usize,
     rejected_entries: usize,
@@ -136,10 +138,12 @@ impl LocalReplica {
         let mut total = Outcome::default();
         for _ in 0..MAX_PASSES {
             let steps = self.run_doc_stage()?;
+            let self_confirming = !self.stage.claims_resolved && confirms_itself(&steps);
             let pass = self.run_disk_stage(steps)?;
             let quiet = !pass.doc_changed && !pass.disk_changed;
+            let done = quiet || (self_confirming && pass.blocked.is_empty());
             total.absorb(pass);
-            if quiet {
+            if done {
                 break;
             }
         }
@@ -173,6 +177,7 @@ impl LocalReplica {
         let version = self.doc.version();
         self.stage = StageRecord {
             doc_changed: version != before,
+            claims_resolved: resolved.changed > 0,
             version,
             scan_blocked,
             notes,
@@ -265,6 +270,22 @@ impl LocalReplica {
             self.base.remove(old);
         }
     }
+}
+
+/// Whether a pass made of these steps, all carried out, leaves nothing for the next pass to do:
+/// a text edit that only enters the document, or a file written, created or trashed from a note
+/// the document already holds. The count of notes in the document is unchanged, so `Outcome::notes`
+/// stays right. shortcut: creations and tombstones in the document still get a confirming pass;
+/// allow them too if their latency matters, adjusting `notes`.
+fn confirms_itself(steps: &[Step]) -> bool {
+    steps.iter().all(|step| {
+        let edit_into_document = matches!(step.doc, Some(DocAction::Update { .. }));
+        let file_from_document = matches!(
+            step.disk,
+            Some(DiskAction::Replace { .. } | DiskAction::Create { .. } | DiskAction::Trash { .. })
+        );
+        (edit_into_document && step.disk.is_none()) || (file_from_document && step.doc.is_none())
+    })
 }
 
 /// The steps, and how many notes the document holds before they are applied.
@@ -591,6 +612,54 @@ mod tests {
         assert!(dirs.path(".neurospace").is_dir());
         assert_eq!(modified("base.json").unwrap(), base_time.unwrap());
         assert_eq!(modified("base.version").unwrap(), version_time.unwrap());
+    }
+
+    /// A round that ended without a confirming pass has nothing left to do.
+    fn assert_fixed_point(replica: &mut LocalReplica) {
+        assert!(replica.run_doc_stage().unwrap().is_empty());
+        assert!(settled(&replica.reconcile().unwrap()));
+    }
+
+    #[test]
+    fn should_skip_the_confirming_pass_after_a_local_edit() {
+        let dirs = Dirs::new(&[("a.md", "A\n"), ("b.md", "B\n")]);
+        let mut replica = dirs.open();
+        replica.reconcile().unwrap();
+        dirs.write("a.md", "A2\n");
+        let outcome = replica.reconcile().unwrap();
+        assert!(outcome.doc_changed && !outcome.disk_changed);
+        assert_eq!(outcome.passes, 1);
+        assert_eq!(&*note(&replica, "a.md").unwrap().text, "A2\n");
+        assert_fixed_point(&mut replica);
+    }
+
+    #[test]
+    fn should_skip_the_confirming_pass_after_remote_edits_creates_and_deletes() {
+        let dirs = Dirs::new(&[("a.md", "A\n"), ("b.md", "B\n")]);
+        let mut replica = dirs.open();
+        replica.reconcile().unwrap();
+        let b = note(&replica, "b.md").unwrap();
+        edit_remotely(&mut replica, "a.md", "A2\n");
+        replica.doc.create_note(&np("d/c.md"), "C\n").unwrap();
+        let outcome = replica.reconcile().unwrap();
+        assert!(outcome.disk_changed);
+        assert_eq!(outcome.passes, 1);
+        expect_files(
+            &replica,
+            &[("a.md", "A2\n"), ("b.md", "B\n"), ("d/c.md", "C\n")],
+        );
+        assert_fixed_point(&mut replica);
+        replica.doc.tombstone(&b.id).unwrap();
+        assert_eq!(replica.reconcile().unwrap().passes, 1);
+        expect_files(&replica, &[("a.md", "A2\n"), ("d/c.md", "C\n")]);
+        assert_fixed_point(&mut replica);
+    }
+
+    #[test]
+    fn should_confirm_again_when_a_step_touches_both_document_and_disk() {
+        let (_dirs, mut replica) = both_changed_setup();
+        assert!(replica.reconcile().unwrap().passes > 1);
+        assert_two_versions_kept(&replica);
     }
 
     #[test]
