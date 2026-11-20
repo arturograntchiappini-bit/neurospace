@@ -242,7 +242,7 @@ claude mcp add neurospace -- ns --vault /path/to/vault mcp
 }
 ```
 
-The server is a local stdio process, so it needs no public address and no account. A remote (HTTP) server and claude.ai custom connectors are not offered (see [Not in version 1](#not-in-version-1)).
+The two snippets follow each client's documented format; neither client has been tried against `ns mcp` yet. The server is a local stdio process, so it needs no public address and no account. A remote (HTTP) server and claude.ai custom connectors are not offered (see [Not in version 1](#not-in-version-1)).
 
 ## Sync between devices
 
@@ -398,6 +398,7 @@ All of these were taken on a development machine with other applications running
 - The Linux GUI ran only under Xvfb with software OpenGL, not on a physical display, under Wayland or from a desktop menu.
 - The folder dialog («Open a folder») was compiled but never opened.
 - Windows 10 (only Windows 11 was tried).
+- The MCP server with the real Claude Code and Claude Desktop clients: it was tested with hand-written JSON-RPC requests and with the `rmcp` test client.
 - The `internet` mode between two real different networks, and mDNS between two real machines.
 - Sync started from the GUI between two real machines: the GUI tests use a fake sync control and never start the engine or touch the network.
 - The graph's memory on Windows after the node drawing change, and its rest by the layout's own rule in a GUI with a hardware GPU (shown only by the headless release tests; under Linux software OpenGL the 10-second cap ended the animation).
