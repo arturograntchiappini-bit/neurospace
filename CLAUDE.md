@@ -689,6 +689,11 @@ Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nel
     - due avvii su sei sono rimasti su «Opening the vault…» per 60–80 s, entrambi al primo avvio dopo file appena copiati o un binario appena compilato, con CPU del processo quasi nulla; compatibile con la scansione dell'antivirus, non dimostrato;
     - un test a due processi della CLI è fallito una volta su circa 120 esecuzioni, causa non trovata;
     - le misure sono state prese con altre applicazioni attive (carico fino al 79 %), non su una macchina a riposo.
+- 2026-11-20 — `graphify --update` dopo il merge di M3b (subagente `haiku`, estrazione semantica dei documenti cambiati con subagenti `haiku`): da 3498 nodi, 9755 archi e 136 comunità a 3989 nodi, 10 935 archi e 157 comunità.
+  - La prima scrittura è stata rifiutata dalla guardia di restringimento e non forzata: quattro nodi in uscita avevano ancora il loro testo nei documenti (tre di `CLAUDE.md`, `blake3` della spec). Rifatta l'estrazione dei soli due documenti con quei quattro ID obbligatori; poi la guardia è stata forzata solo entro un elenco ammesso: 31 nodi tolti (24 segnaposto senza file, 5 funzioni tolte da M3b, `replica` della spec, `REPULSION` mancato dall'estrazione: la costante esiste ancora).
+  - Verificato dall'orchestratore in `graph.json`: conteggi, i quattro ID presenti, nessun nodo da `.claude/`, `target/`, `.superpowers/`, `.worktrees/`, `assets/logo/`, nessun ID con il vecchio nome.
+  - Non fatto: etichette delle comunità scritte da un modello (restano automatiche); graphifyy 0.9.93 più vecchio della skill 0.9.105, non aggiornato; `cost.json` registra 0 token.
+  - Il worktree `.claude/worktrees/m3b-scale` resta sul disco (come quelli di M1–M3); il ledger è copiato nella radice.
 - Rischio chiuso il 2026-11-17: il preset di rete di iroh che «non risultava mai online» su questa macchina era il firewall applicativo, non il codice né iroh.
 - Non verificabile in questo progetto: uso interattivo della GUI da parte di una persona. La GUI si verifica con test headless e con l'avvio del binario.
 
