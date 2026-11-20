@@ -10,11 +10,8 @@ use ns_core::Graph;
 
 use super::graph_viewport::Bounds;
 
-/// Above this many nodes the layout is not simulated: one step takes hundreds of milliseconds.
-///
-/// shortcut: the spiral layout stands in above the limit; M3b replaces the quadratic repulsion
-/// with Barnes-Hut and raises the limit.
-pub const SIMULATION_NODE_LIMIT: usize = 2000;
+/// Above this many nodes the layout is not simulated: the spiral layout stands in.
+pub const SIMULATION_NODE_LIMIT: usize = 10_000;
 /// After a wake the simulation takes at most this many steps, then counts as settled, so that a
 /// graph that keeps jittering never repaints for ever.
 pub const MAX_STEPS_PER_WAKE: usize = 1500;
@@ -22,6 +19,11 @@ const SPIRAL_SPACING: f32 = 30.0;
 const GOLDEN_ANGLE: f32 = 2.39996;
 const REPULSION: f32 = 2000.0;
 const MIN_DISTANCE_SQUARED: f32 = 1.0;
+/// Barnes-Hut: a cell counts as one body when its size over its distance is below this.
+const OPENING_ANGLE: f32 = 0.8;
+/// Cells stop splitting here. shortcut: bodies closer than the root size over 2^16 share a leaf
+/// and repel pairwise; only thousands of nodes dragged onto one spot would make that slow.
+const MAX_TREE_DEPTH: usize = 16;
 const SPRING_STIFFNESS: f32 = 0.02;
 const SPRING_REST_LENGTH: f32 = 60.0;
 const CENTRE_PULL: f32 = 0.002;
@@ -50,6 +52,147 @@ pub struct Layout {
     pinned: Option<usize>,
     last_move: f32,
     steps_since_wake: usize,
+}
+
+/// The push of `mass` bodies at `other` on a body at `at`.
+fn repulsion(at: Point, other: Point, mass: f32) -> Point {
+    let (dx, dy) = (at[0] - other[0], at[1] - other[1]);
+    let squared = (dx * dx + dy * dy).max(MIN_DISTANCE_SQUARED);
+    let push = REPULSION * mass / (squared * squared.sqrt());
+    [dx * push, dy * push]
+}
+
+/// An axis-aligned square: its lowest corner and its side.
+#[derive(Clone, Copy)]
+struct Square {
+    low: Point,
+    size: f32,
+}
+
+/// A square of the quadtree: its bodies as one (count, centre of mass) and, below it, either its
+/// quadrants or, at a leaf, the bodies themselves.
+struct Cell {
+    centre_of_mass: Point,
+    count: f32,
+    square: Square,
+    children: Vec<usize>,
+    bodies: Vec<(usize, Point)>,
+}
+
+impl Cell {
+    fn contains(&self, at: Point) -> bool {
+        let Square { low, size } = self.square;
+        (0..2).all(|axis| low[axis] <= at[axis] && at[axis] <= low[axis] + size)
+    }
+
+    /// True when a body at `at` may treat the whole cell as one body.
+    fn is_far_from(&self, at: Point) -> bool {
+        let (dx, dy) = (
+            at[0] - self.centre_of_mass[0],
+            at[1] - self.centre_of_mass[1],
+        );
+        let reach = OPENING_ANGLE * OPENING_ANGLE * (dx * dx + dy * dy);
+        !self.contains(at) && self.square.size * self.square.size < reach
+    }
+}
+
+/// Barnes-Hut quadtree over the node positions; cell 0 is the root. Built in node order, with
+/// no randomness, so the same positions give the same forces.
+struct QuadTree {
+    cells: Vec<Cell>,
+}
+
+impl QuadTree {
+    fn build(positions: &[Point]) -> QuadTree {
+        let mut tree = QuadTree { cells: Vec::new() };
+        let Some(&first) = positions.first() else {
+            return tree;
+        };
+        let (low, high) = positions.iter().fold((first, first), |(low, high), p| {
+            (
+                [low[0].min(p[0]), low[1].min(p[1])],
+                [high[0].max(p[0]), high[1].max(p[1])],
+            )
+        });
+        let size = (high[0] - low[0]).max(high[1] - low[1]);
+        let root = Square { low, size };
+        tree.add(positions.iter().copied().enumerate().collect(), root, 0);
+        tree
+    }
+
+    /// Adds the cell holding `bodies` inside `square`; returns its index.
+    fn add(&mut self, bodies: Vec<(usize, Point)>, square: Square, depth: usize) -> usize {
+        let count = bodies.len() as f32;
+        let sum = bodies
+            .iter()
+            .fold([0.0; 2], |sum, (_, p)| [sum[0] + p[0], sum[1] + p[1]]);
+        let id = self.cells.len();
+        self.cells.push(Cell {
+            centre_of_mass: [sum[0] / count, sum[1] / count],
+            count,
+            square,
+            children: Vec::new(),
+            bodies: Vec::new(),
+        });
+        if bodies.len() > 1 && depth < MAX_TREE_DEPTH {
+            self.cells[id].children = self.add_quadrants(bodies, square, depth);
+        } else {
+            self.cells[id].bodies = bodies;
+        }
+        id
+    }
+
+    fn add_quadrants(
+        &mut self,
+        bodies: Vec<(usize, Point)>,
+        square: Square,
+        depth: usize,
+    ) -> Vec<usize> {
+        let Square { low, size } = square;
+        let half = size / 2.0;
+        let mut quadrants: [Vec<(usize, Point)>; 4] = Default::default();
+        for body in bodies {
+            let (right, below) = (body.1[0] >= low[0] + half, body.1[1] >= low[1] + half);
+            quadrants[usize::from(right) + 2 * usize::from(below)].push(body);
+        }
+        let mut children = Vec::new();
+        for (q, members) in quadrants.into_iter().enumerate() {
+            if !members.is_empty() {
+                let low = [
+                    low[0] + half * (q % 2) as f32,
+                    low[1] + half * (q / 2) as f32,
+                ];
+                children.push(self.add(members, Square { low, size: half }, depth + 1));
+            }
+        }
+        children
+    }
+
+    /// The push on body `body` (its index and position) from every other body. `stack` is
+    /// scratch space, reused between calls.
+    fn push_on(&self, body: (usize, Point), stack: &mut Vec<usize>) -> Point {
+        let (me, at) = body;
+        let mut total = [0.0; 2];
+        let mut add = |push: Point| {
+            total[0] += push[0];
+            total[1] += push[1];
+        };
+        stack.clear();
+        stack.push(0);
+        while let Some(id) = stack.pop() {
+            let cell = &self.cells[id];
+            if cell.children.is_empty() {
+                for &(_, other) in cell.bodies.iter().filter(|(j, _)| *j != me) {
+                    add(repulsion(at, other, 1.0));
+                }
+            } else if cell.is_far_from(at) {
+                add(repulsion(at, cell.centre_of_mass, cell.count));
+            } else {
+                stack.extend(cell.children.iter().rev());
+            }
+        }
+        total
+    }
 }
 
 /// Where node `i` starts: a sunflower spiral, so that no two nodes begin on top of each other.
@@ -155,18 +298,13 @@ impl Layout {
         self.last_move
     }
 
-    /// shortcut: all pairs, quadratic. Fine for a few thousand notes; use Barnes-Hut beyond.
     fn repel(&self, force: &mut [Point]) {
-        for (i, a) in self.positions.iter().enumerate() {
-            for (j, b) in self.positions.iter().enumerate().skip(i + 1) {
-                let (dx, dy) = (a[0] - b[0], a[1] - b[1]);
-                let squared = (dx * dx + dy * dy).max(MIN_DISTANCE_SQUARED);
-                let push = REPULSION / (squared * squared.sqrt());
-                force[i][0] += dx * push;
-                force[i][1] += dy * push;
-                force[j][0] -= dx * push;
-                force[j][1] -= dy * push;
-            }
+        let tree = QuadTree::build(&self.positions);
+        let mut stack = Vec::new();
+        for (i, total) in force.iter_mut().enumerate() {
+            let push = tree.push_on((i, self.positions[i]), &mut stack);
+            total[0] += push[0];
+            total[1] += push[1];
         }
     }
 
@@ -221,6 +359,12 @@ impl Layout {
     /// `MAX_STEPS_PER_WAKE` steps have run since the layout was last woken.
     pub fn is_settled(&self) -> bool {
         self.last_move < SETTLED_BELOW || self.steps_since_wake >= MAX_STEPS_PER_WAKE
+    }
+
+    /// Counts the layout as settled until the next wake, whatever the nodes still do. The view
+    /// uses it to cap the wall time of a wake, which the step cap alone cannot bound.
+    pub fn rest(&mut self) {
+        self.steps_since_wake = MAX_STEPS_PER_WAKE;
     }
 
     /// True when the graph is too large to simulate (`SIMULATION_NODE_LIMIT`): the nodes stay on
@@ -327,6 +471,19 @@ mod tests {
                     to: (*to).to_owned(),
                 })
                 .collect(),
+        }
+    }
+
+    impl Layout {
+        /// Every pair pushes apart: the reference the quadtree approximates.
+        fn repel_exact(&self, force: &mut [Point]) {
+            for (i, a) in self.positions.iter().enumerate() {
+                for (j, b) in self.positions.iter().enumerate().skip(i + 1) {
+                    let push = repulsion(*a, *b, 1.0);
+                    force[i] = [force[i][0] + push[0], force[i][1] + push[1]];
+                    force[j] = [force[j][0] - push[0], force[j][1] - push[1]];
+                }
+            }
         }
     }
 
@@ -498,6 +655,98 @@ mod tests {
         graph
     }
 
+    /// `count` nodes at pseudo-random positions in a 2000 by 2000 square, the same every run.
+    fn scattered(count: usize) -> Layout {
+        let mut layout = Layout::new(&unlinked(count));
+        let mut state = 11_u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 40) as f32 / (1_u64 << 24) as f32 * 2000.0
+        };
+        for i in 0..count {
+            layout.set_position(i, [next(), next()]);
+        }
+        layout
+    }
+
+    #[test]
+    fn should_approximate_exact_repulsion() {
+        let layout = scattered(500);
+        let (mut approximate, mut exact) = (vec![[0.0; 2]; 500], vec![[0.0; 2]; 500]);
+        layout.repel(&mut approximate);
+        layout.repel_exact(&mut exact);
+        let (mut off, mut size) = (0.0_f32, 0.0_f32);
+        for i in 0..500 {
+            off += (approximate[i][0] - exact[i][0]).hypot(approximate[i][1] - exact[i][1]);
+            size += exact[i][0].hypot(exact[i][1]);
+        }
+        // Mean error over mean force: a node whose pushes nearly cancel has a tiny exact force,
+        // and dividing by that per node would measure the cancellation, not the approximation.
+        assert!(off / size < 0.03, "mean relative error {}", off / size);
+    }
+
+    #[test]
+    fn should_aggregate_distant_bodies_instead_of_pushing_exactly() {
+        let layout = scattered(500);
+        let (mut approximate, mut exact) = (vec![[0.0; 2]; 500], vec![[0.0; 2]; 500]);
+        layout.repel(&mut approximate);
+        layout.repel_exact(&mut exact);
+        assert!(approximate != exact, "the tree never aggregated");
+        let tree = QuadTree::build(&(0..500).map(|i| layout.position(i)).collect::<Vec<_>>());
+        let root = &tree.cells[0];
+        assert_eq!(root.count, 500.0);
+        let far = [1.0e6, 1.0e6];
+        assert!(
+            root.is_far_from(far),
+            "a far point must see the root as one body"
+        );
+        assert!(
+            !root.is_far_from(layout.position(0)),
+            "a body inside never aggregates its own cell"
+        );
+    }
+
+    #[test]
+    fn should_step_two_equal_layouts_to_bitwise_equal_positions() {
+        let graph = random_graph(200, 300);
+        let (mut first, mut second) = (Layout::new(&graph), Layout::new(&graph));
+        for _ in 0..20 {
+            first.step();
+            second.step();
+        }
+        for i in 0..200 {
+            let bits = |layout: &Layout| layout.position(i).map(f32::to_bits);
+            assert_eq!(bits(&first), bits(&second), "node {i}");
+        }
+    }
+
+    #[test]
+    fn should_not_repel_a_node_from_itself() {
+        let layout = scattered(1);
+        let mut force = vec![[0.0; 2]];
+        layout.repel(&mut force);
+        assert_eq!(force, [[0.0; 2]]);
+    }
+
+    #[test]
+    fn should_step_nodes_that_share_one_position() {
+        let mut layout = Layout::new(&unlinked(100));
+        for i in 0..100 {
+            layout.set_position(i, [5.0, 5.0]);
+        }
+        layout.step();
+        let finite = (0..100).all(|i| layout.position(i).iter().all(|c| c.is_finite()));
+        assert!(finite);
+    }
+
+    #[test]
+    fn should_simulate_graphs_up_to_ten_thousand_nodes() {
+        assert!(!Layout::new(&unlinked(10_000)).is_simplified());
+        assert!(Layout::new(&unlinked(10_001)).is_simplified());
+    }
+
     #[test]
     fn should_not_simulate_above_the_node_limit() {
         let mut layout = Layout::new(&unlinked(SIMULATION_NODE_LIMIT + 1));
@@ -545,6 +794,16 @@ mod tests {
         }
         layout.set_position(0, [900.0, 900.0]);
         assert!(!layout.is_settled());
+    }
+
+    #[test]
+    fn should_be_settled_after_rest_until_the_next_wake() {
+        let mut layout = Layout::new(&random_graph(30, 45));
+        assert!(!layout.is_settled());
+        layout.rest();
+        assert!(layout.is_settled());
+        layout.set_position(0, [900.0, 900.0]);
+        assert!(!layout.is_settled(), "a drag wakes a resting layout");
     }
 
     #[test]

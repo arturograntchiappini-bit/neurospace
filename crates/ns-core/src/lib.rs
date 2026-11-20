@@ -3,6 +3,7 @@
 mod error;
 mod graph;
 mod index;
+mod load_cache;
 mod markdown;
 pub mod ops;
 mod path;
@@ -13,7 +14,8 @@ mod watch;
 
 pub use error::{CoreError, Result};
 pub use graph::{Graph, GraphEdge, GraphNode, MAX_GRAPH_DEPTH};
-pub use index::{Backlink, Index, NoteEntry, OutLink, TagCount, new_note_path};
+pub use index::{Backlink, Index, IndexDelta, NoteEntry, OutLink, TagCount, new_note_path};
+pub use load_cache::{LoadCache, LoadDelta, RACY_WINDOW};
 pub use markdown::{
     ATTACHMENT_EXTENSIONS, Link, LinkKind, Parsed, is_attachment_target, markdown_note_target,
     parse,

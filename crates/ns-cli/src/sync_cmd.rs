@@ -70,10 +70,7 @@ fn report_applied(verb: &str, applied: Applied, json: bool) -> Result<(), CliErr
 
 fn status(state: &StateDir, json: bool) -> Result<(), CliError> {
     match control::status(state, unix_now())? {
-        Some(status) => {
-            let mode = state.config()?.mode;
-            render::emit(json, &status, |status| status_text(status, mode))
-        }
+        Some(status) => render::emit(json, &status, status_text),
         None => render::emit(json, &json!({ "running": false }), |_| {
             "engine not running\n".to_owned()
         }),
@@ -82,19 +79,44 @@ fn status(state: &StateDir, json: bool) -> Result<(), CliError> {
 
 const NO_RELAY_YET: &str = "relay: none yet (if this lasts more than a minute, a firewall may be blocking ns; allow it outbound)\n";
 
-fn status_text(status: &Status, mode: NetMode) -> String {
+fn mode_name(mode: NetMode) -> &'static str {
+    match mode {
+        NetMode::Internet => "internet",
+        NetMode::Lan => "lan",
+    }
+}
+
+fn status_text(status: &Status) -> String {
     let mut text = format!("device {}\n", status.device_id);
+    if let Some(mode) = status.mode {
+        text += &format!("mode: {}\n", mode_name(mode));
+    }
+    if status.busy {
+        text += "a sync round is running\n";
+    }
     if status.addresses.is_empty() {
         text += "listening on: (no address yet)\n";
     } else {
         text += &format!("listening on {}\n", status.addresses.join(", "));
     }
-    match (&status.relay, mode) {
+    match (&status.relay, status.mode) {
         (Some(relay), _) => text += &format!("relay: {relay}\n"),
-        (None, NetMode::Internet) => text += NO_RELAY_YET,
-        (None, NetMode::Lan) => {}
+        (None, Some(NetMode::Internet)) => text += NO_RELAY_YET,
+        (None, _) => {}
     }
     text += &format!("notes {}\n", status.notes);
+    text += &peers_and_blocked_text(status);
+    for notice in &status.notices {
+        text += &format!("notice: {notice}\n");
+    }
+    if let Some(error) = &status.last_error {
+        text += &format!("last error: {error}\n");
+    }
+    text
+}
+
+fn peers_and_blocked_text(status: &Status) -> String {
+    let mut text = String::new();
     for peer in &status.peers {
         let state = if peer.connected {
             "connected"
@@ -105,9 +127,6 @@ fn status_text(status: &Status, mode: NetMode) -> String {
     }
     for note in &status.blocked {
         text += &format!("blocked {}: {}\n", note.path, note.reason);
-    }
-    if let Some(error) = &status.last_error {
-        text += &format!("last error: {error}\n");
     }
     text
 }
@@ -353,7 +372,7 @@ mod tests {
 
     #[test]
     fn should_say_so_in_the_text_status_when_there_is_no_address_yet() {
-        let text = status_text(&Status::default(), NetMode::Lan);
+        let text = status_text(&Status::default());
         assert!(text.contains("listening on: (no address yet)\n"), "{text}");
     }
 
@@ -361,22 +380,31 @@ mod tests {
     fn should_show_the_relay_in_internet_mode() {
         let status = Status {
             relay: Some("https://relay.example./".into()),
+            mode: Some(NetMode::Internet),
             ..Status::default()
         };
-        let text = status_text(&status, NetMode::Internet);
+        let text = status_text(&status);
         assert!(text.contains("relay: https://relay.example./\n"), "{text}");
     }
 
     #[test]
     fn should_warn_about_a_firewall_when_internet_mode_has_no_relay_yet() {
-        let text = status_text(&Status::default(), NetMode::Internet);
+        let status = Status {
+            mode: Some(NetMode::Internet),
+            ..Status::default()
+        };
+        let text = status_text(&status);
         let line = "relay: none yet (if this lasts more than a minute, a firewall may be blocking ns; allow it outbound)\n";
         assert!(text.contains(line), "{text}");
     }
 
     #[test]
     fn should_print_nothing_about_the_relay_in_lan_mode() {
-        let text = status_text(&Status::default(), NetMode::Lan);
+        let status = Status {
+            mode: Some(NetMode::Lan),
+            ..Status::default()
+        };
+        let text = status_text(&status);
         assert!(!text.contains("relay"), "{text}");
     }
 }

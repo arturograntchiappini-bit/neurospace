@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{Key, Modifiers};
+use eframe::egui::{Key, Modifiers, Rect, Role, Shape};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use ns_app::app::NeurospaceApp;
@@ -72,6 +72,90 @@ fn should_open_note_when_clicked_in_tree() {
     let mut f = open_fixture();
     click_label(&mut f.harness, "a");
     assert_eq!(open_path(&f.harness).as_deref(), Some("a.md"));
+}
+
+#[test]
+fn should_open_a_note_of_a_large_folder_after_expanding_it() {
+    let scratch = tempfile::tempdir().unwrap();
+    let vault = make_vault(scratch.path());
+    fs::create_dir_all(vault.join("big")).unwrap();
+    for number in 0..3000 {
+        fs::write(vault.join(format!("big/n{number:04}.md")), "x").unwrap();
+    }
+    let (mut harness, _dir) = harness(Some(&vault));
+    run_until(&mut harness, "vault screen", |app| {
+        app.screen_name() == "vault"
+    });
+    harness.run();
+    assert!(harness.query_by_label("n0000").is_none());
+    click_label(&mut harness, "big");
+    click_label(&mut harness, "n0000");
+    assert_eq!(open_path(&harness).as_deref(), Some("big/n0000.md"));
+    assert!(harness.query_by_label("n2999").is_none(), "drew every row");
+}
+
+#[test]
+fn should_toggle_a_focused_folder_with_enter() {
+    let mut f = open_fixture();
+    assert!(f.harness.query_by_label("c").is_none());
+    focus_row(&mut f.harness, "sub");
+    press_enter(&mut f.harness);
+    f.harness.get_by_label("c");
+    press_enter(&mut f.harness);
+    assert!(f.harness.query_by_label("c").is_none());
+}
+
+/// The folder row's role, whether it reads as expanded, and whether it carries a toggle state.
+fn folder_node(harness: &Harness<'static, NeurospaceApp>) -> (Role, Option<bool>, bool) {
+    let node = harness.get_by_label("sub").accesskit_node();
+    let data = node.data();
+    (data.role(), data.is_expanded(), data.toggled().is_some())
+}
+
+#[test]
+fn should_announce_a_folder_row_as_a_disclosure_row_without_a_toggle_state() {
+    let mut f = open_fixture();
+    focus_row(&mut f.harness, "sub");
+    assert_eq!(
+        folder_node(&f.harness),
+        (Role::DisclosureTriangle, Some(false), false)
+    );
+    press_enter(&mut f.harness);
+    assert_eq!(
+        folder_node(&f.harness),
+        (Role::DisclosureTriangle, Some(true), false)
+    );
+    f.harness.key_press(Key::Space);
+    f.harness.run();
+    assert_eq!(
+        folder_node(&f.harness),
+        (Role::DisclosureTriangle, Some(false), false)
+    );
+}
+
+#[test]
+fn should_close_every_folder_when_another_vault_opens() {
+    let mut f = open_fixture();
+    click_label(&mut f.harness, "sub");
+    f.harness.get_by_label("c");
+    click_label(&mut f.harness, "Menu");
+    click_label(&mut f.harness, "Open another vault");
+    assert_eq!(f.harness.state().screen_name(), "welcome");
+    type_into(
+        &mut f.harness,
+        "Vault folder path",
+        &f.vault.to_string_lossy(),
+    );
+    f.harness.get_by_label("Open").click();
+    run_until(&mut f.harness, "vault screen", |app| {
+        app.screen_name() == "vault"
+    });
+    f.harness.run();
+    f.harness.get_by_label("sub");
+    assert!(
+        f.harness.query_by_label("c").is_none(),
+        "folder stayed open"
+    );
 }
 
 #[test]
@@ -281,6 +365,47 @@ fn should_show_word_count_and_ignored_files() {
 fn focus_row(harness: &mut Harness<'static, NeurospaceApp>, label: &str) {
     harness.get_by_label(label).focus();
     harness.run();
+}
+
+/// Where the text `text` was painted inside `row`: the left edge of the first matching glyph run.
+fn painted_text_x(harness: &Harness<'static, NeurospaceApp>, text: &str, row: Rect) -> f32 {
+    fn find(shape: &Shape, text: &str, row: Rect) -> Option<f32> {
+        match shape {
+            Shape::Text(run) if run.galley.text() == text && row.contains(run.pos) => {
+                Some(run.pos.x)
+            }
+            Shape::Vec(shapes) => shapes.iter().find_map(|inner| find(inner, text, row)),
+            _ => None,
+        }
+    }
+    let shapes = &harness.output().shapes;
+    shapes
+        .iter()
+        .find_map(|clipped| find(&clipped.shape, text, row))
+        .unwrap_or_else(|| panic!("no text {text:?} painted in the row {row:?}"))
+}
+
+#[test]
+fn should_align_row_names_to_the_left_one_indent_per_level() {
+    let mut f = open_fixture();
+    click_label(&mut f.harness, "sub");
+    let spacing = f.harness.ctx.global_style().spacing.clone();
+    let name_offset = |f: &Fixture, label: &str| {
+        let row = f.harness.get_by_label(label).rect();
+        painted_text_x(&f.harness, label, row) - row.min.x
+    };
+    // Inside a row: button padding, the marker slot, the gap, then the name.
+    let before_name = spacing.button_padding.x + spacing.icon_width + spacing.icon_spacing;
+    for label in ["a", "sub", "c"] {
+        let offset = name_offset(&f, label);
+        assert!(
+            (offset - before_name).abs() < 1.0,
+            "{label}: name starts {offset} into its row, expected {before_name}"
+        );
+    }
+    let row_x = |f: &Fixture, label: &str| f.harness.get_by_label(label).rect().min.x;
+    let indent = row_x(&f, "c") - row_x(&f, "sub");
+    assert!((indent - spacing.indent).abs() < 1.0, "indent {indent}");
 }
 
 #[test]

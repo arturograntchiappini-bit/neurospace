@@ -213,6 +213,12 @@ fn status_sections(ui: &mut Ui, p: &Palette, status: &Status) {
     if let Some(relay) = &status.relay {
         ui.label(format!("Relay: {relay}"));
     }
+    if status.busy {
+        note(ui, p, "Syncing now; this list may be a few seconds behind");
+    }
+    for notice in &status.notices {
+        note(ui, p, notice);
+    }
     blocked_section(ui, p, status);
 }
 

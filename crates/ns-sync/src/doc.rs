@@ -3,10 +3,15 @@
 //! Layout: root map `paths` (note id to display path), root map `tombs`
 //! (`<note id>:<hex content hash>` to `true`) and one root text `t:<note id>` per note.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
+use std::sync::Arc;
 
-use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, UpdateOptions, VersionVector};
+use loro::{
+    ContainerID, ContainerType, ExportMode, JsonMapOp, JsonOpContent, JsonSchema, LoroDoc, LoroMap,
+    LoroValue, UpdateOptions, VersionVector,
+};
 use ns_core::{NoteKey, NotePath};
 
 use crate::error::{Result, SyncError};
@@ -16,6 +21,10 @@ const MAX_RESOLVE_ROUNDS: usize = 16;
 // Mirrors the per-component limit of `NotePath::parse` (spec section 5.2).
 const MAX_COMPONENT_BYTES: usize = 255;
 const NOTE_ID_LEN: usize = 32;
+// Measured (release, 10 KB notes): listing the changed notes costs about 1 ms per edited note and
+// grows faster than linearly with the size of a new text, while recomputing a note costs about
+// 30 us. Past this many new operations a full rebuild is cheaper than listing them.
+const MAX_DIFF_ATOMS: usize = 20_000;
 
 /// A 32-byte content hash.
 pub type Hash32 = [u8; 32];
@@ -64,8 +73,8 @@ pub struct NoteView {
     pub id: NoteId,
     /// Its display path.
     pub path: NotePath,
-    /// Its text.
-    pub text: String,
+    /// Its text, shared with the document's cache.
+    pub text: Arc<str>,
     /// The hash of `text`.
     pub hash: Hash32,
 }
@@ -79,15 +88,46 @@ pub struct Resolved {
     pub settled: bool,
 }
 
-/// The CRDT document that mirrors the notes of one replica.
+/// What the document knows about one note's text (spec section 8.4, cached view).
+struct CachedNote {
+    text: Arc<str>,
+    hash: Hash32,
+    /// Whether a tombstone matches `hash`.
+    dead: bool,
+}
+
+/// Per-note cache plus the document version it reflects; `None` means nothing is cached yet.
+#[derive(Default)]
+struct ViewCache {
+    version: Option<VersionVector>,
+    /// Operations in the document when the cache last reflected it.
+    atoms: usize,
+    notes: HashMap<NoteId, CachedNote>,
+    #[cfg(test)]
+    recomputed: usize,
+    #[cfg(test)]
+    diffs: usize,
+}
+
+/// The CRDT document that mirrors the notes of one replica. It is `Send` but not `Sync` (the view
+/// cache is a `RefCell`): keep it on one thread at a time.
 pub struct SyncDoc {
     doc: LoroDoc,
+    cache: RefCell<ViewCache>,
 }
 
 impl Default for SyncDoc {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// How many operations a document at `version` holds, counted from the version vector.
+fn atom_count(version: &VersionVector) -> usize {
+    version
+        .values()
+        .map(|&counter| usize::try_from(counter).unwrap_or(0))
+        .sum()
 }
 
 fn tomb_key(id: &NoteId, hash: &Hash32) -> String {
@@ -99,6 +139,33 @@ fn parse_entry(key: &str, value: &LoroValue) -> Option<(NoteId, NotePath)> {
         return None;
     };
     Some((NoteId::parse(key)?, NotePath::parse(path).ok()?))
+}
+
+/// The notes whose cached entry the operations of a change range may have invalidated: a changed
+/// text `t:<id>` or a changed tombstone `<id>:<hash>`. `None` when anything is not of that shape:
+/// the cache is then rebuilt in full rather than trusted.
+fn changed_notes(range: &JsonSchema) -> Option<Vec<NoteId>> {
+    let mut ids = Vec::new();
+    for op in range.changes.iter().flat_map(|change| &change.ops) {
+        let ContainerID::Root {
+            name,
+            container_type,
+        } = &op.container
+        else {
+            return None;
+        };
+        match (name.as_str(), container_type, &op.content) {
+            ("paths", ContainerType::Map, _) => {}
+            (
+                "tombs",
+                ContainerType::Map,
+                JsonOpContent::Map(JsonMapOp::Insert { key, .. } | JsonMapOp::Delete { key }),
+            ) => ids.push(NoteId::parse(key.split_once(':')?.0)?),
+            (text, ContainerType::Text, _) => ids.push(NoteId::parse(text.strip_prefix("t:")?)?),
+            _ => return None,
+        }
+    }
+    Some(ids)
 }
 
 /// Decodes a version vector and refuses trailing bytes: the decoder ignores them, so `00ff` would
@@ -117,13 +184,17 @@ impl SyncDoc {
     pub fn new() -> SyncDoc {
         SyncDoc {
             doc: LoroDoc::new(),
+            cache: RefCell::default(),
         }
     }
 
     /// Restores a document written by [`SyncDoc::snapshot`].
     pub fn from_snapshot(bytes: &[u8]) -> Result<SyncDoc> {
         let doc = LoroDoc::from_snapshot(bytes).map_err(doc_error)?;
-        Ok(SyncDoc { doc })
+        Ok(SyncDoc {
+            doc,
+            cache: RefCell::default(),
+        })
     }
 
     /// The whole document, history included.
@@ -141,6 +212,61 @@ impl SyncDoc {
 
     fn text_of(&self, id: &NoteId) -> String {
         self.doc.get_text(format!("t:{}", id.as_str())).to_string()
+    }
+
+    /// Drops the cache entries that changed since the cache was last used. Call before reading
+    /// through [`SyncDoc::cached`]. The operations between the cached version and the current one
+    /// name the changed notes; any `Err` falls back to a full rebuild.
+    /// (`LoroDoc::diff` was dropped for this: it costs about 90 ms to 230 ms for one edited note in
+    /// a document of 10 000 notes, however small the edit.)
+    fn refresh_cache(&self) {
+        let mut guard = self.cache.borrow_mut();
+        let cache = &mut *guard;
+        // An error path that left a transaction open would otherwise hide its edits from the version.
+        self.doc.commit();
+        let now = self.doc.oplog_vv();
+        let atoms = atom_count(&now);
+        let stale = match &cache.version {
+            Some(seen) if *seen == now => return,
+            Some(seen)
+                if now.includes_vv(seen) && atoms.saturating_sub(cache.atoms) <= MAX_DIFF_ATOMS =>
+            {
+                #[cfg(test)]
+                {
+                    cache.diffs += 1;
+                }
+                let range = self.doc.export_json_updates(seen, &now);
+                range.ok().and_then(|range| changed_notes(&range))
+            }
+            _ => None,
+        };
+        match stale {
+            Some(ids) => ids.iter().for_each(|id| {
+                cache.notes.remove(id);
+            }),
+            None => cache.notes.clear(),
+        }
+        cache.version = Some(now);
+        cache.atoms = atoms;
+    }
+
+    /// The cached state of a note, computed on first use. Needs a prior `refresh_cache`.
+    fn cached(&self, id: &NoteId) -> (Arc<str>, Hash32, bool) {
+        let mut cache = self.cache.borrow_mut();
+        #[cfg(test)]
+        let before = cache.notes.len();
+        let note = cache.notes.entry(id.clone()).or_insert_with(|| {
+            let text: Arc<str> = self.text_of(id).into();
+            let hash = content_hash(&text);
+            let dead = self.is_tombstoned(id, &hash);
+            CachedNote { text, hash, dead }
+        });
+        let state = (Arc::clone(&note.text), note.hash, note.dead);
+        #[cfg(test)]
+        {
+            cache.recomputed += cache.notes.len() - before;
+        }
+        state
     }
 
     fn path_of(&self, id: &NoteId) -> Option<NotePath> {
@@ -236,9 +362,7 @@ impl SyncDoc {
 
     /// The note as the document holds it now; `None` when its text carries a tombstone.
     fn alive_view(&self, id: NoteId, path: NotePath) -> Option<NoteView> {
-        let text = self.text_of(&id);
-        let hash = content_hash(&text);
-        let dead = self.is_tombstoned(&id, &hash);
+        let (text, hash, dead) = self.cached(&id);
         (!dead).then_some(NoteView {
             id,
             path,
@@ -249,6 +373,7 @@ impl SyncDoc {
 
     /// Alive notes, ordered by id.
     pub fn alive_notes(&self) -> Vec<NoteView> {
+        self.refresh_cache();
         let claimed = self.claimed_paths().0;
         let alive = claimed
             .into_iter()
@@ -272,6 +397,7 @@ impl SyncDoc {
     /// The keys that more than one alive note claims, with their claimants ordered by id. Text
     /// is read and hashed only for the notes whose key is claimed more than once.
     fn contested_claims(&self) -> Vec<Vec<NoteView>> {
+        self.refresh_cache();
         let mut by_key: BTreeMap<NoteKey, Vec<(NoteId, NotePath)>> = BTreeMap::new();
         for (id, path) in self.claimed_paths().0 {
             by_key.entry(path.key()).or_default().push((id, path));
@@ -437,14 +563,14 @@ mod tests {
     fn texts(doc: &SyncDoc) -> BTreeMap<String, String> {
         doc.alive_notes()
             .into_iter()
-            .map(|note| (note.path.as_str().to_owned(), note.text))
+            .map(|note| (note.path.as_str().to_owned(), note.text.to_string()))
             .collect()
     }
 
     fn only_text(doc: &SyncDoc) -> String {
         let notes = doc.alive_notes();
         assert_eq!(notes.len(), 1);
-        notes[0].text.clone()
+        notes[0].text.to_string()
     }
 
     fn pair_with_note(content: &str) -> (SyncDoc, SyncDoc, NoteId) {
@@ -607,7 +733,11 @@ mod tests {
         resolve_until_stable(&mut b);
         assert_eq!(a.view(), b.view());
         assert_eq!(a.view().len(), a.alive_notes().len());
-        let alive: Vec<String> = a.alive_notes().into_iter().map(|n| n.text).collect();
+        let alive: Vec<String> = a
+            .alive_notes()
+            .into_iter()
+            .map(|n| n.text.to_string())
+            .collect();
         assert!(alive.contains(&"1".to_owned()) && alive.contains(&"2".to_owned()));
     }
 
@@ -620,7 +750,11 @@ mod tests {
             .unwrap();
         resolve_until_stable(&mut doc);
         assert_eq!(doc.view().len(), doc.alive_notes().len());
-        let mut alive: Vec<String> = doc.alive_notes().into_iter().map(|n| n.text).collect();
+        let mut alive: Vec<String> = doc
+            .alive_notes()
+            .into_iter()
+            .map(|n| n.text.to_string())
+            .collect();
         alive.sort();
         assert_eq!(alive, ["a", "b", "c"]);
     }
@@ -781,6 +915,272 @@ mod tests {
             SyncDoc::from_snapshot(b"garbage"),
             Err(SyncError::Doc(_))
         ));
+    }
+
+    fn assert_matches_scratch(doc: &SyncDoc) {
+        let fresh = SyncDoc::from_snapshot(&doc.snapshot().unwrap()).unwrap();
+        assert_eq!(doc.view(), fresh.view());
+        assert_eq!(doc.alive_notes(), fresh.alive_notes());
+    }
+
+    fn assert_both_match_scratch(a: &SyncDoc, b: &SyncDoc) {
+        assert_matches_scratch(a);
+        assert_matches_scratch(b);
+    }
+
+    fn create_and_sync_checked(a: &mut SyncDoc, b: &mut SyncDoc) -> [NoteId; 3] {
+        let ids = [
+            (
+                "one.md", "1
+",
+            ),
+            (
+                "two.md", "2
+",
+            ),
+            (
+                "three.md", "3
+",
+            ),
+        ]
+        .map(|(path, text)| a.create_note(&p(path), text).unwrap());
+        assert_both_match_scratch(a, b);
+        sync(a, b);
+        assert_both_match_scratch(a, b);
+        ids
+    }
+
+    fn edit_rename_and_delete_checked(a: &mut SyncDoc, b: &mut SyncDoc) -> NoteId {
+        let [n1, n2, n3] = create_and_sync_checked(a, b);
+        b.update_note(
+            &n1,
+            "1 edited
+",
+        )
+        .unwrap();
+        assert_both_match_scratch(a, b);
+        a.tombstone(&n2).unwrap();
+        assert_both_match_scratch(a, b);
+        b.set_path(&n3, &p("moved/three.md")).unwrap();
+        sync(a, b);
+        assert_both_match_scratch(a, b);
+        n1
+    }
+
+    fn resolve_claims_checked(a: &mut SyncDoc, b: &mut SyncDoc) {
+        a.create_note_with_id(
+            &id('0'),
+            &p("x.md"),
+            "A
+",
+        )
+        .unwrap();
+        b.create_note_with_id(
+            &id('f'),
+            &p("X.md"),
+            "B
+",
+        )
+        .unwrap();
+        sync(a, b);
+        assert_both_match_scratch(a, b);
+        a.resolve_claims().unwrap();
+        assert_both_match_scratch(a, b);
+        b.resolve_claims().unwrap();
+        sync(a, b);
+        assert_both_match_scratch(a, b);
+    }
+
+    #[test]
+    fn should_match_a_view_computed_from_scratch_after_every_step() {
+        let (mut a, mut b) = (SyncDoc::new(), SyncDoc::new());
+        let n1 = edit_rename_and_delete_checked(&mut a, &mut b);
+        resolve_claims_checked(&mut a, &mut b);
+        a.tombstone(&n1).unwrap();
+        assert_both_match_scratch(&a, &b);
+        a.update_note(
+            &n1, "back
+",
+        )
+        .unwrap();
+        assert_both_match_scratch(&a, &b);
+        assert!(a.alive_notes().iter().any(|n| n.id == n1));
+        a.update_note(
+            &n1,
+            "1 edited
+",
+        )
+        .unwrap();
+        assert_both_match_scratch(&a, &b);
+        assert!(!a.alive_notes().iter().any(|n| n.id == n1));
+    }
+
+    #[test]
+    fn should_match_the_scratch_view_across_a_partial_import() {
+        let mut a = SyncDoc::new();
+        let v0 = a.version();
+        let note = a
+            .create_note(
+                &p("n.md"),
+                "one
+",
+            )
+            .unwrap();
+        let u1 = a.updates_since(&v0).unwrap();
+        let v1 = a.version();
+        a.update_note(
+            &note, "two
+",
+        )
+        .unwrap();
+        let u2 = a.updates_since(&v1).unwrap();
+        let mut b = SyncDoc::new();
+        assert_matches_scratch(&b);
+        assert!(b.import(&u2).unwrap());
+        assert_matches_scratch(&b);
+        assert!(!b.import(&u1).unwrap());
+        assert_matches_scratch(&b);
+        assert_eq!(texts(&b), texts(&a));
+    }
+
+    #[test]
+    fn should_recompute_only_the_notes_that_changed() {
+        let mut doc = SyncDoc::new();
+        let ids: Vec<NoteId> = (0..100)
+            .map(|i| {
+                doc.create_note(
+                    &p(&format!("n{i}.md")),
+                    "t
+",
+                )
+                .unwrap()
+            })
+            .collect();
+        doc.view();
+        doc.update_note(
+            &ids[7], "u
+",
+        )
+        .unwrap();
+        doc.cache.borrow_mut().recomputed = 0;
+        assert_eq!(doc.view().len(), 100);
+        assert_eq!(doc.cache.borrow().recomputed, 1);
+        doc.tombstone(&ids[8]).unwrap();
+        doc.cache.borrow_mut().recomputed = 0;
+        assert_eq!(doc.view().len(), 99);
+        assert_eq!(doc.cache.borrow().recomputed, 1);
+    }
+
+    #[test]
+    fn should_not_diff_the_document_once_per_tombstone() {
+        let mut doc = SyncDoc::new();
+        let ids: Vec<NoteId> = (0..50)
+            .map(|i| {
+                doc.create_note(
+                    &p(&format!("n{i}.md")),
+                    "t
+",
+                )
+                .unwrap()
+            })
+            .collect();
+        doc.view();
+        doc.cache.borrow_mut().diffs = 0;
+        ids.iter().for_each(|id| doc.tombstone(id).unwrap());
+        assert!(doc.cache.borrow().diffs <= 1);
+        assert!(doc.view().is_empty());
+        assert_matches_scratch(&doc);
+    }
+
+    #[test]
+    fn should_rebuild_instead_of_diffing_after_a_large_change() {
+        let mut doc = SyncDoc::new();
+        let ids: Vec<NoteId> = (0..10)
+            .map(|i| {
+                doc.create_note(
+                    &p(&format!("n{i}.md")),
+                    "t
+",
+                )
+                .unwrap()
+            })
+            .collect();
+        doc.view();
+        doc.update_note(&ids[3], &"x".repeat(MAX_DIFF_ATOMS + 1))
+            .unwrap();
+        doc.cache.borrow_mut().recomputed = 0;
+        assert_eq!(doc.view().len(), 10);
+        assert_eq!(doc.cache.borrow().recomputed, 10);
+        assert_matches_scratch(&doc);
+    }
+
+    #[test]
+    fn should_see_an_edit_that_was_never_committed() {
+        let mut doc = SyncDoc::new();
+        let note = doc.create_note(&p("n.md"), "old\n").unwrap();
+        doc.view();
+        let text = doc.doc.get_text(format!("t:{}", note.as_str()));
+        text.insert(0, "new ").unwrap();
+        assert_eq!(only_text(&doc), "new old\n");
+    }
+
+    #[test]
+    fn should_see_a_tombstone_that_was_never_committed() {
+        let mut doc = SyncDoc::new();
+        let note = doc.create_note(&p("n.md"), "old\n").unwrap();
+        doc.view();
+        let key = tomb_key(&note, &content_hash("old\n"));
+        doc.tombs().insert(&key, true).unwrap();
+        assert!(doc.alive_notes().is_empty());
+    }
+
+    #[test]
+    fn should_recompute_only_the_note_a_peer_edited() {
+        let (mut a, mut b, note) = pair_with_note("l1\nl2\n");
+        for i in 0..20 {
+            a.create_note(&p(&format!("m{i}.md")), "t\n").unwrap();
+        }
+        sync(&mut a, &mut b);
+        b.view();
+        a.update_note(&note, "l1\nl2 peer\n").unwrap();
+        sync(&mut a, &mut b);
+        b.cache.borrow_mut().recomputed = 0;
+        let edited = b.alive_notes().into_iter().find(|n| n.id == note).unwrap();
+        assert_eq!(&*edited.text, "l1\nl2 peer\n");
+        assert_eq!(b.cache.borrow().recomputed, 1);
+        assert_matches_scratch(&b);
+    }
+
+    fn assert_full_rebuild_after(inject: impl Fn(&LoroDoc)) {
+        let (mut a, mut b, _) = pair_with_note("t\n");
+        for i in 0..5 {
+            a.create_note(&p(&format!("m{i}.md")), "t\n").unwrap();
+        }
+        sync(&mut a, &mut b);
+        b.view();
+        inject(&a.doc);
+        a.doc.commit();
+        sync(&mut a, &mut b);
+        b.cache.borrow_mut().recomputed = 0;
+        assert_eq!(b.view().len(), 6);
+        assert_eq!(b.cache.borrow().recomputed, 6);
+        assert_matches_scratch(&b);
+    }
+
+    #[test]
+    fn should_rebuild_when_a_peer_adds_a_foreign_text_container() {
+        assert_full_rebuild_after(|doc| doc.get_text("foreign").insert(0, "x").unwrap());
+    }
+
+    #[test]
+    fn should_rebuild_when_a_peer_adds_a_tombstone_key_without_a_colon() {
+        assert_full_rebuild_after(|doc| doc.get_map("tombs").insert("no-colon", true).unwrap());
+    }
+
+    #[test]
+    fn should_stay_send_so_the_engine_can_move_it_to_its_thread() {
+        fn assert_send<T: Send>() {}
+        assert_send::<SyncDoc>();
     }
 
     #[test]

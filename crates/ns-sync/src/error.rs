@@ -50,6 +50,12 @@ pub enum SyncError {
     /// The peer's proof of group membership did not verify.
     #[error("the peer is not a member of this sync group")]
     AuthFailed,
+    /// The list of known devices is full, so the device cannot be remembered.
+    #[error(
+        "the device list is full ({}): the new device cannot be remembered",
+        crate::state::MAX_STORED_PEERS
+    )]
+    PeerListFull,
     /// The transport failed.
     #[error("network error: {0}")]
     Net(String),

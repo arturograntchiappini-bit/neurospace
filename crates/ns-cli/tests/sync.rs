@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use ns_cli::cli::Cli;
-use ns_sync::{StateDir, Ticket, to_hex};
+use ns_sync::{StateDir, Ticket, to_hex, unix_now};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -160,6 +160,19 @@ fn wait_for_status(device: &Device) -> Value {
 fn read_note(device: &Device, path: &str) -> Option<String> {
     let (code, stdout, _) = ns_with_state(device, &["read", path]);
     (code == 0).then_some(stdout)
+}
+
+#[test]
+fn should_print_the_mode_from_status_without_reading_config() {
+    let a = device(Some("{nope"));
+    let status = json!({
+        "pid": 1, "device_id": "", "addresses": [], "peers": [], "notes": 0, "blocked": [],
+        "last_error": null, "updated_unix": unix_now(), "mode": "lan", "busy": true,
+    });
+    fs::write(a.state.join("status.json"), status.to_string()).unwrap();
+    let text = ok(&a, &["sync", "status"]);
+    assert!(text.lines().any(|line| line == "mode: lan"), "{text}");
+    assert!(text.contains("a sync round is running"), "{text}");
 }
 
 #[test]

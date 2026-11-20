@@ -3,7 +3,7 @@
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{
     CentralPanel, Context, Key, KeyboardShortcut, Modifiers, Rect, Theme, ThemePreference, Ui,
@@ -16,8 +16,8 @@ use crate::platform;
 use crate::state::sync_panel::SyncControl;
 use crate::state::welcome::WelcomeForm;
 use crate::state::{
-    AUTOSAVE_DELAY, InspectorCache, Job, NoteAction, NoteDialog, Notice, NoticeBoard, Poll,
-    QuickOpen, RELOAD_DEBOUNCE, Reloader, Saved, SearchBox, Settings, ThemeChoice, Workspace,
+    AUTOSAVE_DELAY, FilesPanel, InspectorCache, Job, NoteAction, NoteDialog, Notice, NoticeBoard,
+    Poll, QuickOpen, RELOAD_DEBOUNCE, Reloader, Saved, Settings, ThemeChoice, Workspace,
 };
 use crate::sync_control::EngineControl;
 use crate::sync_host::{ControlFactory, SyncHost};
@@ -67,7 +67,7 @@ enum Screen {
 #[derive(Default)]
 struct VaultView {
     sidebars: Sidebars,
-    search: SearchBox,
+    files: FilesPanel,
     inspector: InspectorCache,
     dialog: Option<NoteDialog>,
     editor: EditorState,
@@ -231,6 +231,11 @@ impl NeurospaceApp {
     /// Replaces the per-frame time limits of the graph layout. Used by tests.
     pub fn set_graph_step_budgets(&mut self, budgets: StepBudgets) {
         self.view.graph_view.set_step_budgets(budgets);
+    }
+
+    /// Replaces the longest time the graph layout keeps animating after a wake. Used by tests.
+    pub fn set_graph_wake_cap(&mut self, cap: Duration) {
+        self.view.graph_view.set_wake_cap(cap);
     }
 
     /// The area the graph was drawn in last frame. Used by tests.
@@ -657,12 +662,12 @@ fn show_panels(
 ) -> Option<NoteAction> {
     let VaultView {
         sidebars,
-        search,
+        files,
         inspector: links,
         ..
     } = view;
     let left = shell::left_panel(ui, palette, &mut sidebars.left, |ui| {
-        sidebar::show(ui, palette, workspace, search)
+        sidebar::show(ui, palette, workspace, files)
     });
     let right = shell::right_panel(ui, palette, &mut sidebars.right, |ui| {
         inspector::show(ui, palette, workspace, links)

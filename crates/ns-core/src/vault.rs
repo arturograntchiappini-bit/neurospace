@@ -342,17 +342,24 @@ impl Vault {
     }
 }
 
+/// A `.md` file found by the walk, with the metadata of its directory entry when available.
+pub(crate) struct Candidate {
+    pub(crate) path: NotePath,
+    pub(crate) full: PathBuf,
+    pub(crate) meta: Option<fs::Metadata>,
+}
+
 #[derive(Default)]
-struct Scan {
-    files: Vec<(NotePath, PathBuf)>,
-    ignored: Vec<Ignored>,
+pub(crate) struct Scan {
+    files: Vec<Candidate>,
+    pub(crate) ignored: Vec<Ignored>,
 }
 
 impl Scan {
     /// `prefix` is the relative path of `dir` with a trailing `/`; `unicode` is false
     /// when any name on the way was not valid Unicode. Fails when `dir` or one of its
     /// entries cannot be listed.
-    fn walk(&mut self, dir: &Path, prefix: &str, unicode: bool) -> io::Result<()> {
+    pub(crate) fn walk(&mut self, dir: &Path, prefix: &str, unicode: bool) -> io::Result<()> {
         for entry in fs::read_dir(dir)? {
             self.visit(&entry?, prefix, unicode);
         }
@@ -370,7 +377,7 @@ impl Scan {
         match entry.file_type() {
             Ok(kind) if kind.is_dir() => self.walk_folder(&entry.path(), relative, unicode),
             Ok(kind) if kind.is_file() && has_markdown_extension(&file_name) => {
-                self.classify(entry.path(), relative, unicode);
+                self.classify(entry, relative, unicode);
             }
             Err(_) if has_markdown_extension(&file_name) => self.ignore_unreadable(relative),
             _ => {}
@@ -392,9 +399,13 @@ impl Scan {
         });
     }
 
-    fn classify(&mut self, full: PathBuf, relative: String, unicode: bool) {
+    fn classify(&mut self, entry: &fs::DirEntry, relative: String, unicode: bool) {
         match NotePath::parse(&relative) {
-            Ok(path) if unicode => self.files.push((path, full)),
+            Ok(path) if unicode => self.files.push(Candidate {
+                path,
+                full: entry.path(),
+                meta: entry.metadata().ok(),
+            }),
             _ => self.ignored.push(Ignored {
                 path: relative,
                 reason: IgnoreReason::InvalidPath,
@@ -402,23 +413,30 @@ impl Scan {
         }
     }
 
-    fn read_notes(self) -> Loaded {
-        let Scan {
-            mut files,
-            mut ignored,
-        } = self;
-        files.sort();
+    /// One candidate per note key, ordered by path; the others are ignored as `CaseCollision`.
+    pub(crate) fn winners(&mut self) -> Vec<Candidate> {
         let mut seen = HashSet::new();
-        let mut notes = Vec::new();
-        for (path, full) in files {
-            let outcome = if seen.insert(path.key()) {
-                read_content(&full)
+        let mut winners = Vec::new();
+        self.files.sort_by(|a, b| a.path.cmp(&b.path));
+        for candidate in std::mem::take(&mut self.files) {
+            if seen.insert(candidate.path.key()) {
+                winners.push(candidate);
             } else {
-                ReadOutcome::Ignore(IgnoreReason::CaseCollision)
-            };
-            match outcome {
+                self.ignored.push(Ignored {
+                    path: candidate.path.to_string(),
+                    reason: IgnoreReason::CaseCollision,
+                });
+            }
+        }
+        winners
+    }
+
+    fn read_notes(mut self) -> Loaded {
+        let mut notes = Vec::new();
+        for Candidate { path, full, meta } in self.winners() {
+            match read_content(&full, meta.as_ref().map(fs::Metadata::len)) {
                 ReadOutcome::Content(content) => notes.push((path, content)),
-                ReadOutcome::Ignore(reason) => ignored.push(Ignored {
+                ReadOutcome::Ignore(reason) => self.ignored.push(Ignored {
                     path: path.to_string(),
                     reason,
                 }),
@@ -426,12 +444,15 @@ impl Scan {
             }
         }
         notes.sort_by_key(|(path, _)| path.key());
-        ignored.sort_by(|a, b| a.path.cmp(&b.path));
-        Loaded { notes, ignored }
+        self.ignored.sort_by(|a, b| a.path.cmp(&b.path));
+        Loaded {
+            notes,
+            ignored: self.ignored,
+        }
     }
 }
 
-fn io_error(path: &Path) -> impl FnOnce(io::Error) -> CoreError + '_ {
+pub(crate) fn io_error(path: &Path) -> impl FnOnce(io::Error) -> CoreError + '_ {
     move |source| CoreError::Io {
         path: path.to_path_buf(),
         source,
@@ -454,22 +475,24 @@ fn has_markdown_extension(file_name: &std::ffi::OsStr) -> bool {
 }
 
 /// What reading one scanned file yielded.
-enum ReadOutcome {
+pub(crate) enum ReadOutcome {
     Content(String),
     Ignore(IgnoreReason),
     /// The file disappeared between the walk and the read.
     Vanished,
 }
 
-fn read_content(full: &Path) -> ReadOutcome {
-    let size = match fs::metadata(full) {
-        Ok(meta) => meta.len(),
+/// Reads a scanned file; `listed_size` is the size the directory listing reported, if any.
+pub(crate) fn read_content(full: &Path, listed_size: Option<u64>) -> ReadOutcome {
+    let size = match listed_size.map_or_else(|| fs::metadata(full).map(|meta| meta.len()), Ok) {
+        Ok(size) => size,
         Err(error) => return read_failure(&error),
     };
     if size > MAX_NOTE_BYTES as u64 {
         return ReadOutcome::Ignore(IgnoreReason::TooLarge);
     }
     match fs::read(full) {
+        Ok(bytes) if bytes.len() > MAX_NOTE_BYTES => ReadOutcome::Ignore(IgnoreReason::TooLarge),
         Ok(bytes) => String::from_utf8(bytes).map_or(
             ReadOutcome::Ignore(IgnoreReason::NotUtf8),
             ReadOutcome::Content,
@@ -572,7 +595,10 @@ fn refuse_read_only(target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Renames `temp` over `target` when `still_expected` accepts the target's current bytes.
+/// Renames `temp` over `target` when `still_expected` accepts the target's current bytes. It never
+/// retries a denied rename: the denial means someone else holds the file, who may finish writing
+/// meanwhile, and the check would no longer cover what is on disk. The caller blocks the note and
+/// tries again next round.
 fn swap_if(
     temp: &Path,
     target: &Path,
@@ -586,15 +612,53 @@ fn swap_if(
     if !still_expected(&current) {
         return Ok(false);
     }
-    replace_keeping_permissions(temp, target)?;
+    copy_permissions(temp, target)?;
+    fs::rename(temp, target).map_err(io_error(target))?;
     Ok(true)
 }
 
-fn replace_keeping_permissions(temp: &Path, target: &Path) -> Result<()> {
+fn copy_permissions(temp: &Path, target: &Path) -> Result<()> {
     if let Some(existing) = lstat(target)? {
         fs::set_permissions(temp, existing.permissions()).map_err(io_error(temp))?;
     }
-    fs::rename(temp, target).map_err(io_error(target))
+    Ok(())
+}
+
+/// The unconditional replace of `write` and `append`, where overwriting is the request.
+fn replace_keeping_permissions(temp: &Path, target: &Path) -> Result<()> {
+    copy_permissions(temp, target)?;
+    rename_over(temp, target).map_err(io_error(target))
+}
+
+/// A rename that replaces `target`. Windows refuses it for a moment while an indexer, an antivirus
+/// or a reader holds the target open, so it is tried again a few times there.
+#[cfg(windows)]
+fn rename_over(temp: &Path, target: &Path) -> io::Result<()> {
+    retry_when_denied(|| fs::rename(temp, target))
+}
+
+#[cfg(not(windows))]
+fn rename_over(temp: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(temp, target)
+}
+
+/// Waits before each retry of `retry_when_denied`; five tries in all.
+#[cfg(any(windows, test))]
+const RETRY_DELAYS_MS: [u64; 4] = [10, 20, 40, 80];
+
+/// Runs `operation` again while it fails with `PermissionDenied`, waiting 10, 20, 40 and 80 ms
+/// between tries; any other result, or the fifth denial, is returned as it is.
+#[cfg(any(windows, test))]
+fn retry_when_denied<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut result = operation();
+    for delay in RETRY_DELAYS_MS {
+        if !matches!(&result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        result = operation();
+    }
+    result
 }
 
 fn temp_sibling(target: &Path) -> PathBuf {
@@ -759,6 +823,103 @@ mod tests {
         let missing = vault.replace_if(&p("missing.md"), "x", &|_| true);
         assert!(matches!(missing, Err(CoreError::NotFound(_))));
         assert_eq!(temporary_entries(dir.path()), 0);
+    }
+
+    fn denied() -> io::Error {
+        io::ErrorKind::PermissionDenied.into()
+    }
+
+    /// Holds `file` open without delete sharing for the whole `call`, so Windows denies every
+    /// rename over it: deterministic, unlike the timed variant below.
+    #[cfg(windows)]
+    fn call_while_held<T>(file: &Path, call: impl FnOnce() -> T) -> T {
+        use std::os::windows::fs::OpenOptionsExt;
+        const SHARE_READ: u32 = 1;
+        let _held = OpenOptions::new()
+            .read(true)
+            .share_mode(SHARE_READ)
+            .open(file)
+            .unwrap();
+        call()
+    }
+
+    /// Holds `file` open without delete sharing, so Windows denies a rename over it, and
+    /// releases it after 20 ms: inside the window of a retrying rename, long before any other.
+    /// Use only where the release must land mid-call; under load it can pass without retrying.
+    #[cfg(windows)]
+    fn call_while_held_briefly<T>(file: &Path, call: impl FnOnce() -> T) -> T {
+        use std::os::windows::fs::OpenOptionsExt;
+        const SHARE_READ: u32 = 1;
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(SHARE_READ)
+            .open(file)
+            .unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                drop(held);
+            });
+            call()
+        })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn should_retry_a_denied_replacing_write() {
+        let (dir, vault) = vault();
+        vault.write(&p("n.md"), "old").unwrap();
+        let file = dir.path().join("n.md");
+        let result = call_while_held_briefly(&file, || vault.write(&p("n.md"), "new"));
+        result.unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "new");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn should_not_retry_a_denied_conditional_replace() {
+        let (dir, vault) = vault();
+        vault.write(&p("n.md"), "old").unwrap();
+        let file = dir.path().join("n.md");
+        let result = call_while_held(&file, || vault.replace_if(&p("n.md"), "new", &|_| true));
+        assert!(matches!(
+            result,
+            Err(CoreError::Io { ref source, .. }) if source.kind() == io::ErrorKind::PermissionDenied
+        ));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "old");
+        assert_eq!(temporary_entries(dir.path()), 0);
+    }
+
+    #[test]
+    fn should_retry_an_operation_denied_twice_and_then_succeed() {
+        let mut calls = 0;
+        let result = retry_when_denied(|| {
+            calls += 1;
+            if calls <= 2 { Err(denied()) } else { Ok(calls) }
+        });
+        assert_eq!(result.unwrap(), 3);
+    }
+
+    #[test]
+    fn should_give_up_after_five_denied_tries() {
+        let mut calls = 0;
+        let result: io::Result<()> = retry_when_denied(|| {
+            calls += 1;
+            Err(denied())
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(calls, 5);
+    }
+
+    #[test]
+    fn should_not_retry_any_other_error() {
+        let mut calls = 0;
+        let result: io::Result<()> = retry_when_denied(|| {
+            calls += 1;
+            Err(io::ErrorKind::NotFound.into())
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(calls, 1);
     }
 
     #[test]

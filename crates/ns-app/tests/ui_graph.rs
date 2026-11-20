@@ -268,7 +268,7 @@ fn should_say_so_when_the_vault_has_no_notes() {
 
 #[test]
 fn should_show_a_simplified_layout_that_still_opens_notes_when_the_vault_is_large() {
-    let files: Vec<(String, String)> = (0..2001)
+    let files: Vec<(String, String)> = (0..10_001)
         .map(|i| (format!("n{i}.md"), String::new()))
         .collect();
     let mut f = open_vault(&files);
@@ -300,6 +300,20 @@ fn should_settle_within_one_frame_when_motion_is_reduced() {
     f.harness.run();
     let saved = fs::read_to_string(f.dirs.1.path().join("app.json")).unwrap();
     assert!(saved.contains("\"reduce_motion\": true"), "{saved}");
+    f.harness.key_press_modifiers(Modifiers::COMMAND, Key::G);
+    f.harness.step();
+    assert!(f.harness.state().graph_shown());
+    assert!(f.harness.state().graph_settled());
+}
+
+#[test]
+fn should_stop_asking_for_frames_when_the_wake_time_cap_is_spent() {
+    let mut f = open_vault(&ring_vault(150));
+    f.harness.state_mut().set_graph_step_budgets(StepBudgets {
+        animated: Duration::ZERO,
+        reduced_motion: Duration::ZERO,
+    });
+    f.harness.state_mut().set_graph_wake_cap(Duration::ZERO);
     f.harness.key_press_modifiers(Modifiers::COMMAND, Key::G);
     f.harness.step();
     assert!(f.harness.state().graph_shown());

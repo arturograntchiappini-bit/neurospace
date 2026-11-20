@@ -1,29 +1,35 @@
-//! Follows the vault folder: rebuilds the index in the background after external changes.
+//! Follows the vault folder: scans it in the background after external changes and applies the
+//! difference to the index.
 
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use ns_core::{Index, Result, Vault, VaultWatcher, watch};
+use ns_core::{IndexDelta, LoadCache, Result, Vault, VaultWatcher, watch};
 
 use super::jobs::{Job, Poll};
 use super::notice::Notice;
 use super::workspace::{ApplyOutcome, Workspace};
 
-/// How long the folder must stay quiet before the index is rebuilt.
+/// How long the folder must stay quiet before it is scanned.
 pub const RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
-/// An index built when the workspace's `write_generation` had this value, or why it could not
-/// be built.
-type Reload = (u64, Result<Index>);
+/// A scan started when the workspace's `write_generation` had this value: the load cache it
+/// leaves and the parsed delta, or why it failed.
+type Reload = (u64, Result<(LoadCache, IndexDelta)>);
 
-/// Watches the vault folder and rebuilds the index off the UI thread after a quiet moment.
+/// Watches the vault folder and scans it off the UI thread after a quiet moment, through a load
+/// cache that survives between scans so that only changed files are read.
 pub struct Reloader {
     root: PathBuf,
     wake: Wake,
     last_change: Arc<Mutex<Option<Instant>>>,
+    cache: LoadCache,
+    /// A delta has been applied, so `cache` knows the folder; until then a scan lists every note
+    /// and its delta says which indexed notes are gone.
+    primed: bool,
     job: Option<Job<Reload>>,
     last_job_lost: bool,
     _watcher: Option<VaultWatcher>,
@@ -50,6 +56,8 @@ impl Reloader {
             root: root.to_path_buf(),
             wake,
             last_change: Arc::default(),
+            cache: LoadCache::default(),
+            primed: false,
             job: None,
             last_job_lost: false,
             _watcher: None,
@@ -67,23 +75,27 @@ impl Reloader {
         record(&self.last_change, now);
     }
 
-    /// True while a rebuild is running.
+    /// True while a scan is running.
     pub fn is_reloading(&self) -> bool {
         self.job.is_some()
     }
 
-    /// Applies a finished rebuild, then starts a new one if a change has been quiet for
-    /// `RELOAD_DEBOUNCE` and none is running. A failed rebuild keeps the old index.
+    /// Applies a finished scan, then starts a new one if a change has been quiet for
+    /// `RELOAD_DEBOUNCE` and none is running. A failed scan keeps the old index and cache.
     pub fn tick(&mut self, workspace: &mut Workspace, now: Instant) -> Vec<Notice> {
+        // Before `collect`: a result made stale by one of these writes keeps this cache.
+        for key in workspace.take_written() {
+            self.cache.expect(&key);
+        }
         let notices = self.collect(workspace, now);
         if self.job.is_none() && self.quiet_change_pending(now) {
-            self.spawn_rebuild(workspace.write_generation());
+            self.spawn_scan(workspace.write_generation());
         }
         notices
     }
 
-    /// How long until `tick` would start a rebuild: `None` when no change is waiting or a
-    /// rebuild is running (its end wakes the UI). Call it after `tick`; the watcher only records
+    /// How long until `tick` would start a scan: `None` when no change is waiting or a
+    /// scan is running (its end wakes the UI). Call it after `tick`; the watcher only records
     /// the time of a change, so the UI must schedule its own wake-up for the end of the debounce.
     pub fn next_tick_in(&self, now: Instant) -> Option<Duration> {
         if self.job.is_some() {
@@ -114,16 +126,30 @@ impl Reloader {
         self.job = None;
         self.last_job_lost = false;
         match built {
-            Ok(index) => match workspace.apply_index(index, tag) {
-                ApplyOutcome::Applied(notices) => notices,
-                ApplyOutcome::Stale => {
-                    self.mark_changed(now);
-                    Vec::new()
-                }
-            },
+            Ok(scan) => self.apply_scan(workspace, (tag, scan), now),
             Err(error) => vec![Notice::error(format!(
                 "Could not reload the vault: {error}"
             ))],
+        }
+    }
+
+    fn apply_scan(
+        &mut self,
+        workspace: &mut Workspace,
+        (tag, (cache, delta)): (u64, (LoadCache, IndexDelta)),
+        now: Instant,
+    ) -> Vec<Notice> {
+        match workspace.apply_delta(delta, tag) {
+            ApplyOutcome::Applied(notices) => {
+                self.cache = cache;
+                self.primed = true;
+                notices
+            }
+            // The next scan starts from the old cache, so nothing this one saw is skipped.
+            ApplyOutcome::Stale => {
+                self.mark_changed(now);
+                Vec::new()
+            }
         }
     }
 
@@ -135,20 +161,24 @@ impl Reloader {
         last.is_some_and(|at| now.saturating_duration_since(at) >= RELOAD_DEBOUNCE)
     }
 
-    fn spawn_rebuild(&mut self, write_generation: u64) {
+    fn spawn_scan(&mut self, write_generation: u64) {
         *self
             .last_change
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
         let root = self.root.clone();
         let wake = Arc::clone(&self.wake);
-        let build = move || {
-            (
-                write_generation,
-                Vault::open(root).and_then(|v| Index::build(&v)),
-            )
+        let (mut cache, primed) = (self.cache.clone(), self.primed);
+        let scan = move || {
+            let delta = Vault::open(root).and_then(|vault| vault.load_changes(&mut cache));
+            let parse = if primed {
+                IndexDelta::parse
+            } else {
+                IndexDelta::parse_complete
+            };
+            (write_generation, delta.map(|d| (cache, parse(d))))
         };
-        self.job = Some(Job::spawn(build, move || wake()));
+        self.job = Some(Job::spawn(scan, move || wake()));
     }
 }
 
@@ -165,10 +195,24 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::state::test_support::full_delta;
     use crate::state::{ApplyOutcome, Notice, NoticeKind, Workspace};
 
     fn p(raw: &str) -> NotePath {
         NotePath::parse(raw).unwrap()
+    }
+
+    /// Writes `text` to `name` and dates it `age` seconds ago, so that no scan treats it as racy.
+    fn write_aged(dir: &TempDir, name: &str, text: &str, age: u64) {
+        let file = dir.path().join(name);
+        fs::write(&file, text).unwrap();
+        let aged = std::time::SystemTime::now() - Duration::from_secs(age);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(aged)
+            .unwrap();
     }
 
     fn setup(files: &[(&str, &str)]) -> (TempDir, Workspace, Reloader) {
@@ -318,10 +362,10 @@ mod tests {
         let (dir, mut ws, _reloader) = setup(&[("n.md", "old")]);
         ws.select(&p("n.md")).unwrap();
         let tag = ws.write_generation();
-        let built_before_save = ns_core::Index::build(ws.vault()).unwrap();
+        let built_before_save = full_delta(ws.vault());
         ws.edit("mine".into(), Instant::now());
         ws.save().unwrap();
-        let outcome = ws.apply_index(built_before_save, tag);
+        let outcome = ws.apply_delta(built_before_save, tag);
         assert!(matches!(outcome, ApplyOutcome::Stale));
         let open = ws.open_note().unwrap();
         assert_eq!((open.buffer(), open.saved.as_str()), ("mine", "mine"));
@@ -333,11 +377,11 @@ mod tests {
     fn should_drop_stale_reload_when_note_created_meanwhile() {
         let (dir, mut ws, _reloader) = setup(&[("n.md", "old")]);
         let tag = ws.write_generation();
-        let built_before = ns_core::Index::build(ws.vault()).unwrap();
+        let built_before = full_delta(ws.vault());
         ws.create("fresh", None).unwrap();
         ws.edit("typed".into(), Instant::now());
         assert!(matches!(
-            ws.apply_index(built_before, tag),
+            ws.apply_delta(built_before, tag),
             ApplyOutcome::Stale
         ));
         let open = ws.open_note().unwrap();
@@ -351,10 +395,10 @@ mod tests {
     fn should_drop_stale_reload_when_note_deleted_meanwhile() {
         let (_dir, mut ws, _reloader) = setup(&[("n.md", "old"), ("gone.md", "x")]);
         let tag = ws.write_generation();
-        let built_before = ns_core::Index::build(ws.vault()).unwrap();
+        let built_before = full_delta(ws.vault());
         ws.delete(&p("gone.md")).unwrap();
         assert!(matches!(
-            ws.apply_index(built_before, tag),
+            ws.apply_delta(built_before, tag),
             ApplyOutcome::Stale
         ));
         assert!(ws.index().get(&p("gone.md").key()).is_none());
@@ -364,13 +408,161 @@ mod tests {
     fn should_drop_stale_reload_when_note_renamed_meanwhile() {
         let (_dir, mut ws, _reloader) = setup(&[("n.md", "old")]);
         let tag = ws.write_generation();
-        let built_before = ns_core::Index::build(ws.vault()).unwrap();
+        let built_before = full_delta(ws.vault());
         ws.rename(&p("n.md"), "m").unwrap();
         assert!(matches!(
-            ws.apply_index(built_before, tag),
+            ws.apply_delta(built_before, tag),
             ApplyOutcome::Stale
         ));
         assert!(ws.index().get(&p("m.md").key()).is_some());
+    }
+
+    fn revisions(ws: &Workspace) -> (u64, u64) {
+        (ws.index_revision(), ws.cross_note_revision())
+    }
+
+    #[test]
+    fn should_not_bump_revisions_for_the_echo_of_an_own_save() {
+        let (_dir, mut ws, mut reloader) = setup(&[("n.md", "old"), ("m.md", "other")]);
+        ws.select(&p("n.md")).unwrap();
+        ws.edit("mine".into(), Instant::now());
+        ws.save().unwrap();
+        let before = revisions(&ws);
+        let notices = reload(&mut ws, &mut reloader, Instant::now());
+        assert!(notices.is_empty(), "{notices:?}");
+        assert_eq!(revisions(&ws), before);
+    }
+
+    #[test]
+    fn should_not_bump_revisions_for_the_echo_of_an_own_save_that_changes_links_on_a_primed_scan() {
+        let (_dir, mut ws, mut reloader) = setup(&[("n.md", "old"), ("m.md", "other")]);
+        ws.select(&p("n.md")).unwrap();
+        reload(&mut ws, &mut reloader, Instant::now());
+        let primed = revisions(&ws);
+        ws.edit("see [[m]] and #tag".into(), Instant::now());
+        ws.save().unwrap();
+        let saved = revisions(&ws);
+        assert_ne!(
+            saved.0, primed.0,
+            "the save itself moves the index revision"
+        );
+        let notices = reload(&mut ws, &mut reloader, Instant::now());
+        assert!(notices.is_empty(), "{notices:?}");
+        assert_eq!(revisions(&ws), saved);
+        reload(&mut ws, &mut reloader, Instant::now());
+        assert_eq!(revisions(&ws), saved, "a second quiet scan stays quiet");
+        assert_eq!(ws.index().outgoing(&p("n.md").key()).len(), 1);
+    }
+
+    /// Dates `name` far enough back that a scan trusts its cache entry.
+    fn age(dir: &TempDir, name: &str) {
+        let text = fs::read_to_string(dir.path().join(name)).unwrap();
+        write_aged(dir, name, &text, 60);
+    }
+
+    fn assert_gone_after_reload(ws: &mut Workspace, reloader: &mut Reloader, name: &str) {
+        reload(ws, reloader, Instant::now());
+        assert!(ws.index().get(&p(name).key()).is_none(), "{name} lingers");
+        assert!(!ws.tree().notes.contains(&p(name)), "{name} in the tree");
+    }
+
+    #[test]
+    fn should_drop_a_created_note_that_vanished_before_any_scan_saw_it() {
+        let (dir, mut ws, mut reloader) = setup(&[("a.md", "x")]);
+        reload(&mut ws, &mut reloader, Instant::now());
+        ws.create("c", None).unwrap();
+        fs::remove_file(dir.path().join("c.md")).unwrap();
+        assert_gone_after_reload(&mut ws, &mut reloader, "c.md");
+    }
+
+    #[test]
+    fn should_drop_a_saved_note_that_vanished_before_any_scan_saw_it() {
+        let (dir, mut ws, mut reloader) = setup(&[("a.md", "x")]);
+        reload(&mut ws, &mut reloader, Instant::now());
+        write_aged(&dir, "d.md", "unseen", 60);
+        ws.select(&p("d.md")).unwrap();
+        ws.edit("typed".into(), Instant::now());
+        ws.save().unwrap();
+        fs::remove_file(dir.path().join("d.md")).unwrap();
+        assert_gone_after_reload(&mut ws, &mut reloader, "d.md");
+    }
+
+    #[test]
+    fn should_drop_a_rename_target_and_a_conflict_copy_that_vanished_before_any_scan_saw_them() {
+        let (dir, mut ws, mut reloader) = setup(&[("a.md", "x"), ("b.md", "y")]);
+        age(&dir, "a.md");
+        age(&dir, "b.md");
+        reload(&mut ws, &mut reloader, Instant::now());
+        ws.rename(&p("a.md"), "z").unwrap();
+        ws.select(&p("b.md")).unwrap();
+        ws.edit("typed".into(), Instant::now());
+        let conflict = ws.keep_unsaved_as_conflict().unwrap().unwrap();
+        fs::remove_file(dir.path().join("z.md")).unwrap();
+        fs::remove_file(dir.path().join(conflict.as_str())).unwrap();
+        assert_gone_after_reload(&mut ws, &mut reloader, "z.md");
+        assert!(ws.index().get(&conflict.key()).is_none());
+        assert!(ws.index().get(&p("a.md").key()).is_none());
+    }
+
+    #[test]
+    fn should_drop_a_created_note_that_vanished_while_a_scan_went_stale() {
+        let (dir, mut ws, mut reloader) = setup(&[("a.md", "x")]);
+        reload(&mut ws, &mut reloader, Instant::now());
+        ws.create("c", None).unwrap();
+        let t0 = Instant::now();
+        reloader.mark_changed(t0);
+        reloader.tick(&mut ws, t0 + RELOAD_DEBOUNCE);
+        ws.edit("typed".into(), t0);
+        ws.save().unwrap();
+        finish_job(&mut ws, &mut reloader, t0 + RELOAD_DEBOUNCE);
+        fs::remove_file(dir.path().join("c.md")).unwrap();
+        assert_gone_after_reload(&mut ws, &mut reloader, "c.md");
+    }
+
+    #[test]
+    fn should_apply_an_external_edit() {
+        let (dir, mut ws, mut reloader) = setup(&[("n.md", "old"), ("m.md", "other")]);
+        ws.select(&p("n.md")).unwrap();
+        let before = ws.cross_note_revision();
+        fs::write(dir.path().join("m.md"), "edited elsewhere").unwrap();
+        reload(&mut ws, &mut reloader, Instant::now());
+        assert_eq!(
+            ws.index().get(&p("m.md").key()).unwrap().content,
+            "edited elsewhere"
+        );
+        assert!(ws.cross_note_revision() > before);
+    }
+
+    #[test]
+    fn should_remove_a_note_deleted_since_the_workspace_opened() {
+        let (dir, mut ws, mut reloader) = setup(&[("n.md", "old"), ("gone.md", "x")]);
+        fs::remove_file(dir.path().join("gone.md")).unwrap();
+        reload(&mut ws, &mut reloader, Instant::now());
+        assert!(ws.index().get(&p("gone.md").key()).is_none());
+        assert!(!ws.tree().notes.contains(&p("gone.md")));
+    }
+
+    #[test]
+    fn should_scan_again_from_the_previous_cache_after_a_stale_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        write_aged(&dir, "a.md", "open", 30);
+        write_aged(&dir, "b.md", "old", 30);
+        let mut ws = Workspace::open(dir.path()).unwrap();
+        let mut reloader = Reloader::without_watcher(dir.path());
+        ws.select(&p("a.md")).unwrap();
+        // Prime the cache, so the next scan really is a delta.
+        reload(&mut ws, &mut reloader, Instant::now());
+        write_aged(&dir, "b.md", "newer text", 20);
+        let t0 = Instant::now();
+        reloader.mark_changed(t0);
+        reloader.tick(&mut ws, t0 + RELOAD_DEBOUNCE);
+        ws.edit("mine".into(), t0);
+        ws.save().unwrap();
+        finish_job(&mut ws, &mut reloader, t0 + RELOAD_DEBOUNCE);
+        assert_eq!(ws.index().get(&p("b.md").key()).unwrap().content, "old");
+        reload(&mut ws, &mut reloader, t0 + RELOAD_DEBOUNCE);
+        let b = ws.index().get(&p("b.md").key()).unwrap();
+        assert_eq!(b.content, "newer text");
     }
 
     #[test]
@@ -440,11 +632,11 @@ mod tests {
     fn should_drop_stale_reload_when_note_selected_meanwhile() {
         let (dir, mut ws, _reloader) = setup(&[("n.md", "old")]);
         let tag = ws.write_generation();
-        let built_before_write = ns_core::Index::build(ws.vault()).unwrap();
+        let built_before_write = full_delta(ws.vault());
         fs::write(dir.path().join("n.md"), "new").unwrap();
         ws.select(&p("n.md")).unwrap();
         assert!(matches!(
-            ws.apply_index(built_before_write, tag),
+            ws.apply_delta(built_before_write, tag),
             ApplyOutcome::Stale
         ));
         let open = ws.open_note().unwrap();
@@ -475,13 +667,13 @@ mod tests {
         ws.select(&p("n.md")).unwrap();
         ws.edit("mine".into(), Instant::now());
         fs::write(dir.path().join("n.md"), "theirs").unwrap();
-        let fresh = ns_core::Index::build(ws.vault()).unwrap();
+        let fresh = full_delta(ws.vault());
         let tag = ws.write_generation();
         let set_mode = |mode| fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode));
         set_mode(0o555).unwrap();
         let probe = dir.path().join(".probe");
         let can_write_anyway = fs::write(&probe, "").is_ok();
-        let outcome = (!can_write_anyway).then(|| ws.apply_index(fresh, tag));
+        let outcome = (!can_write_anyway).then(|| ws.apply_delta(fresh, tag));
         set_mode(0o755).unwrap();
         let Some(outcome) = outcome else {
             eprintln!("skipped: the folder stays writable (running as root)");

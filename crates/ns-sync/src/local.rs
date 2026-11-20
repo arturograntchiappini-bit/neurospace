@@ -9,7 +9,7 @@ use ns_core::{CoreError, NotePath, Vault};
 use crate::doc::{Hash32, SyncDoc, content_hash};
 use crate::error::{Result, SyncError};
 use crate::plan::{
-    BaseChange, DiskAction, DiskEntry, DiskScan, DocAction, PlanInput, Step, plan, scan,
+    BaseChange, DiskAction, DiskCache, DiskEntry, DiskScan, DocAction, PlanInput, Step, plan,
 };
 use crate::state::{
     BlockedNote, StateDir, from_hex, io_error, read_optional, remove_if_exists, to_hex,
@@ -66,6 +66,8 @@ struct StageRecord {
     /// The document version right after the stage was persisted.
     version: Vec<u8>,
     doc_changed: bool,
+    /// Whether path claims were settled, which the steps of the pass do not cover.
+    claims_resolved: bool,
     scan_blocked: Vec<BlockedNote>,
     notes: usize,
     rejected_entries: usize,
@@ -85,10 +87,14 @@ pub struct LocalReplica {
     /// The document's durable storage.
     pub store: DocStore,
     stage: StageRecord,
+    /// The disk as the last scan left it; it describes the vault, not the document.
+    disk: DiskCache,
     /// The version last written to `base.version`, if any.
     base_version: Option<Vec<u8>>,
     /// What `open` repaired, for the host to show once in the status.
     pub(crate) notice: Option<String>,
+    /// The log size past which a round compacts it; lowered by tests only.
+    pub(crate) compact_over: u64,
 }
 
 impl LocalReplica {
@@ -109,8 +115,10 @@ impl LocalReplica {
             base,
             store,
             stage: StageRecord::default(),
+            disk: DiskCache::default(),
             base_version,
             notice,
+            compact_over: COMPACT_LOG_BYTES,
         })
     }
 
@@ -130,10 +138,12 @@ impl LocalReplica {
         let mut total = Outcome::default();
         for _ in 0..MAX_PASSES {
             let steps = self.run_doc_stage()?;
+            let self_confirming = !self.stage.claims_resolved && confirms_itself(&steps);
             let pass = self.run_disk_stage(steps)?;
             let quiet = !pass.doc_changed && !pass.disk_changed;
+            let done = quiet || (self_confirming && pass.blocked.is_empty());
             total.absorb(pass);
-            if quiet {
+            if done {
                 break;
             }
         }
@@ -144,31 +154,32 @@ impl LocalReplica {
     /// Stops before touching anything when the vault lost its marker folder (spec 8.5 rule 5):
     /// an unmounted vault looks like a vault whose notes were all deleted.
     pub(crate) fn run_doc_stage(&mut self) -> Result<Vec<Step>> {
-        self.doc_stage_reading(scan)
+        self.doc_stage_reading(|_| ())
     }
 
-    /// `run_doc_stage` with the scan injected, so a test can make the vault vanish during it.
-    fn doc_stage_reading(
-        &mut self,
-        read: impl FnOnce(&Vault) -> Result<DiskScan>,
-    ) -> Result<Vec<Step>> {
+    /// `run_doc_stage` with a hook that runs just before the scan, so a test can make the vault
+    /// vanish during it.
+    fn doc_stage_reading(&mut self, before_scan: impl FnOnce(&Vault)) -> Result<Vec<Step>> {
         require_marker(&self.vault)?;
         let before = self.doc.version();
-        let scan = read(&self.vault)?;
+        before_scan(&self.vault);
+        let scan = self.disk.refresh(&self.vault)?;
         // A drive that goes away during the read phase turns unread notes into «deleted».
         require_marker(&self.vault)?;
         let resolved = self.doc.resolve_claims()?;
-        let (steps, notes) = self.plan_steps(&scan);
+        let (steps, notes) = plan_steps(&self.doc, &self.base, scan);
+        let scan_blocked = blocked_notes(scan);
         for action in steps.iter().filter_map(|step| step.doc.as_ref()) {
             apply_doc_action(&mut self.doc, action)?;
         }
         self.store.persist(&self.doc)?;
-        let compaction = self.compact_when_over(COMPACT_LOG_BYTES);
+        let compaction = self.compact_when_over(self.compact_over);
         let version = self.doc.version();
         self.stage = StageRecord {
             doc_changed: version != before,
+            claims_resolved: resolved.changed > 0,
             version,
-            scan_blocked: blocked_notes(&scan),
+            scan_blocked,
             notes,
             rejected_entries: self.doc.rejected_entries(),
             notice: (!resolved.settled)
@@ -234,31 +245,20 @@ impl LocalReplica {
         Ok(())
     }
 
-    /// The steps, and how many notes the document holds before they are applied.
-    fn plan_steps(&self, scan: &DiskScan) -> (Vec<Step>, usize) {
-        let view = self.doc.view();
-        let doc = &self.doc;
-        let steps = plan(&PlanInput {
-            disk: &scan.disk,
-            view: &view,
-            base: &self.base,
-            tombstoned: &|id, hash| doc.is_tombstoned(id, hash),
-            blocked_folders: &scan.blocked_folders,
-        });
-        (steps, view.len())
-    }
-
-    /// Whether a file was changed; a refused action becomes a blocked note.
-    fn carry_out(&self, step: &Step) -> std::result::Result<bool, BlockedNote> {
+    /// A refused action makes the cache read the file again: the scan may have seen stale content.
+    fn carry_out(&mut self, step: &Step) -> std::result::Result<bool, BlockedNote> {
         let Some(action) = &step.disk else {
             return Ok(false);
         };
-        apply_disk_action(&self.vault, action)
-            .map(|()| true)
-            .map_err(|reason| BlockedNote {
-                path: action_path(action).to_string(),
-                reason,
-            })
+        let path = action_path(action);
+        let Err(reason) = apply_disk_action(&self.vault, action) else {
+            return Ok(true);
+        };
+        self.disk.forget(&path.key());
+        Err(BlockedNote {
+            path: path.to_string(),
+            reason,
+        })
     }
 
     fn apply_base(&mut self, step: &Step) {
@@ -270,6 +270,35 @@ impl LocalReplica {
             self.base.remove(old);
         }
     }
+}
+
+/// Whether a pass made of these steps, all carried out, leaves nothing for the next pass to do:
+/// a text edit that only enters the document, or a file written, created or trashed from a note
+/// the document already holds. The count of notes in the document is unchanged, so `Outcome::notes`
+/// stays right. shortcut: creations and tombstones in the document still get a confirming pass;
+/// allow them too if their latency matters, adjusting `notes`.
+fn confirms_itself(steps: &[Step]) -> bool {
+    steps.iter().all(|step| {
+        let edit_into_document = matches!(step.doc, Some(DocAction::Update { .. }));
+        let file_from_document = matches!(
+            step.disk,
+            Some(DiskAction::Replace { .. } | DiskAction::Create { .. } | DiskAction::Trash { .. })
+        );
+        (edit_into_document && step.disk.is_none()) || (file_from_document && step.doc.is_none())
+    })
+}
+
+/// The steps, and how many notes the document holds before they are applied.
+fn plan_steps(doc: &SyncDoc, base: &Base, scan: &DiskScan) -> (Vec<Step>, usize) {
+    let view = doc.view();
+    let steps = plan(&PlanInput {
+        disk: &scan.disk,
+        view: &view,
+        base,
+        tombstoned: &|id, hash| doc.is_tombstoned(id, hash),
+        blocked_folders: &scan.blocked_folders,
+    });
+    (steps, view.len())
 }
 
 fn marker_path(vault: &Vault) -> PathBuf {
@@ -571,8 +600,8 @@ mod tests {
         let mut replica = dirs.open();
         let first = replica.reconcile().unwrap();
         assert!(first.doc_changed);
-        assert_eq!(note(&replica, "a.md").unwrap().text, "A\n");
-        assert_eq!(note(&replica, "d/b.md").unwrap().text, "B\n");
+        assert_eq!(&*note(&replica, "a.md").unwrap().text, "A\n");
+        assert_eq!(&*note(&replica, "d/b.md").unwrap().text, "B\n");
         assert_eq!(replica.doc.alive_notes().len(), 2);
         assert_eq!(replica.base.keys().count(), 2);
         let modified = |name: &str| std::fs::metadata(dirs.state_file(name)).unwrap().modified();
@@ -585,18 +614,65 @@ mod tests {
         assert_eq!(modified("base.version").unwrap(), version_time.unwrap());
     }
 
+    /// A round that ended without a confirming pass has nothing left to do.
+    fn assert_fixed_point(replica: &mut LocalReplica) {
+        assert!(replica.run_doc_stage().unwrap().is_empty());
+        assert!(settled(&replica.reconcile().unwrap()));
+    }
+
+    #[test]
+    fn should_skip_the_confirming_pass_after_a_local_edit() {
+        let dirs = Dirs::new(&[("a.md", "A\n"), ("b.md", "B\n")]);
+        let mut replica = dirs.open();
+        replica.reconcile().unwrap();
+        dirs.write("a.md", "A2\n");
+        let outcome = replica.reconcile().unwrap();
+        assert!(outcome.doc_changed && !outcome.disk_changed);
+        assert_eq!(outcome.passes, 1);
+        assert_eq!(&*note(&replica, "a.md").unwrap().text, "A2\n");
+        assert_fixed_point(&mut replica);
+    }
+
+    #[test]
+    fn should_skip_the_confirming_pass_after_remote_edits_creates_and_deletes() {
+        let dirs = Dirs::new(&[("a.md", "A\n"), ("b.md", "B\n")]);
+        let mut replica = dirs.open();
+        replica.reconcile().unwrap();
+        let b = note(&replica, "b.md").unwrap();
+        edit_remotely(&mut replica, "a.md", "A2\n");
+        replica.doc.create_note(&np("d/c.md"), "C\n").unwrap();
+        let outcome = replica.reconcile().unwrap();
+        assert!(outcome.disk_changed);
+        assert_eq!(outcome.passes, 1);
+        expect_files(
+            &replica,
+            &[("a.md", "A2\n"), ("b.md", "B\n"), ("d/c.md", "C\n")],
+        );
+        assert_fixed_point(&mut replica);
+        replica.doc.tombstone(&b.id).unwrap();
+        assert_eq!(replica.reconcile().unwrap().passes, 1);
+        expect_files(&replica, &[("a.md", "A2\n"), ("d/c.md", "C\n")]);
+        assert_fixed_point(&mut replica);
+    }
+
+    #[test]
+    fn should_confirm_again_when_a_step_touches_both_document_and_disk() {
+        let (_dirs, mut replica) = both_changed_setup();
+        assert!(replica.reconcile().unwrap().passes > 1);
+        assert_two_versions_kept(&replica);
+    }
+
     #[test]
     fn should_not_tombstone_notes_when_the_vault_vanishes_during_the_scan() {
         let dirs = Dirs::new(&[("a.md", "A\n"), ("b.md", "B\n")]);
         let mut replica = dirs.open();
         replica.reconcile().unwrap();
-        let vanishing_scan = |vault: &Vault| {
+        let vanish = |_: &Vault| {
             dirs.remove("a.md");
             dirs.remove("b.md");
             std::fs::remove_dir(dirs.path(".neurospace")).unwrap();
-            scan(vault)
         };
-        let error = replica.doc_stage_reading(vanishing_scan).unwrap_err();
+        let error = replica.doc_stage_reading(vanish).unwrap_err();
         assert!(
             matches!(error, SyncError::VaultMarkerMissing(_)),
             "{error:?}"
@@ -612,7 +688,7 @@ mod tests {
         )]);
         let mut replica = dirs.open();
         replica.reconcile().unwrap();
-        std::fs::create_dir(dirs.state_file("doc.snap.tmp")).unwrap();
+        std::fs::create_dir(dirs.state_file("doc.snap")).unwrap();
         let notice = replica.compact_when_over(0).unwrap();
         assert!(notice.contains("compaction"), "{notice}");
         dirs.write(
@@ -658,8 +734,8 @@ mod tests {
         dirs.remove("d/b.md");
         replica.reconcile().unwrap();
         let a = note(&replica, "a.md").unwrap();
-        assert_eq!((a.id, a.text.as_str()), (a_id, "A2\n"));
-        assert_eq!(note(&replica, "c.md").unwrap().text, "C\n");
+        assert_eq!((a.id, &*a.text), (a_id, "A2\n"));
+        assert_eq!(&*note(&replica, "c.md").unwrap().text, "C\n");
         assert!(note(&replica, "d/b.md").is_none());
         assert!(trash(&replica).is_empty());
     }
@@ -799,7 +875,7 @@ mod tests {
         replica.reconcile().unwrap();
         dirs.write("a.md", [0xff, 0xfe]);
         let outcome = replica.reconcile().unwrap();
-        assert_eq!(note(&replica, "a.md").unwrap().text, "A\n");
+        assert_eq!(&*note(&replica, "a.md").unwrap().text, "A\n");
         assert_eq!(std::fs::read(dirs.path("a.md")).unwrap(), [0xff, 0xfe]);
         assert_eq!(outcome.blocked.len(), 1);
         assert_eq!(outcome.blocked[0].path, "a.md");
@@ -886,6 +962,70 @@ mod tests {
         let mut contents: Vec<&str> = found.values().map(String::as_str).collect();
         contents.sort_unstable();
         assert_eq!(contents, ["late\n", "remote\n"]);
+    }
+
+    fn set_modified(dirs: &Dirs, relative: &str, time: std::time::SystemTime) {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dirs.path(relative))
+            .unwrap();
+        file.set_modified(time).unwrap();
+    }
+
+    #[test]
+    fn should_take_a_missed_local_edit_after_a_refused_overwrite() {
+        let dirs = Dirs::new(&[("x.md", "abcd")]);
+        let mut replica = dirs.open();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        set_modified(&dirs, "x.md", old);
+        replica.reconcile().unwrap();
+        dirs.write("x.md", "wxyz");
+        set_modified(&dirs, "x.md", old);
+        let x = note(&replica, "x.md").unwrap();
+        replica.doc.update_note(&x.id, "new text").unwrap();
+        let steps = replica.run_doc_stage().unwrap();
+        let refused = replica.run_disk_stage(steps).unwrap();
+        assert_eq!(dirs.read("x.md"), "wxyz");
+        assert_eq!(refused.blocked.len(), 1);
+        let mut last = replica.reconcile().unwrap();
+        for _ in 0..3 {
+            last = replica.reconcile().unwrap();
+        }
+        assert!(settled(&last) && last.blocked.is_empty(), "{last:?}");
+        let mut texts: Vec<String> = files(&replica).into_values().collect();
+        texts.sort_unstable();
+        assert_eq!(texts, ["new text", "wxyz"]);
+        let mut in_doc: Vec<String> = replica
+            .doc
+            .alive_notes()
+            .into_iter()
+            .map(|n| n.text.to_string())
+            .collect();
+        in_doc.sort_unstable();
+        assert_eq!(in_doc, texts);
+    }
+
+    #[test]
+    fn should_read_a_file_again_after_any_refused_trash() {
+        let dirs = Dirs::new(&[("x.md", "abcd")]);
+        let mut replica = dirs.open();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        set_modified(&dirs, "x.md", old);
+        replica.reconcile().unwrap();
+        let id = note(&replica, "x.md").unwrap().id;
+        replica.doc.tombstone(&id).unwrap();
+        let steps = replica.run_doc_stage().unwrap();
+        // Same size and old time: only a forgotten cache entry makes the next scan see it.
+        dirs.write("x.md", [0xff; 4]);
+        set_modified(&dirs, "x.md", old);
+        let outcome = replica.run_disk_stage(steps).unwrap();
+        assert!(outcome.blocked[0].reason.contains("UTF-8"));
+        let scan = replica.disk.refresh(&replica.vault).unwrap();
+        let entry = scan.disk.get(&np("x.md").key());
+        assert!(
+            matches!(entry, Some(DiskEntry::Blocked { .. })),
+            "{entry:?}"
+        );
     }
 
     #[test]

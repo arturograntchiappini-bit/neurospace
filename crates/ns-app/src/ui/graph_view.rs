@@ -21,6 +21,9 @@ const SIMPLIFIED_HINT: &str = "Large vault: simplified layout";
 const STEP_BUDGET: Duration = Duration::from_millis(8);
 /// With «Reduce motion» a frame runs the layout to rest, but still not longer than this.
 const REDUCED_MOTION_BUDGET: Duration = Duration::from_millis(200);
+/// The longest the layout keeps animating after a wake. At 10 000 notes a step costs a whole
+/// frame, so the step cap alone would let it run for minutes.
+const WAKE_TIME_CAP: Duration = Duration::from_secs(10);
 const SCROLL_ZOOM_RATE: f32 = 0.002;
 const DIMMED: f32 = 0.25;
 const GHOST_FILL: f32 = 0.5;
@@ -60,6 +63,9 @@ pub struct GraphView {
     dragging: Option<(String, [f32; 2])>,
     reduce_motion: bool,
     budgets: StepBudgets,
+    /// How long the layout may keep animating, and since when it has.
+    wake_cap: Duration,
+    animating_since: Option<Instant>,
 }
 
 impl Default for GraphView {
@@ -72,6 +78,8 @@ impl Default for GraphView {
             dragging: None,
             reduce_motion: false,
             budgets: StepBudgets::default(),
+            wake_cap: WAKE_TIME_CAP,
+            animating_since: None,
         }
     }
 }
@@ -164,6 +172,11 @@ impl GraphView {
     /// Replaces the per-frame time limits of the layout. Used by tests.
     pub fn set_step_budgets(&mut self, budgets: StepBudgets) {
         self.budgets = budgets;
+    }
+
+    /// Replaces the longest time the layout keeps animating after a wake. Used by tests.
+    pub fn set_wake_cap(&mut self, cap: Duration) {
+        self.wake_cap = cap;
     }
 
     /// The area the graph was drawn in last frame. Used by tests.
@@ -267,6 +280,7 @@ impl GraphView {
         } else {
             self.budgets.animated
         };
+        self.enforce_wake_cap(dragged.is_some());
         let started = Instant::now();
         while !self.layout.is_settled() {
             if let Some((node, at)) = dragged {
@@ -279,6 +293,20 @@ impl GraphView {
         }
         if !self.layout.is_settled() {
             ctx.request_repaint();
+        }
+    }
+
+    /// Rests the layout once it has animated for `wake_cap`. A drag keeps it animating, and the
+    /// clock restarts when it ends.
+    fn enforce_wake_cap(&mut self, dragging: bool) {
+        if dragging || self.layout.is_settled() {
+            self.animating_since = None;
+            return;
+        }
+        let since = *self.animating_since.get_or_insert_with(Instant::now);
+        if since.elapsed() >= self.wake_cap {
+            self.layout.rest();
+            self.animating_since = None;
         }
     }
 
@@ -322,6 +350,9 @@ impl GraphView {
                     colour.gamma_multiply(DIMMED)
                 };
                 let ends = [i, j].map(|n| self.to_screen(self.layout.position(n)));
+                if !edge_visible(scene.painter.clip_rect(), ends[0], ends[1]) {
+                    continue;
+                }
                 scene
                     .painter
                     .line_segment(ends, Stroke::new(EDGE_WIDTH, shade));
@@ -388,6 +419,14 @@ impl GraphView {
     }
 }
 
+/// True when the segment's bounding box meets `clip` grown by half the stroke, so a horizontal or
+/// vertical edge whose stroke reaches into the view is drawn. A diagonal that only clips a corner
+/// of the box may still be drawn; the painter cuts it.
+fn edge_visible(clip: Rect, a: Pos2, b: Pos2) -> bool {
+    clip.expand(EDGE_WIDTH / 2.0)
+        .intersects(Rect::from_two_pos(a, b))
+}
+
 fn paint_focus_ring(painter: &Painter, p: &Palette, pane: Rect) {
     let ring = Stroke::new(FOCUS_RING_WIDTH, p.accent.to_color32());
     painter.rect_stroke(pane, CornerRadius::ZERO, ring, StrokeKind::Inside);
@@ -403,4 +442,49 @@ fn focused_keys(ui: &Ui, response: &Response) -> (bool, bool) {
         let activated = input.key_pressed(Key::Enter) || input.key_pressed(Key::Space);
         (activated, input.key_pressed(Key::Home))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CLIP: Rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0));
+
+    #[test]
+    fn should_draw_an_edge_inside_the_view() {
+        assert!(edge_visible(CLIP, pos2(10.0, 10.0), pos2(90.0, 40.0)));
+    }
+
+    #[test]
+    fn should_skip_an_edge_wholly_to_one_side_of_the_view() {
+        assert!(!edge_visible(CLIP, pos2(-50.0, 10.0), pos2(-10.0, 90.0)));
+    }
+
+    #[test]
+    fn should_draw_an_edge_whose_stroke_reaches_into_the_view() {
+        let just_outside = CLIP.right() + EDGE_WIDTH / 2.0 - 0.1;
+        assert!(edge_visible(
+            CLIP,
+            pos2(just_outside, 10.0),
+            pos2(just_outside, 90.0)
+        ));
+        let too_far = CLIP.right() + EDGE_WIDTH / 2.0 + 0.1;
+        assert!(!edge_visible(
+            CLIP,
+            pos2(too_far, 10.0),
+            pos2(too_far, 90.0)
+        ));
+    }
+
+    #[test]
+    fn should_draw_an_edge_that_touches_the_view_edge_or_has_no_length() {
+        assert!(edge_visible(CLIP, pos2(100.0, 10.0), pos2(150.0, 20.0)));
+        assert!(edge_visible(CLIP, pos2(50.0, 50.0), pos2(50.0, 50.0)));
+        assert!(!edge_visible(CLIP, pos2(500.0, 500.0), pos2(500.0, 500.0)));
+    }
+
+    #[test]
+    fn should_draw_an_edge_that_crosses_the_view_with_both_ends_outside() {
+        assert!(edge_visible(CLIP, pos2(-50.0, 50.0), pos2(150.0, 60.0)));
+    }
 }

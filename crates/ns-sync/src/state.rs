@@ -1,6 +1,7 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -163,6 +164,15 @@ pub struct Status {
     pub last_error: Option<String>,
     /// Time of this update, in seconds since the Unix epoch.
     pub updated_unix: u64,
+    /// The network mode the engine was started with; `None` in a file from an older version.
+    #[serde(default)]
+    pub mode: Option<NetMode>,
+    /// Standing conditions, each shown exactly while it holds (never an error, never a secret).
+    #[serde(default)]
+    pub notices: Vec<String>,
+    /// A sync round is running; the rest of the status is from the moment it began.
+    #[serde(default)]
+    pub busy: bool,
 }
 
 fn non_empty(env: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
@@ -211,8 +221,68 @@ pub(crate) fn corrupt(path: &Path, reason: impl ToString) -> SyncError {
     }
 }
 
+/// Waits before each retry of `retry_when_denied`; five tries in all.
+#[cfg(any(windows, test))]
+const RETRY_DELAYS_MS: [u64; 4] = [10, 20, 40, 80];
+
+/// Runs `operation` again while it fails with `PermissionDenied`, waiting 10, 20, 40 and 80 ms
+/// between tries; any other result, or the fifth denial, is returned as it is.
+#[cfg(any(windows, test))]
+fn retry_when_denied<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut result = operation();
+    for delay in RETRY_DELAYS_MS {
+        if !matches!(&result, Err(error) if error.kind() == ErrorKind::PermissionDenied) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        result = operation();
+    }
+    result
+}
+
+/// Windows refuses a read for a moment while another process replaces the file (`status.json` is
+/// rewritten under its readers), so a denied read is tried again a few times there.
+#[cfg(windows)]
+fn read_file(path: &Path) -> io::Result<Vec<u8>> {
+    retry_when_denied(|| std::fs::read(path))
+}
+
+#[cfg(not(windows))]
+fn read_file(path: &Path) -> io::Result<Vec<u8>> {
+    std::fs::read(path)
+}
+
+/// The rename of `write_atomic`: Windows refuses it for a moment while the target is being replaced
+/// or opened by another process, so it is tried again a few times there.
+#[cfg(windows)]
+fn rename_over(from: &Path, to: &Path) -> io::Result<()> {
+    retry_when_denied(|| std::fs::rename(from, to))
+}
+
+#[cfg(not(windows))]
+fn rename_over(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::rename(from, to)
+}
+
+/// Waits before each re-read of a missing `status.json`: 100 ms in all, enough for the engine's rename.
+const ABSENT_REREAD_DELAYS_MS: [u64; 4] = [10, 20, 30, 40];
+
+/// Calls `read` until it finds something, then again after each delay of `ABSENT_REREAD_DELAYS_MS`;
+/// an error ends it at once.
+fn read_until_found<T>(mut read: impl FnMut() -> Result<Option<T>>) -> Result<Option<T>> {
+    let mut found = read()?;
+    for delay in ABSENT_REREAD_DELAYS_MS {
+        if found.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        found = read()?;
+    }
+    Ok(found)
+}
+
 pub(crate) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
-    match std::fs::read(path) {
+    match read_file(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io_error(path)(error)),
@@ -271,15 +341,35 @@ fn write_temporary(tmp: &Path, bytes: &[u8]) -> Result<()> {
     })
 }
 
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Writes through a temporary file no other writer shares (the engine thread and the status keeper
+/// both write `status.json`). A crash can leave one behind: `StateDir::clear_group` and the engine
+/// at start-up remove them.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
-    tmp_name.push(".tmp");
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    tmp_name.push(format!(".{}-{counter}.tmp", std::process::id()));
     let tmp = path.with_file_name(tmp_name);
     write_temporary(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).map_err(|source| {
+    rename_over(&tmp, path).map_err(|source| {
         let _ = std::fs::remove_file(&tmp);
         io_error(path)(source)
     })
+}
+
+/// Whether `name` is `<stem>.<pid>-<counter>.tmp`, the temporary name of `write_atomic`, for a `stem`
+/// in `stems`. Nothing else matches, so removing the matches never touches another file.
+fn is_temporary_of(name: &str, stems: &[&str]) -> bool {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    name.strip_suffix(".tmp")
+        .and_then(|rest| rest.rsplit_once('.'))
+        .is_some_and(|(stem, suffix)| {
+            stems.contains(&stem)
+                && suffix
+                    .split_once('-')
+                    .is_some_and(|(a, b)| digits(a) && digits(b))
+        })
 }
 
 /// Describes a JSON failure by kind and position only: the message may quote the input.
@@ -433,6 +523,12 @@ impl StateDir {
         write_json(&self.file("peers.json"), &peers)
     }
 
+    /// Whether `add_peer` can keep this id: it is known already, or the list has room.
+    pub fn peer_fits(&self, id: &str) -> Result<bool> {
+        let peers = self.peers()?;
+        Ok(peers.len() < MAX_STORED_PEERS || peers.iter().any(|known| known.id == id))
+    }
+
     /// Adds a peer, or merges new addresses into a known one. True when the id is new and was stored;
     /// at `MAX_STORED_PEERS` a new id is dropped.
     pub fn add_peer(&self, peer: PeerEntry) -> Result<bool> {
@@ -504,16 +600,51 @@ impl StateDir {
         write_json(&self.file("status.json"), status)
     }
 
-    /// The last published status, if any.
+    /// The last published status, if any. A missing file is read up to four more times, waiting
+    /// 10, 20, 30 and 40 ms before each (about 100 ms in total): the engine replaces it all the
+    /// time, and a reader can hit the instant between two names.
     pub fn read_status(&self) -> Result<Option<Status>> {
-        read_json(&self.file("status.json"))
+        read_until_found(|| read_json(&self.file("status.json")))
     }
 
-    /// Forgets the sync group but keeps the device key, device id and vault path.
+    /// Forgets the sync group but keeps the device key, device id and vault path. Leftover
+    /// temporary files of the group files (they can hold the secret or a snapshot) go too, on a
+    /// best-effort basis: one that cannot be deleted never fails the leave.
     pub fn clear_group(&self) -> Result<()> {
         GROUP_FILES
             .iter()
-            .try_for_each(|name| remove_if_exists(&self.file(name)))
+            .try_for_each(|name| remove_if_exists(&self.file(name)))?;
+        self.remove_temporaries(&GROUP_FILES);
+        Ok(())
+    }
+
+    /// Removes the temporary files a crash left behind for the state files the engine alone
+    /// writes. Call it while holding the engine lock; the command line writes `command.pending`
+    /// and `config.json` without the lock, so they are not touched. Best-effort, like `clear_group`.
+    pub fn remove_stale_temporaries(&self, _lock: &EngineLock) {
+        let mut stems = vec!["device.key", "device.id"];
+        stems.extend(
+            GROUP_FILES
+                .iter()
+                .filter(|name| **name != "command.pending"),
+        );
+        self.remove_temporaries(&stems);
+    }
+
+    /// Skips whatever cannot be deleted: a file held open, or a directory with a matching name.
+    fn remove_temporaries(&self, stems: &[&str]) {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name
+                .to_str()
+                .is_some_and(|name| is_temporary_of(name, stems))
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
 }
 
@@ -756,12 +887,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn should_not_keep_the_mode_of_a_stale_temporary_file() {
+    fn should_create_the_secret_readable_by_the_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let (_tmp, state) = fresh();
-        let tmp = state.file("secret.tmp");
-        std::fs::write(&tmp, "old").unwrap();
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
         state.save_secret(&[1; 32]).unwrap();
         let mode = std::fs::metadata(state.file("secret"))
             .unwrap()
@@ -877,6 +1005,9 @@ mod tests {
             relay: Some("https://relay.example./".to_string()),
             last_error: Some("boom".to_string()),
             updated_unix: 1_700_000_000,
+            mode: Some(NetMode::Lan),
+            notices: vec!["watching is off".to_string()],
+            busy: true,
         };
         state.write_status(&status).unwrap();
         assert_eq!(state.read_status().unwrap(), Some(status));
@@ -888,6 +1019,50 @@ mod tests {
         let old = r#"{"pid":1,"device_id":"","addresses":[],"peers":[],"notes":0,"blocked":[],"last_error":null,"updated_unix":0}"#;
         std::fs::write(state.file("status.json"), old).unwrap();
         assert_eq!(state.read_status().unwrap().unwrap().relay, None);
+    }
+
+    #[test]
+    fn should_read_an_old_status_without_the_new_fields() {
+        let (_tmp, state) = fresh();
+        let old = r#"{"pid":1,"device_id":"","addresses":[],"peers":[],"notes":0,"blocked":[],"last_error":null,"updated_unix":0}"#;
+        std::fs::write(state.file("status.json"), old).unwrap();
+        let status = state.read_status().unwrap().unwrap();
+        assert_eq!(status.mode, None);
+        assert!(status.notices.is_empty());
+        assert!(!status.busy);
+    }
+
+    #[test]
+    fn should_never_tear_status_json_when_two_threads_write_it() {
+        use std::sync::atomic::AtomicUsize;
+        let (_tmp, state) = fresh();
+        let status = Status::default();
+        state.write_status(&status).unwrap();
+        let writers_left = AtomicUsize::new(2);
+        let failures = AtomicUsize::new(0);
+        let mut torn_reads = 0;
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    for _ in 0..200 {
+                        if state.write_status(&status).is_err() {
+                            failures.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                    writers_left.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+            while writers_left.load(Ordering::SeqCst) > 0 {
+                // Windows may refuse to open a file for an instant while a rename replaces it; that is
+                // the rename's doing, not a torn file, so only a missing or unparsable file counts.
+                match state.read_status() {
+                    Ok(Some(read)) if read == status => {}
+                    Err(SyncError::Io { .. }) => {}
+                    _ => torn_reads += 1,
+                }
+            }
+        });
+        assert_eq!((failures.into_inner(), torn_reads), (0, 0));
     }
 
     #[test]
@@ -918,6 +1093,146 @@ mod tests {
             ["device.id", "device.key", "engine.lock", "vault-path.txt"]
         );
         state.clear_group().unwrap();
+    }
+
+    #[test]
+    fn should_remove_temporary_leftovers_of_group_files_when_clearing_the_group() {
+        let (_tmp, state) = fresh();
+        let leftovers = [
+            "secret.12-3.tmp",
+            "doc.snap.9-0.tmp",
+            "status.json.1-2.tmp",
+            "command.pending.7-7.tmp",
+        ];
+        let others = [
+            "notes.12-3.tmp",
+            "secret.tmp",
+            "secret.12-3.tmp.bak",
+            "secret.a-3.tmp",
+            "secret.12-.tmp",
+            "secret.-3.tmp",
+            "device.key.1-1.tmp",
+            "config.json.1-1.tmp",
+        ];
+        for name in leftovers.iter().chain(&others) {
+            std::fs::write(state.file(name), "x").unwrap();
+        }
+        state.clear_group().unwrap();
+        let mut expected: Vec<&str> = others.to_vec();
+        expected.extend(
+            ["device.id", "engine.lock", "vault-path.txt"]
+                .iter()
+                .filter(|n| state.file(n).exists()),
+        );
+        expected.sort_unstable();
+        assert_eq!(names(&state), expected);
+    }
+
+    fn denied() -> io::Error {
+        ErrorKind::PermissionDenied.into()
+    }
+
+    #[test]
+    fn should_retry_an_operation_denied_twice_and_then_succeed() {
+        let mut calls = 0;
+        let result = retry_when_denied(|| {
+            calls += 1;
+            if calls <= 2 { Err(denied()) } else { Ok(calls) }
+        });
+        assert_eq!(result.unwrap(), 3);
+    }
+
+    #[test]
+    fn should_give_up_after_five_denied_tries() {
+        let mut calls = 0;
+        let result: io::Result<()> = retry_when_denied(|| {
+            calls += 1;
+            Err(denied())
+        });
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::PermissionDenied);
+        assert_eq!(calls, 5);
+    }
+
+    #[test]
+    fn should_not_retry_any_other_error() {
+        let mut calls = 0;
+        let result: io::Result<()> = retry_when_denied(|| {
+            calls += 1;
+            Err(ErrorKind::NotFound.into())
+        });
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::NotFound);
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn should_find_a_status_that_appears_between_two_reads() {
+        let (_tmp, state) = fresh();
+        let status = Status::default();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                state.write_status(&status).unwrap();
+            });
+            assert_eq!(state.read_status().unwrap(), Some(status.clone()));
+        });
+    }
+
+    #[test]
+    fn should_read_five_times_before_calling_a_status_missing() {
+        let mut reads = 0;
+        let missing = read_until_found(|| {
+            reads += 1;
+            Ok::<Option<u8>, SyncError>(None)
+        });
+        assert_eq!((missing.unwrap(), reads), (None, 5));
+        let mut reads = 0;
+        let found = read_until_found(|| {
+            reads += 1;
+            Ok((reads == 2).then_some(7))
+        });
+        assert_eq!((found.unwrap(), reads), (Some(7), 2));
+    }
+
+    #[test]
+    fn should_report_a_failed_status_read_at_once() {
+        let mut reads = 0;
+        let failed = read_until_found(|| {
+            reads += 1;
+            Err::<Option<u8>, _>(SyncError::NotConfigured)
+        });
+        assert!(failed.is_err());
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn should_finish_clearing_the_group_when_a_leftover_cannot_be_deleted() {
+        let (_tmp, state) = fresh();
+        state.save_secret(&[1; 32]).unwrap();
+        let stuck_dir = state.file("doc.snap.2-2.tmp");
+        std::fs::create_dir(&stuck_dir).unwrap();
+        std::fs::write(stuck_dir.join("inner"), "x").unwrap();
+        std::fs::write(state.file("secret.3-3.tmp"), "x").unwrap();
+        state.clear_group().unwrap();
+        assert!(!state.file("secret").exists());
+        assert!(!state.file("secret.3-3.tmp").exists());
+        assert!(stuck_dir.join("inner").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn should_finish_clearing_the_group_when_a_leftover_is_held_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (_tmp, state) = fresh();
+        let leftover = state.file("secret.4-4.tmp");
+        std::fs::write(&leftover, "x").unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&leftover)
+            .unwrap();
+        state.clear_group().unwrap();
+        drop(held);
+        assert!(leftover.exists());
     }
 
     #[test]
