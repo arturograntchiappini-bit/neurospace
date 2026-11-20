@@ -25,6 +25,7 @@ jobs:
         os: [ubuntu-22.04, windows-latest]
     steps:
       - name: Keep long paths in git checkouts
+        if: runner.os == 'Windows'
         run: git config --system core.longpaths true
 
       - uses: actions/checkout@v4
