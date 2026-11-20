@@ -4,16 +4,16 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    Align2, Button, Color32, Context, CornerRadius, FontId, Key, Label, Mesh, Painter, Pos2, Rect,
-    Response, RichText, Role, Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, Vec2, WidgetInfo,
-    pos2, vec2,
+    Align2, Button, Color32, Context, CornerRadius, Event, FontId, Key, Label, Mesh, Painter, Pos2,
+    Rect, Response, RichText, Role, Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, Vec2,
+    WidgetInfo, pos2, vec2,
 };
 use ns_core::{Graph, NotePath};
 
 use crate::state::graph_layout::Layout;
 use crate::state::graph_viewport::{LABEL_ZOOM, Viewport};
 use crate::state::{NoteAction, Workspace};
-use crate::ui::theme::Palette;
+use crate::ui::theme::{Palette, RADIUS};
 
 const GRAPH_NAME: &str = "Graph of notes";
 const EMPTY_HINT: &str = "No notes yet";
@@ -30,11 +30,16 @@ const SCROLL_ZOOM_RATE: f32 = 0.002;
 const DIMMED: f32 = 0.25;
 const GHOST_FILL: f32 = 0.5;
 const EDGE_WIDTH: f32 = 1.0;
+/// What one edge adds to the edge mesh: four vertices at each end, three quads between them.
+const EDGE_VERTICES: usize = 8;
+const EDGE_TRIANGLES: usize = 6;
 const OUTLINE_WIDTH: f32 = 1.0;
 const OPEN_RING_WIDTH: f32 = 2.0;
 const OPEN_RING_GAP: f32 = 3.0;
 const LABEL_GAP: f32 = 3.0;
 const FOCUS_RING_WIDTH: f32 = 2.0;
+/// Space between the crowded hint's text and the edge of its backing.
+const HINT_PADDING: Vec2 = vec2(10.0, 4.0);
 /// With more edges than this in view, only those of the hovered and the open note are drawn.
 const MAX_DRAWN_EDGES: usize = 15_000;
 /// A note whose circle would be smaller than this (in points) is drawn as a plain square.
@@ -74,6 +79,9 @@ pub struct GraphView {
     animating_since: Option<Instant>,
     /// How many edges may be in view before only some are drawn.
     max_drawn_edges: usize,
+    /// Whether the view is refitted every frame: from a wake of the layout until the user moves
+    /// the view or the layout is at rest.
+    auto_fit: bool,
 }
 
 impl Default for GraphView {
@@ -89,6 +97,7 @@ impl Default for GraphView {
             wake_cap: WAKE_TIME_CAP,
             animating_since: None,
             max_drawn_edges: MAX_DRAWN_EDGES,
+            auto_fit: false,
         }
     }
 }
@@ -119,11 +128,12 @@ impl GraphView {
         response.widget_info(|| WidgetInfo::labeled(Role::Canvas, true, GRAPH_NAME));
         self.pane = Some(response.rect);
         let (activated, home) = focused_keys(ui, &response);
-        if fit || home {
-            self.fit();
+        if self.navigate(ui, &response) || key_pressed(ui, &response) {
+            self.auto_fit = false;
         }
-        self.navigate(ui, &response);
+        self.auto_fit |= fit || home;
         self.settle(ui.ctx());
+        self.keep_fitted();
         let hovered = response
             .hover_pos()
             .and_then(|at| self.layout.node_at(self.to_world(at)));
@@ -206,6 +216,7 @@ impl GraphView {
         if self.revision != revision {
             self.layout.update(&workspace.index().graph());
             self.revision = revision;
+            self.auto_fit = true;
         }
     }
 
@@ -231,10 +242,19 @@ impl GraphView {
         self.viewport.fit(self.layout.bounds(), size);
     }
 
-    fn navigate(&mut self, ui: &Ui, response: &Response) {
-        if let Some(pointer) = response.hover_pos() {
-            self.zoom_about(ui, pointer);
+    /// Fits the view to the layout while `auto_fit` holds, and stops when the layout is at rest.
+    fn keep_fitted(&mut self) {
+        if self.auto_fit {
+            self.fit();
+            self.auto_fit = !self.layout.is_settled();
         }
+    }
+
+    /// Applies zoom, pan and drag. Returns true when the user moved the view or a node.
+    fn navigate(&mut self, ui: &Ui, response: &Response) -> bool {
+        let zoomed = response
+            .hover_pos()
+            .is_some_and(|pointer| self.zoom_about(ui, pointer));
         if response.drag_started() {
             self.start_drag(ui);
         }
@@ -243,14 +263,17 @@ impl GraphView {
         } else {
             self.dragging = None;
         }
+        zoomed || response.drag_started() || response.dragged()
     }
 
-    /// Scroll (or pinch) zooms, keeping the point under `pointer` where it is.
-    fn zoom_about(&mut self, ui: &Ui, pointer: Pos2) {
+    /// Scroll (or pinch) zooms, keeping the point under `pointer` where it is. Returns true when
+    /// it zoomed.
+    fn zoom_about(&mut self, ui: &Ui, pointer: Pos2) -> bool {
         let (scroll, pinch) = ui.input(|input| (input.smooth_scroll_delta().y, input.zoom_delta()));
         let factor = pinch * (scroll * SCROLL_ZOOM_RATE).exp();
         let offset = pointer - self.pane.map_or(Pos2::ZERO, |pane| pane.center());
         self.viewport.zoom_about([offset.x, offset.y], factor);
+        factor != 1.0
     }
 
     /// A press on a node starts moving it; a press on the background pans the view.
@@ -368,8 +391,9 @@ impl GraphView {
         let (edges, crowded) = self.edges_to_draw(scene, &screen);
         let colour = scene.palette.edge.to_color32();
         let mut mesh = Mesh::default();
-        mesh.reserve_vertices(3 * edges.len());
-        mesh.reserve_triangles(2 * edges.len());
+        mesh.reserve_vertices(EDGE_VERTICES * edges.len());
+        mesh.reserve_triangles(EDGE_TRIANGLES * edges.len());
+        let pixel = 1.0 / scene.painter.pixels_per_point();
         for (i, j) in edges {
             let touched = scene.hovered.is_none_or(|h| h == i || h == j);
             let shade = if touched {
@@ -377,7 +401,7 @@ impl GraphView {
             } else {
                 colour.gamma_multiply(DIMMED)
             };
-            push_edge(&mut mesh, [screen[i], screen[j]], shade);
+            push_edge(&mut mesh, [screen[i], screen[j]], shade, pixel);
         }
         scene.painter.add(Shape::mesh(mesh));
         crowded
@@ -476,40 +500,52 @@ fn edge_visible(clip: Rect, a: Pos2, b: Pos2) -> bool {
         .intersects(Rect::from_two_pos(a, b))
 }
 
-/// Adds a line of `EDGE_WIDTH` with soft sides: three vertices at each end, full `colour` along
-/// the middle fading to nothing `EDGE_WIDTH` away, which draws like a 1 px anti-aliased stroke.
-fn push_edge(mesh: &mut Mesh, [a, b]: [Pos2; 2], colour: Color32) {
+/// Adds a line whose core, `pixel` wide (one physical pixel, in points), is in full `colour`, so
+/// that wherever it lands on the pixel grid some pixel centre gets the whole token; half a pixel
+/// of feathering on each side then fades it to nothing, which keeps it as thin as a 1 px stroke.
+fn push_edge(mesh: &mut Mesh, [a, b]: [Pos2; 2], colour: Color32, pixel: f32) {
     let along = (b - a).normalized();
     if !along.is_finite() {
         return;
     }
-    let side = vec2(-along.y, along.x) * EDGE_WIDTH;
+    let side = vec2(-along.y, along.x);
     let first = mesh.vertices.len() as u32;
     for end in [a, b] {
         for (offset, shade) in [
-            (-side, Color32::TRANSPARENT),
-            (Vec2::ZERO, colour),
-            (side, Color32::TRANSPARENT),
+            (-pixel, Color32::TRANSPARENT),
+            (-pixel / 2.0, colour),
+            (pixel / 2.0, colour),
+            (pixel, Color32::TRANSPARENT),
         ] {
-            mesh.colored_vertex(end + offset, shade);
+            mesh.colored_vertex(end + side * offset, shade);
         }
     }
-    for [x, y, z] in [[0, 1, 4], [0, 4, 3], [1, 2, 5], [1, 5, 4]] {
-        mesh.add_triangle(first + x, first + y, first + z);
+    for k in 0..3 {
+        mesh.add_triangle(first + k, first + k + 1, first + k + 5);
+        mesh.add_triangle(first + k, first + k + 5, first + k + 4);
     }
 }
 
-/// A line in the middle of `pane` when there are no notes, and one along its bottom when not
-/// every edge is drawn: `[empty, crowded]`.
+/// A line in the middle of `pane` when there are no notes, and one along its bottom, on a backing
+/// of the document surface so that it reads over anything, when not every edge is drawn:
+/// `[empty, crowded]`.
 fn show_hints(ui: &mut Ui, p: &Palette, pane: Rect, [empty, crowded]: [bool; 2]) {
     let hint = |text| RichText::new(text).color(p.text_secondary.to_color32());
     if empty {
         ui.put(pane, Label::new(hint(EMPTY_HINT)).selectable(false));
     }
     if crowded {
-        let size = vec2(pane.width(), 24.0);
-        let strip = Rect::from_min_size(pane.left_bottom() - vec2(0.0, 28.0), size);
-        ui.put(strip, Label::new(hint(CROWDED_HINT)).selectable(false));
+        let font = TextStyle::Body.resolve(ui.style());
+        let colour = p.text_secondary.to_color32();
+        let text = ui
+            .painter()
+            .layout_no_wrap(CROWDED_HINT.to_owned(), font, colour);
+        let size = text.size() + 2.0 * HINT_PADDING;
+        let backing = Rect::from_center_size(pane.center_bottom() - vec2(0.0, 16.0), size);
+        let fill = p.document.to_color32();
+        ui.painter()
+            .rect_filled(backing, CornerRadius::same(RADIUS), fill);
+        ui.put(backing, Label::new(hint(CROWDED_HINT)).selectable(false));
     }
 }
 
@@ -525,6 +561,12 @@ fn push_dot(mesh: &mut Mesh, centre: Pos2, radius: f32, colour: Color32) {
 fn paint_focus_ring(painter: &Painter, p: &Palette, pane: Rect) {
     let ring = Stroke::new(FOCUS_RING_WIDTH, p.accent.to_color32());
     painter.rect_stroke(pane, CornerRadius::ZERO, ring, StrokeKind::Inside);
+}
+
+/// True when a key went down while the graph has the keyboard focus.
+fn key_pressed(ui: &Ui, response: &Response) -> bool {
+    let pressed = |event: &Event| matches!(event, Event::Key { pressed: true, .. });
+    response.has_focus() && ui.input(|input| input.events.iter().any(pressed))
 }
 
 /// Enter or Space (activate: open the list view) and Home (fit) pressed while the graph has

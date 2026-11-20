@@ -348,9 +348,24 @@ fn paint_frame(
     workspace: &Workspace,
     pointer: Option<Pos2>,
 ) -> FullOutput {
+    paint_events(
+        ctx,
+        view,
+        workspace,
+        pointer.map(Event::PointerMoved).into_iter().collect(),
+    )
+}
+
+/// One frame of the graph pane alone, over `workspace`, that receives `events`.
+fn paint_events(
+    ctx: &Context,
+    view: &mut GraphView,
+    workspace: &Workspace,
+    events: Vec<Event>,
+) -> FullOutput {
     let input = RawInput {
         screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))),
-        events: pointer.map(Event::PointerMoved).into_iter().collect(),
+        events,
         ..RawInput::default()
     };
     let colours = palette(Theme::Light, Material::Opaque);
@@ -385,11 +400,15 @@ fn mesh_sizes(primitives: &[ClippedPrimitive]) -> (usize, usize) {
     sizes.fold((0, 0), |(v, i), (dv, di)| (v + dv, i + di))
 }
 
-/// How many vertices are drawn in exactly `colour`: the spine of a graph edge has two (one at
-/// each end), and nothing else the pane draws in a test has the edge colour.
-fn vertices_in(primitives: &[ClippedPrimitive], colour: Color32) -> usize {
+/// The positions of the vertices drawn in exactly `colour`: the full-colour core of a graph edge
+/// has two at each end, and nothing else the pane draws in a test has the edge colour.
+fn positions_in(primitives: &[ClippedPrimitive], colour: Color32) -> Vec<Pos2> {
     let all = meshes(primitives).flat_map(|m| &m.vertices);
-    all.filter(|v| v.color == colour).count()
+    all.filter(|v| v.color == colour).map(|v| v.pos).collect()
+}
+
+fn vertices_in(primitives: &[ClippedPrimitive], colour: Color32) -> usize {
+    positions_in(primitives, colour).len()
 }
 
 fn texts(shape: &Shape, found: &mut Vec<String>) {
@@ -560,7 +579,8 @@ impl Crowd {
         (tessellate(&self.ctx, frame), found)
     }
 
-    fn spine_vertices(&mut self, pointer: Option<Pos2>) -> usize {
+    /// How many vertices of the full-colour core of an edge are drawn: four per edge.
+    fn core_vertices(&mut self, pointer: Option<Pos2>) -> usize {
         let edge = palette(Theme::Light, Material::Opaque).edge.to_color32();
         vertices_in(&self.paint(pointer).0, edge)
     }
@@ -573,14 +593,18 @@ impl Crowd {
 #[test]
 fn should_draw_every_edge_when_few_are_in_view() {
     let mut c = crowd(100);
-    assert_eq!(c.spine_vertices(None), 8, "four edges, two ends each");
+    assert_eq!(
+        c.core_vertices(None),
+        16,
+        "four edges, four core vertices each"
+    );
     assert!(!c.says_hint());
 }
 
 #[test]
 fn should_hide_the_edges_that_crowd_the_view_and_say_so() {
     let mut c = crowd(2);
-    assert_eq!(c.spine_vertices(None), 0);
+    assert_eq!(c.core_vertices(None), 0);
     assert!(c.says_hint());
 }
 
@@ -589,9 +613,9 @@ fn should_draw_the_edges_of_the_hovered_node_at_any_zoom() {
     let mut c = crowd(2);
     let a = c.view.node_rect("a.md").unwrap().center();
     assert_eq!(
-        c.spine_vertices(Some(a)),
-        6,
-        "a's three edges, two ends each"
+        c.core_vertices(Some(a)),
+        12,
+        "a's three edges, four core vertices each"
     );
 }
 
@@ -600,5 +624,175 @@ fn should_keep_the_edges_of_the_open_note_when_the_others_are_hidden() {
     let mut c = crowd(2);
     let open = NotePath::parse("e.md").unwrap();
     c.workspace.select(&open).unwrap();
-    assert_eq!(c.spine_vertices(None), 2, "the one edge of e");
+    assert_eq!(c.core_vertices(None), 4, "the one edge of e");
+}
+
+/// The edge colour dimmed as a hovered node dims what it is not linked to.
+fn dimmed_edge() -> Color32 {
+    palette(Theme::Light, Material::Opaque)
+        .edge
+        .to_color32()
+        .gamma_multiply(0.25)
+}
+
+#[test]
+fn should_dim_the_edges_that_do_not_touch_the_hovered_node() {
+    let mut c = crowd(100);
+    let a = c.view.node_rect("a.md").unwrap().center();
+    let (primitives, _) = c.paint(Some(a));
+    let edge = palette(Theme::Light, Material::Opaque).edge.to_color32();
+    assert_eq!(vertices_in(&primitives, edge), 12, "a's three edges stay");
+    assert_eq!(
+        vertices_in(&primitives, dimmed_edge()),
+        4,
+        "the edge of e and f dims"
+    );
+}
+
+#[test]
+fn should_draw_an_edge_with_a_full_colour_core_at_least_one_pixel_wide() {
+    for scale in [1.0_f32, 2.0] {
+        let mut c = crowd(100);
+        c.ctx.set_zoom_factor(scale);
+        let (primitives, _) = c.paint(None);
+        assert_eq!(c.ctx.pixels_per_point(), scale, "setup: the scale applies");
+        let edge = palette(Theme::Light, Material::Opaque).edge.to_color32();
+        let core = positions_in(&primitives, edge);
+        assert_eq!(core.len(), 16);
+        let pixel = 1.0 / scale;
+        for ends in core.chunks(2) {
+            let width = (ends[0] - ends[1]).length();
+            assert!(width >= pixel - 1e-3, "core {width} pt at scale {scale}");
+            assert!(width <= 2.0 * pixel, "core {width} pt at scale {scale}");
+        }
+    }
+}
+
+fn all_shapes(shape: &Shape, found: &mut Vec<Shape>) {
+    match shape {
+        Shape::Vec(inner) => inner.iter().for_each(|s| all_shapes(s, found)),
+        other => found.push(other.clone()),
+    }
+}
+
+/// The shapes of the second of two frames over `c`.
+fn shapes_of(c: &mut Crowd) -> Vec<Shape> {
+    paint_frame(&c.ctx, &mut c.view, &c.workspace, None);
+    let frame = paint_frame(&c.ctx, &mut c.view, &c.workspace, None);
+    let mut found = Vec::new();
+    for clipped in &frame.shapes {
+        all_shapes(&clipped.shape, &mut found);
+    }
+    found
+}
+
+#[test]
+fn should_draw_the_crowded_hint_on_a_backing_of_the_document_surface() {
+    let document = palette(Theme::Light, Material::Opaque)
+        .document
+        .to_color32();
+    let backings = |shapes: &[Shape]| -> Vec<Rect> {
+        let is_backing = |s: &&Shape| matches!(s, Shape::Rect(r) if r.fill == document);
+        let rect = |s: &Shape| s.visual_bounding_rect();
+        shapes.iter().filter(is_backing).map(rect).collect()
+    };
+    let shapes = shapes_of(&mut crowd(2));
+    let hint = shapes
+        .iter()
+        .find(|s| matches!(s, Shape::Text(t) if t.galley.text() == HINT))
+        .expect("the hint is painted")
+        .visual_bounding_rect();
+    let behind = backings(&shapes)
+        .into_iter()
+        .filter(|rect| rect.contains_rect(hint))
+        .count();
+    assert_eq!(behind, 1, "one backing holds the hint at {hint:?}");
+    assert!(backings(&shapes_of(&mut crowd(100))).is_empty());
+}
+
+/// A pane over a 300-note ring vault that runs one layout step per frame, so that it animates.
+struct Settling {
+    ctx: Context,
+    view: GraphView,
+    workspace: Workspace,
+    _scratch: TempDir,
+}
+
+fn settling() -> Settling {
+    let (scratch, vault) = write_vault(&ring_vault(300));
+    let workspace = Workspace::open(&vault).unwrap();
+    let ctx = Context::default();
+    prepare_context(&ctx);
+    let mut view = GraphView::default();
+    view.set_step_budgets(StepBudgets {
+        animated: Duration::ZERO,
+        reduced_motion: Duration::ZERO,
+    });
+    Settling {
+        ctx,
+        view,
+        workspace,
+        _scratch: scratch,
+    }
+}
+
+impl Settling {
+    fn frame(&mut self, events: Vec<Event>) {
+        paint_events(&self.ctx, &mut self.view, &self.workspace, events);
+    }
+
+    fn run_to_rest(&mut self) {
+        self.frame(vec![]);
+        for _ in 0..5_000 {
+            if self.view.is_settled() {
+                break;
+            }
+            self.frame(vec![]);
+        }
+        assert!(self.view.is_settled(), "the layout should come to rest");
+        self.frame(vec![]);
+    }
+
+    fn node_rects(&self) -> Vec<Rect> {
+        let ids = (0..300).map(|i| format!("n{i}.md"));
+        ids.map(|id| self.view.node_rect(&id).unwrap()).collect()
+    }
+
+    fn pane(&self) -> Rect {
+        self.view.pane_rect().unwrap()
+    }
+}
+
+#[test]
+fn should_keep_every_node_in_view_while_the_layout_settles_without_input() {
+    let mut s = settling();
+    s.run_to_rest();
+    let all = s
+        .node_rects()
+        .iter()
+        .fold(Rect::NOTHING, |a, r| a.union(*r));
+    let pane = s.pane();
+    assert!(pane.contains_rect(all), "{all:?} is outside {pane:?}");
+    let fills = all.width() >= 0.6 * pane.width() || all.height() >= 0.6 * pane.height();
+    assert!(fills, "the nodes {all:?} sit small in {pane:?}");
+}
+
+#[test]
+fn should_stop_fitting_the_view_once_the_user_pans() {
+    let mut s = settling();
+    for _ in 0..3 {
+        s.frame(vec![]);
+    }
+    let from = s.pane().left_top() + vec2(30.0, 30.0);
+    s.frame(vec![Event::PointerMoved(from), button(from, true)]);
+    let mut at = from;
+    for _ in 0..7 {
+        at += vec2(100.0, 0.0);
+        s.frame(vec![Event::PointerMoved(at)]);
+    }
+    s.frame(vec![button(at, false)]);
+    s.run_to_rest();
+    let pane = s.pane();
+    let outside = s.node_rects().iter().any(|r| !pane.intersects(*r));
+    assert!(outside, "the view was fitted again after the pan");
 }
