@@ -597,6 +597,8 @@ The layout is a spring-and-repulsion simulation. From M3b the repulsion is compu
 - painting at 10 000 nodes costs far less than a layout step's worth of the frame, and the memory held while the graph is open is bounded (section 11.2). How (fewer shapes, one mesh for the edges, edges hidden below a zoom level with a hint, …) is left to the builder, within section 9.6.
 The layout module stays free of clocks and UI types, as in M3b.
 
+As built (M4, Task 3): the edges are painted as one mesh, and notes smaller than 1.5 points on screen as small squares in one mesh. When more than 15 000 edges would be in view, only the edges of the hovered note and of the open note are drawn, and the pane shows «Zoom in to see every link»; zooming in brings every edge back. At the «Fit graph» zoom of a 10 000-note vault the picture is therefore the notes alone until the user hovers or zooms.
+
 ### 9.5 Sync window
 
 Opened from the top bar: whether sync is on; this device's id; **Create invite** (shows the ticket with a copy button); **Join** (paste a ticket, with a note that where a local note differs from the group's both are kept); **Turn sync off** (leave the group); the list of peers with their state; notes the engine could not sync and why; the mode switch (Internet / LAN only).
