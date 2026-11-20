@@ -533,7 +533,7 @@ Ogni prompt di dispatch a un implementer contiene, oltre al template della skill
 
 ## Verità assoluta
 
-Ultimo aggiornamento: 2026-11-20 (M4 completata e validata; segue la pubblicazione su GitHub)
+Ultimo aggiornamento: 2026-11-20 (M4 completata; v0.1.0 pubblicata su GitHub, repository privato; restano graphify e il logo)
 
 **Legenda stati.** **[Confermato]** = detto o approvato dall'utente. **[Proposto — applicato su delega]** = deciso dall'orchestratore in base alla delega totale del 2026-11-15, non approvato voce per voce dall'utente: vale finché l'utente non lo cambia. **[Aperto]** = non deciso. Ciò che non è verificato è scritto come «non verificato».
 
@@ -719,6 +719,16 @@ Tutte **[Proposto — applicato su delega]**; il dettaglio e il perché sono nel
     - il riposo per regola in una GUI con GPU vera: sotto llvmpipe l'animazione l'ha chiusa probabilmente il limite di 10 s;
     - il file `.desktop` da un menu di una sessione desktop reale, Wayland, un display fisico;
     - tutto ciò che il README elenca sotto «Not verified».
+- 2026-11-20 — M4 unita a `main` in locale (`a416f9e`).
+- 2026-11-20 — **Pubblicazione su GitHub completata** (piano `docs/superpowers/plans/2026-11-20-github-release.md`): branch `docs/github-release`, worktree `.claude/worktrees/github-release`, unita a `main` con `3c1472f`. Ledger: `.superpowers/sdd/2026-11-20-github-release/progress.md` del worktree.
+  - Task 1: licenza MIT (`Copyright (c) 2026 artur`), `license = "MIT"` nel workspace e nei quattro crate, CI GitHub Actions (`ubuntu-22.04` e `windows-latest`, Rust 1.98, `fmt`, `clippy -D warnings`, `test --locked`, nessun pacchetto apt: le librerie X11, Wayland e xkbcommon si caricano a run time).
+  - Task 2: vault dimostrativo `docs/demo-vault/` (40 note in quattro grappoli più `Home`, un link a una nota non creata), `scripts/screenshots.sh` (Linux in container, Xvfb, `xdotool` dentro il container), sette catture in `docs/images/` (22–132 KB), guardate dall'orchestratore: nome del vault `demo-vault`, nessun ticket, percorso o email.
+  - Task 3: README per GitHub (logo, badge statici più quello della CI, catture, indice, tabelle, due diagrammi Mermaid analizzati dal parser di Mermaid 11, prestazioni con le condizioni di misura, «Verified, and not» completo, con in più il server MCP mai provato con i client Claude reali) e link di confronto nel CHANGELOG.
+  - Trovato dall'orchestratore e corretto: il tarball Linux non conteneva il `LICENSE` MIT (`99e519a`); un percorso personale della scratchpad in due piani (`17c8ff8`).
+  - Asset della release: `neurospace-0.1.0-linux-x86_64.tar.gz` (sette file, glibc minima 2.30) e `neurospace-0.1.0-windows-x86_64.zip` (`neurospace.exe`, `ns.exe`, README, LICENSE, licenza di Inter; `ns 0.1.0`), con gli SHA-256 nelle note della release.
+  - Pubblicato: repository **privato** https://github.com/arturograntchiappini-bit/neurospace, push di `main` e del tag `v0.1.0` (spostato in locale, prima del push, dal merge di M4 a `3c1472f`), GitHub Release «Neurospace 0.1.0» con i due asset, descrizione e 14 topic.
+  - CI sul primo push (`3c1472f`): verde su Ubuntu (11 min) e su Windows (23 min). Unico avviso: `actions/checkout@v4` gira su Node 20, deprecato.
+  - Non verificato: la resa del README sulla pagina di GitHub (immagini, Mermaid, badge) guardata da una persona: il repository è privato e l'orchestratore non apre il browser dell'utente; il contenuto degli asset scaricati dalla release (verificati solo i nomi e le dimensioni).
 - Rischio chiuso il 2026-11-17: il preset di rete di iroh che «non risultava mai online» su questa macchina era il firewall applicativo, non il codice né iroh.
 - Non verificabile in questo progetto: uso interattivo della GUI da parte di una persona. La GUI si verifica con test headless e con l'avvio del binario.
 
@@ -832,4 +842,14 @@ Formato: decisione — perché — costo se sbagliata.
   - Il «8 s» di apertura della revisione finale era il ciclo di attesa dell'orchestratore (tre campioni uguali a 2 s), non un difetto. Costo: nessuno.
   - Le ri-revisioni del secondo giro piccolo e dei numeri dei documenti sono state sostituite dalla lettura del diff da parte dell'orchestratore. Costo: un difetto sottile arriva alla pubblicazione.
   - Il README dice ancora «installed with the four commands above» mentre il blocco di installazione ha cinque righe: si corregge nel task 3 del piano GitHub, che riscrive il README. Costo: nessuno.
+- 2026-11-20 — **Rulings della pubblicazione su GitHub, durante l'esecuzione** (dettaglio nel ledger del piano):
+  - `graphify --update` dopo M4 rinviato a dopo questo piano: il primo tentativo era bloccato (il cambio di worktree della sessione chiudeva la shell del subagente fuori dalla radice, e il subagente non aveva lo strumento Agent), e README e CHANGELOG cambiavano di nuovo. Costo: il grafo resta indietro di M4 finché non si aggiorna.
+  - Badge e link del README con URL assoluti sul repository; badge di shields.io solo statici (quelli dinamici non leggono un repository privato). Costo: un cambio di nome di repository o account rompe i link.
+  - Il tag locale `v0.1.0` è stato spostato al merge finale perché licenza e metadati fanno parte della release; non era mai stato pubblicato. Costo: nessuno.
+  - Nessuna revisione finale `opus` per questo branch: documenti, config e una riga di script, ogni diff letto dall'orchestratore, README letto per intero. Costo: un difetto sfuggito arriva su GitHub, dove si corregge con un commit.
+  - Le catture del grafo sono a 1920×1200 (a 1440×900 «Adatta grafo» resta sotto il 150 % e i nomi non compaiono). Costo: due immagini più grandi delle altre.
+  - Le prestazioni nel README riportano solo i numeri finali di M3b e M4, con le condizioni. Costo: nessuno.
+  - Il README dentro gli archivi della release ha i link alle immagini rotti, perché sono relativi. Costo: niente immagini nella copia letta fuori da GitHub.
+  - `dtolnay/rust-toolchain@master` resta così (uso documentato dall'azione; la toolchain è fissata a 1.98) e il trailer dei commit dei subagenti è quello del loro harness. Costo: un cambio a monte dell'azione può rompere la CI.
+  - La cronologia di git conserva il vecchio percorso personale dei due piani. Costo: il nome utente di Windows dell'utente resta visibile nei vecchi commit del suo repository privato.
 - 2026-11-15 — **Domanda 7 (chi fa le prove a mano, connettività in M4).** Le prove «a mano» le esegue l'orchestratore con comandi; la GUI non è verificata da una persona e lo si dichiara; la prova Windows↔Linux usa un ticket con indirizzi e porta fissa; `internet` resta la modalità predefinita e il suo stato reale si registra in M2. — Docker è disponibile; mDNS non attraversa la rete di Docker. — Costo: se `internet` non funziona sulle reti dell'utente, il sync tra reti diverse non va finché non si indaga.
