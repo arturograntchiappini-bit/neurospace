@@ -307,6 +307,20 @@ fn should_settle_within_one_frame_when_motion_is_reduced() {
 }
 
 #[test]
+fn should_stop_asking_for_frames_when_the_wake_time_cap_is_spent() {
+    let mut f = open_vault(&ring_vault(150));
+    f.harness.state_mut().set_graph_step_budgets(StepBudgets {
+        animated: Duration::ZERO,
+        reduced_motion: Duration::ZERO,
+    });
+    f.harness.state_mut().set_graph_wake_cap(Duration::ZERO);
+    f.harness.key_press_modifiers(Modifiers::COMMAND, Key::G);
+    f.harness.step();
+    assert!(f.harness.state().graph_shown());
+    assert!(f.harness.state().graph_settled());
+}
+
+#[test]
 fn should_animate_over_several_frames_when_motion_is_not_reduced() {
     let mut f = open_vault(&ring_vault(150));
     f.harness.state_mut().set_graph_step_budgets(StepBudgets {

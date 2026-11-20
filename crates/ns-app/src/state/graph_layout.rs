@@ -361,6 +361,12 @@ impl Layout {
         self.last_move < SETTLED_BELOW || self.steps_since_wake >= MAX_STEPS_PER_WAKE
     }
 
+    /// Counts the layout as settled until the next wake, whatever the nodes still do. The view
+    /// uses it to cap the wall time of a wake, which the step cap alone cannot bound.
+    pub fn rest(&mut self) {
+        self.steps_since_wake = MAX_STEPS_PER_WAKE;
+    }
+
     /// True when the graph is too large to simulate (`SIMULATION_NODE_LIMIT`): the nodes stay on
     /// their starting spiral, except where they are dragged.
     pub fn is_simplified(&self) -> bool {
@@ -788,6 +794,16 @@ mod tests {
         }
         layout.set_position(0, [900.0, 900.0]);
         assert!(!layout.is_settled());
+    }
+
+    #[test]
+    fn should_be_settled_after_rest_until_the_next_wake() {
+        let mut layout = Layout::new(&random_graph(30, 45));
+        assert!(!layout.is_settled());
+        layout.rest();
+        assert!(layout.is_settled());
+        layout.set_position(0, [900.0, 900.0]);
+        assert!(!layout.is_settled(), "a drag wakes a resting layout");
     }
 
     #[test]

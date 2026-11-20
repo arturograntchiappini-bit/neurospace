@@ -3,7 +3,7 @@
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{
     CentralPanel, Context, Key, KeyboardShortcut, Modifiers, Rect, Theme, ThemePreference, Ui,
@@ -231,6 +231,11 @@ impl NeurospaceApp {
     /// Replaces the per-frame time limits of the graph layout. Used by tests.
     pub fn set_graph_step_budgets(&mut self, budgets: StepBudgets) {
         self.view.graph_view.set_step_budgets(budgets);
+    }
+
+    /// Replaces the longest time the graph layout keeps animating after a wake. Used by tests.
+    pub fn set_graph_wake_cap(&mut self, cap: Duration) {
+        self.view.graph_view.set_wake_cap(cap);
     }
 
     /// The area the graph was drawn in last frame. Used by tests.

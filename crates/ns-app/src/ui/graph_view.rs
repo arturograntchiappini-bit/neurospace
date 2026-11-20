@@ -21,6 +21,9 @@ const SIMPLIFIED_HINT: &str = "Large vault: simplified layout";
 const STEP_BUDGET: Duration = Duration::from_millis(8);
 /// With «Reduce motion» a frame runs the layout to rest, but still not longer than this.
 const REDUCED_MOTION_BUDGET: Duration = Duration::from_millis(200);
+/// The longest the layout keeps animating after a wake. At 10 000 notes a step costs a whole
+/// frame, so the step cap alone would let it run for minutes.
+const WAKE_TIME_CAP: Duration = Duration::from_secs(10);
 const SCROLL_ZOOM_RATE: f32 = 0.002;
 const DIMMED: f32 = 0.25;
 const GHOST_FILL: f32 = 0.5;
@@ -60,6 +63,9 @@ pub struct GraphView {
     dragging: Option<(String, [f32; 2])>,
     reduce_motion: bool,
     budgets: StepBudgets,
+    /// How long the layout may keep animating, and since when it has.
+    wake_cap: Duration,
+    animating_since: Option<Instant>,
 }
 
 impl Default for GraphView {
@@ -72,6 +78,8 @@ impl Default for GraphView {
             dragging: None,
             reduce_motion: false,
             budgets: StepBudgets::default(),
+            wake_cap: WAKE_TIME_CAP,
+            animating_since: None,
         }
     }
 }
@@ -164,6 +172,11 @@ impl GraphView {
     /// Replaces the per-frame time limits of the layout. Used by tests.
     pub fn set_step_budgets(&mut self, budgets: StepBudgets) {
         self.budgets = budgets;
+    }
+
+    /// Replaces the longest time the layout keeps animating after a wake. Used by tests.
+    pub fn set_wake_cap(&mut self, cap: Duration) {
+        self.wake_cap = cap;
     }
 
     /// The area the graph was drawn in last frame. Used by tests.
@@ -267,6 +280,7 @@ impl GraphView {
         } else {
             self.budgets.animated
         };
+        self.enforce_wake_cap(dragged.is_some());
         let started = Instant::now();
         while !self.layout.is_settled() {
             if let Some((node, at)) = dragged {
@@ -279,6 +293,20 @@ impl GraphView {
         }
         if !self.layout.is_settled() {
             ctx.request_repaint();
+        }
+    }
+
+    /// Rests the layout once it has animated for `wake_cap`. A drag keeps it animating, and the
+    /// clock restarts when it ends.
+    fn enforce_wake_cap(&mut self, dragging: bool) {
+        if dragging || self.layout.is_settled() {
+            self.animating_since = None;
+            return;
+        }
+        let since = *self.animating_since.get_or_insert_with(Instant::now);
+        if since.elapsed() >= self.wake_cap {
+            self.layout.rest();
+            self.animating_since = None;
         }
     }
 
