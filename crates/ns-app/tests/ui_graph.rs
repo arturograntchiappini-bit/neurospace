@@ -4,13 +4,21 @@ mod common;
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use eframe::egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect, vec2};
+use eframe::egui::epaint::Primitive;
+use eframe::egui::{ClippedPrimitive, Color32, Mesh};
+use eframe::egui::{
+    Context, Event, FullOutput, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, Shape, Theme,
+    vec2,
+};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use ns_app::app::NeurospaceApp;
-use ns_app::ui::graph_view::StepBudgets;
+use ns_app::app::{NeurospaceApp, prepare_context};
+use ns_app::state::Workspace;
+use ns_app::ui::graph_view::{GraphView, StepBudgets};
+use ns_app::ui::theme::{Material, palette};
+use ns_core::NotePath;
 use tempfile::TempDir;
 
 use common::{harness, run_until};
@@ -331,4 +339,266 @@ fn should_animate_over_several_frames_when_motion_is_not_reduced() {
     f.harness.step();
     assert!(f.harness.state().graph_shown());
     assert!(!f.harness.state().graph_settled());
+}
+
+/// One frame of the graph pane alone, over `workspace`, with the pointer at `pointer`.
+fn paint_frame(
+    ctx: &Context,
+    view: &mut GraphView,
+    workspace: &Workspace,
+    pointer: Option<Pos2>,
+) -> FullOutput {
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))),
+        events: pointer.map(Event::PointerMoved).into_iter().collect(),
+        ..RawInput::default()
+    };
+    let colours = palette(Theme::Light, Material::Opaque);
+    let mut frame = ctx.run_ui(input, |ui| {
+        view.show(ui, &colours, workspace);
+    });
+    frame.textures_delta.clear();
+    frame
+}
+
+fn count_shapes(shape: &Shape) -> usize {
+    match shape {
+        Shape::Vec(inner) => inner.iter().map(count_shapes).sum(),
+        _ => 1,
+    }
+}
+
+fn tessellate(ctx: &Context, frame: FullOutput) -> Vec<ClippedPrimitive> {
+    ctx.tessellate(frame.shapes, frame.pixels_per_point)
+}
+
+fn meshes(primitives: &[ClippedPrimitive]) -> impl Iterator<Item = &Mesh> {
+    primitives.iter().filter_map(|p| match &p.primitive {
+        Primitive::Mesh(mesh) => Some(mesh),
+        Primitive::Callback(_) => None,
+    })
+}
+
+/// Vertices and indices of everything drawn.
+fn mesh_sizes(primitives: &[ClippedPrimitive]) -> (usize, usize) {
+    let sizes = meshes(primitives).map(|m| (m.vertices.len(), m.indices.len()));
+    sizes.fold((0, 0), |(v, i), (dv, di)| (v + dv, i + di))
+}
+
+/// How many vertices are drawn in exactly `colour`: the spine of a graph edge has two (one at
+/// each end), and nothing else the pane draws in a test has the edge colour.
+fn vertices_in(primitives: &[ClippedPrimitive], colour: Color32) -> usize {
+    let all = meshes(primitives).flat_map(|m| &m.vertices);
+    all.filter(|v| v.color == colour).count()
+}
+
+fn texts(shape: &Shape, found: &mut Vec<String>) {
+    match shape {
+        Shape::Vec(inner) => inner.iter().for_each(|s| texts(s, found)),
+        Shape::Text(text) => found.push(text.galley.text().to_owned()),
+        _ => {}
+    }
+}
+
+/// A tiny deterministic generator: each call gives a value below `bound`.
+fn lcg(seed: u64) -> impl FnMut(usize) -> usize {
+    let mut state = seed;
+    move |bound| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 33) as usize % bound
+    }
+}
+
+/// `clusters` folders of `size` notes: each note links to 4 random others of its folder, and one
+/// note in five also to a note of another folder (the shape of the layout's own scale test).
+fn clustered_vault(clusters: usize, size: usize, seed: u64) -> Vec<(String, String)> {
+    let mut next = lcg(seed);
+    let mut files = Vec::new();
+    for k in 0..clusters {
+        for i in 0..size {
+            let mut text: String = (0..4)
+                .map(|_| format!("[[c{k}/n{}]] ", (i + 1 + next(size - 1)) % size))
+                .collect();
+            if i % 5 == 0 {
+                let other = (k + 1 + next(clusters - 1)) % clusters;
+                text.push_str(&format!("[[c{other}/n{}]]", next(size)));
+            }
+            files.push((format!("c{k}/n{i}.md"), text));
+        }
+    }
+    files
+}
+
+fn write_vault(files: &[(String, String)]) -> (TempDir, PathBuf) {
+    let scratch = tempfile::tempdir().unwrap();
+    let vault = scratch.path().join("vault");
+    for (name, text) in files {
+        let path = vault.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    (scratch, vault)
+}
+
+const PAINT_BUDGET: Duration = Duration::from_millis(8);
+
+/// One frame at rest: its paint plus tessellation time, its vertex count, and a line describing it.
+fn measure_frame(
+    ctx: &Context,
+    view: &mut GraphView,
+    workspace: &Workspace,
+) -> (Duration, usize, String) {
+    let started = Instant::now();
+    let frame = paint_frame(ctx, view, workspace, None);
+    let painted = started.elapsed();
+    let shapes: usize = frame.shapes.iter().map(|c| count_shapes(&c.shape)).sum();
+    let started = Instant::now();
+    let primitives = tessellate(ctx, frame);
+    let tessellated = started.elapsed();
+    let (vertices, indices) = mesh_sizes(&primitives);
+    let line = format!(
+        "{shapes} shapes, {vertices} vertices, {indices} indices, paint {painted:?}, \
+         tessellate {tessellated:?}"
+    );
+    (painted + tessellated, vertices, line)
+}
+
+/// Paints a clustered vault of `clusters` folders of `size` notes at the «Fit graph» zoom, once the
+/// layout has come to rest, and returns the median over five frames of paint plus tessellation,
+/// and the vertices of the last one.
+fn measure_graph_painting(clusters: usize, size: usize) -> (Duration, usize) {
+    let (_scratch, vault) = write_vault(&clustered_vault(clusters, size, 11));
+    let workspace = Workspace::open(&vault).unwrap();
+    let ctx = Context::default();
+    prepare_context(&ctx);
+    let mut view = GraphView::default();
+    view.set_reduce_motion(true);
+    view.set_step_budgets(StepBudgets {
+        animated: Duration::ZERO,
+        reduced_motion: Duration::from_secs(600),
+    });
+    paint_frame(&ctx, &mut view, &workspace, None);
+    assert!(view.is_settled(), "the layout should have come to rest");
+    view.fit();
+    paint_frame(&ctx, &mut view, &workspace, None);
+    let frames: Vec<_> = (0..5)
+        .map(|_| measure_frame(&ctx, &mut view, &workspace))
+        .collect();
+    let edges = workspace.index().graph().edges.len();
+    for (_, _, line) in &frames {
+        println!("{} notes, {edges} edges: {line}", clusters * size);
+    }
+    let mut totals: Vec<Duration> = frames.iter().map(|(total, _, _)| *total).collect();
+    totals.sort();
+    (totals[2], frames[4].1)
+}
+
+#[test]
+#[ignore = "measurement: cargo test --release -p ns-app --test ui_graph should_paint_a_large_graph -- --ignored --nocapture"]
+fn should_paint_a_large_graph_in_a_few_milliseconds() {
+    // 10 000 notes, about 41 000 edges: too many to draw, so only the notes are (measured before
+    // the change: 365 408 vertices and 1 280 136 indices in 21–24 ms). Then 3 400 notes, about
+    // 14 300 edges: just under the limit, so every edge is drawn, at 6 vertices each.
+    for (clusters, size, max_vertices) in [(100, 100, 60_000), (100, 34, 110_000)] {
+        let (median, vertices) = measure_graph_painting(clusters, size);
+        assert!(median < PAINT_BUDGET, "{median:?} is over {PAINT_BUDGET:?}");
+        assert!(vertices < max_vertices, "{vertices} vertices");
+    }
+}
+
+const HINT: &str = "Zoom in to see every link";
+
+/// What a pane test holds: a pane over a six-note vault in which `a` links to `b`, `c` and `d`
+/// and `e` to `f`, fitted, with the layout at rest.
+struct Crowd {
+    ctx: Context,
+    view: GraphView,
+    workspace: Workspace,
+    _scratch: TempDir,
+}
+
+fn crowd(limit: usize) -> Crowd {
+    let files = notes(&[
+        ("a.md", "[[b]] [[c]] [[d]]"),
+        ("b.md", ""),
+        ("c.md", ""),
+        ("d.md", ""),
+        ("e.md", "[[f]]"),
+        ("f.md", ""),
+    ]);
+    let (scratch, vault) = write_vault(&files);
+    let workspace = Workspace::open(&vault).unwrap();
+    let ctx = Context::default();
+    prepare_context(&ctx);
+    let mut view = GraphView::default();
+    view.set_reduce_motion(true);
+    view.set_max_drawn_edges(limit);
+    paint_frame(&ctx, &mut view, &workspace, None);
+    assert!(view.is_settled());
+    view.fit();
+    Crowd {
+        ctx,
+        view,
+        workspace,
+        _scratch: scratch,
+    }
+}
+
+impl Crowd {
+    /// Paints twice (the pointer's target is known to egui one frame late) and returns what was
+    /// drawn the second time, and its texts.
+    fn paint(&mut self, pointer: Option<Pos2>) -> (Vec<ClippedPrimitive>, Vec<String>) {
+        paint_frame(&self.ctx, &mut self.view, &self.workspace, pointer);
+        let frame = paint_frame(&self.ctx, &mut self.view, &self.workspace, pointer);
+        let mut found = Vec::new();
+        frame
+            .shapes
+            .iter()
+            .for_each(|c| texts(&c.shape, &mut found));
+        (tessellate(&self.ctx, frame), found)
+    }
+
+    fn spine_vertices(&mut self, pointer: Option<Pos2>) -> usize {
+        let edge = palette(Theme::Light, Material::Opaque).edge.to_color32();
+        vertices_in(&self.paint(pointer).0, edge)
+    }
+
+    fn says_hint(&mut self) -> bool {
+        self.paint(None).1.iter().any(|t| t == HINT)
+    }
+}
+
+#[test]
+fn should_draw_every_edge_when_few_are_in_view() {
+    let mut c = crowd(100);
+    assert_eq!(c.spine_vertices(None), 8, "four edges, two ends each");
+    assert!(!c.says_hint());
+}
+
+#[test]
+fn should_hide_the_edges_that_crowd_the_view_and_say_so() {
+    let mut c = crowd(2);
+    assert_eq!(c.spine_vertices(None), 0);
+    assert!(c.says_hint());
+}
+
+#[test]
+fn should_draw_the_edges_of_the_hovered_node_at_any_zoom() {
+    let mut c = crowd(2);
+    let a = c.view.node_rect("a.md").unwrap().center();
+    assert_eq!(
+        c.spine_vertices(Some(a)),
+        6,
+        "a's three edges, two ends each"
+    );
+}
+
+#[test]
+fn should_keep_the_edges_of_the_open_note_when_the_others_are_hidden() {
+    let mut c = crowd(2);
+    let open = NotePath::parse("e.md").unwrap();
+    c.workspace.select(&open).unwrap();
+    assert_eq!(c.spine_vertices(None), 2, "the one edge of e");
 }

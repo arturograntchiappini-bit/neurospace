@@ -4,8 +4,9 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    Align2, Button, Context, CornerRadius, FontId, Key, Label, Painter, Pos2, Rect, Response,
-    RichText, Role, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2, WidgetInfo, pos2, vec2,
+    Align2, Button, Color32, Context, CornerRadius, FontId, Key, Label, Mesh, Painter, Pos2, Rect,
+    Response, RichText, Role, Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, Vec2, WidgetInfo,
+    pos2, vec2,
 };
 use ns_core::{Graph, NotePath};
 
@@ -16,6 +17,7 @@ use crate::ui::theme::Palette;
 
 const GRAPH_NAME: &str = "Graph of notes";
 const EMPTY_HINT: &str = "No notes yet";
+const CROWDED_HINT: &str = "Zoom in to see every link";
 const SIMPLIFIED_HINT: &str = "Large vault: simplified layout";
 /// Time one frame may spend on layout steps; at least one step always runs.
 const STEP_BUDGET: Duration = Duration::from_millis(8);
@@ -33,6 +35,10 @@ const OPEN_RING_WIDTH: f32 = 2.0;
 const OPEN_RING_GAP: f32 = 3.0;
 const LABEL_GAP: f32 = 3.0;
 const FOCUS_RING_WIDTH: f32 = 2.0;
+/// With more edges than this in view, only those of the hovered and the open note are drawn.
+const MAX_DRAWN_EDGES: usize = 15_000;
+/// A note whose circle would be smaller than this (in points) is drawn as a plain square.
+const DOT_RADIUS: f32 = 1.5;
 
 /// How long one frame may spend on layout steps. Tests replace the defaults so that they do not
 /// depend on how fast the host is.
@@ -66,6 +72,8 @@ pub struct GraphView {
     /// How long the layout may keep animating, and since when it has.
     wake_cap: Duration,
     animating_since: Option<Instant>,
+    /// How many edges may be in view before only some are drawn.
+    max_drawn_edges: usize,
 }
 
 impl Default for GraphView {
@@ -80,6 +88,7 @@ impl Default for GraphView {
             budgets: StepBudgets::default(),
             wake_cap: WAKE_TIME_CAP,
             animating_since: None,
+            max_drawn_edges: MAX_DRAWN_EDGES,
         }
     }
 }
@@ -118,7 +127,7 @@ impl GraphView {
         let hovered = response
             .hover_pos()
             .and_then(|at| self.layout.node_at(self.to_world(at)));
-        self.paint(&Scene {
+        let crowded = self.paint(&Scene {
             painter: &painter,
             palette: p,
             label_font: TextStyle::Small.resolve(ui.style()),
@@ -128,18 +137,10 @@ impl GraphView {
         if response.has_focus() {
             paint_focus_ring(&painter, p, response.rect);
         }
-        self.show_empty_hint(ui, p, response.rect);
+        show_hints(ui, p, response.rect, [self.layout.is_empty(), crowded]);
         GraphOutcome {
             action: self.clicked_node(&response).filter(|_| !activated),
             list_view: list_view || activated,
-        }
-    }
-
-    /// A line in the middle of `pane` when there are no notes.
-    fn show_empty_hint(&self, ui: &mut Ui, p: &Palette, pane: Rect) {
-        if self.layout.is_empty() {
-            let hint = RichText::new(EMPTY_HINT).color(p.text_secondary.to_color32());
-            ui.put(pane, Label::new(hint).selectable(false));
         }
     }
 
@@ -177,6 +178,11 @@ impl GraphView {
     /// Replaces the longest time the layout keeps animating after a wake. Used by tests.
     pub fn set_wake_cap(&mut self, cap: Duration) {
         self.wake_cap = cap;
+    }
+
+    /// Replaces the number of edges in view above which only some are drawn. Used by tests.
+    pub fn set_max_drawn_edges(&mut self, limit: usize) {
+        self.max_drawn_edges = limit;
     }
 
     /// The area the graph was drawn in last frame. Used by tests.
@@ -217,8 +223,8 @@ impl GraphView {
         self.viewport.to_world(self.centre(), [at.x, at.y])
     }
 
-    /// Shows every node in the pane.
-    fn fit(&mut self) {
+    /// Shows every node in the pane, as «Fit graph» does. Tests call it too.
+    pub fn fit(&mut self) {
         let size = self
             .pane
             .map_or([1.0; 2], |pane| [pane.width(), pane.height()]);
@@ -324,11 +330,17 @@ impl GraphView {
         }
     }
 
-    fn paint(&self, scene: &Scene) {
-        self.paint_edges(scene);
+    /// Draws the pane. Returns true when edges were left out because too many were in view.
+    fn paint(&self, scene: &Scene) -> bool {
+        let crowded = self.paint_edges(scene);
+        // The dots go under the discs, rings and labels that are drawn as shapes.
+        let slot = scene.painter.add(Shape::Noop);
+        let mut dots = Mesh::default();
         for i in 0..self.layout.len() {
-            self.paint_node(scene, i);
+            self.paint_node(scene, i, &mut dots);
         }
+        scene.painter.set(slot, Shape::mesh(dots));
+        crowded
     }
 
     /// 1 normally; `DIMMED` for what is neither the hovered node nor linked to it.
@@ -339,33 +351,70 @@ impl GraphView {
         }
     }
 
-    fn paint_edges(&self, scene: &Scene) {
-        let colour = scene.palette.edge.to_color32();
-        for i in 0..self.layout.len() {
-            for &j in self.layout.neighbours(i).iter().filter(|&&j| j > i) {
-                let touched = scene.hovered.is_none_or(|h| h == i || h == j);
-                let shade = if touched {
-                    colour
-                } else {
-                    colour.gamma_multiply(DIMMED)
-                };
-                let ends = [i, j].map(|n| self.to_screen(self.layout.position(n)));
-                if !edge_visible(scene.painter.clip_rect(), ends[0], ends[1]) {
-                    continue;
-                }
-                scene
-                    .painter
-                    .line_segment(ends, Stroke::new(EDGE_WIDTH, shade));
-            }
-        }
+    /// Every edge once, as the indices of its two nodes, the smaller first.
+    fn edges(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        (0..self.layout.len()).flat_map(|i| {
+            let linked = self.layout.neighbours(i).iter();
+            linked.filter(move |&&j| j > i).map(move |&j| (i, j))
+        })
     }
 
-    fn paint_node(&self, scene: &Scene, i: usize) {
+    /// The visible edges, in one mesh: a shape per edge costs tens of milliseconds to tessellate at
+    /// 10 000 notes. Returns true when edges were left out (see `edges_to_draw`).
+    fn paint_edges(&self, scene: &Scene) -> bool {
+        let screen: Vec<Pos2> = (0..self.layout.len())
+            .map(|n| self.to_screen(self.layout.position(n)))
+            .collect();
+        let (edges, crowded) = self.edges_to_draw(scene, &screen);
+        let colour = scene.palette.edge.to_color32();
+        let mut mesh = Mesh::default();
+        mesh.reserve_vertices(3 * edges.len());
+        mesh.reserve_triangles(2 * edges.len());
+        for (i, j) in edges {
+            let touched = scene.hovered.is_none_or(|h| h == i || h == j);
+            let shade = if touched {
+                colour
+            } else {
+                colour.gamma_multiply(DIMMED)
+            };
+            push_edge(&mut mesh, [screen[i], screen[j]], shade);
+        }
+        scene.painter.add(Shape::mesh(mesh));
+        crowded
+    }
+
+    /// The edges in view, given where every node is on screen. With more than `max_drawn_edges`
+    /// of them only those of the hovered and of the open note remain, and the flag is set.
+    fn edges_to_draw(&self, scene: &Scene, screen: &[Pos2]) -> (Vec<(usize, usize)>, bool) {
+        let clip = scene.painter.clip_rect();
+        let in_view = |&(i, j): &(usize, usize)| edge_visible(clip, screen[i], screen[j]);
+        let mut edges: Vec<(usize, usize)> = self.edges().filter(in_view).collect();
+        let crowded = edges.len() > self.max_drawn_edges;
+        if crowded {
+            let open = scene.open.and_then(|id| self.layout.index_of(id));
+            let focus = [scene.hovered, open];
+            edges.retain(|&(i, j)| focus.iter().flatten().any(|&n| n == i || n == j));
+        }
+        (edges, crowded)
+    }
+
+    /// Draws node `i`; a note too small to show a circle goes into `dots` instead of a shape.
+    fn paint_node(&self, scene: &Scene, i: usize, dots: &mut Mesh) {
         let (centre, radius) = self.disc(i);
         if !scene.painter.clip_rect().expand(radius).contains(centre) {
             return;
         }
-        self.paint_disc(scene, i);
+        if radius < DOT_RADIUS && self.layout.exists(i) {
+            let fill = scene.palette.accent.to_color32();
+            push_dot(
+                dots,
+                centre,
+                radius,
+                fill.gamma_multiply(self.emphasis(scene.hovered, i)),
+            );
+        } else {
+            self.paint_disc(scene, i);
+        }
         if scene.open == Some(self.layout.id(i)) {
             let ring = Stroke::new(OPEN_RING_WIDTH, scene.palette.accent.to_color32());
             let ring_radius = radius + OPEN_RING_GAP;
@@ -425,6 +474,52 @@ impl GraphView {
 fn edge_visible(clip: Rect, a: Pos2, b: Pos2) -> bool {
     clip.expand(EDGE_WIDTH / 2.0)
         .intersects(Rect::from_two_pos(a, b))
+}
+
+/// Adds a line of `EDGE_WIDTH` with soft sides: three vertices at each end, full `colour` along
+/// the middle fading to nothing `EDGE_WIDTH` away, which draws like a 1 px anti-aliased stroke.
+fn push_edge(mesh: &mut Mesh, [a, b]: [Pos2; 2], colour: Color32) {
+    let along = (b - a).normalized();
+    if !along.is_finite() {
+        return;
+    }
+    let side = vec2(-along.y, along.x) * EDGE_WIDTH;
+    let first = mesh.vertices.len() as u32;
+    for end in [a, b] {
+        for (offset, shade) in [
+            (-side, Color32::TRANSPARENT),
+            (Vec2::ZERO, colour),
+            (side, Color32::TRANSPARENT),
+        ] {
+            mesh.colored_vertex(end + offset, shade);
+        }
+    }
+    for [x, y, z] in [[0, 1, 4], [0, 4, 3], [1, 2, 5], [1, 5, 4]] {
+        mesh.add_triangle(first + x, first + y, first + z);
+    }
+}
+
+/// A line in the middle of `pane` when there are no notes, and one along its bottom when not
+/// every edge is drawn: `[empty, crowded]`.
+fn show_hints(ui: &mut Ui, p: &Palette, pane: Rect, [empty, crowded]: [bool; 2]) {
+    let hint = |text| RichText::new(text).color(p.text_secondary.to_color32());
+    if empty {
+        ui.put(pane, Label::new(hint(EMPTY_HINT)).selectable(false));
+    }
+    if crowded {
+        let size = vec2(pane.width(), 24.0);
+        let strip = Rect::from_min_size(pane.left_bottom() - vec2(0.0, 28.0), size);
+        ui.put(strip, Label::new(hint(CROWDED_HINT)).selectable(false));
+    }
+}
+
+/// Adds a square as wide as the circle it stands in for, which no one can tell apart from a
+/// circle that small.
+fn push_dot(mesh: &mut Mesh, centre: Pos2, radius: f32, colour: Color32) {
+    mesh.add_colored_rect(
+        Rect::from_center_size(centre, Vec2::splat(2.0 * radius)),
+        colour,
+    );
 }
 
 fn paint_focus_ring(painter: &Painter, p: &Palette, pane: Rect) {
