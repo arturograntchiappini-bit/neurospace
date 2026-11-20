@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use eframe::egui::ViewportBuilder;
+use ns_app::APP_ID;
 use ns_app::app::{AppOptions, NeurospaceApp};
 use ns_app::ui::logo;
 
@@ -28,7 +29,7 @@ fn options(cli: Cli) -> Result<AppOptions, ns_sync::SyncError> {
 fn native_options() -> eframe::NativeOptions {
     let mut viewport = ViewportBuilder::default()
         .with_title("Neurospace")
-        .with_app_id("neurospace")
+        .with_app_id(APP_ID)
         .with_transparent(cfg!(windows))
         .with_inner_size([1200.0, 800.0])
         .with_min_inner_size([720.0, 480.0]);
