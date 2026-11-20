@@ -524,7 +524,10 @@ impl GraphView {
             let ring_radius = radius + OPEN_RING_GAP;
             scene.painter.circle_stroke(centre, ring_radius, ring);
         }
-        if notes.labels || scene.hovered == Some(i) {
+        // The label cap never hides the open note's label, only the other labels.
+        let open_labelled =
+            scene.open == Some(self.layout.id(i)) && self.viewport.zoom >= LABEL_ZOOM;
+        if notes.labels || scene.hovered == Some(i) || open_labelled {
             self.paint_label(scene, i);
         }
     }

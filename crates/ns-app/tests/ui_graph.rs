@@ -620,8 +620,10 @@ fn frames_until_rest(vault: &Path) -> Vec<Duration> {
 fn should_animate_ten_thousand_notes_in_frames_under_thirty_milliseconds() {
     let (_scratch, vault) = write_vault(&random_vault(10_000, 20, 5));
     let frames = frames_until_rest(&vault);
-    let total: Duration = frames.iter().sum();
-    let mut sorted = frames.clone();
+    // The first frame builds the graph; the rest are the animation.
+    let (first, animation) = (frames[0], &frames[1..]);
+    let animation_total: Duration = animation.iter().sum();
+    let mut sorted = animation.to_vec();
     sorted.sort();
     let (median, p90, worst) = (
         sorted[sorted.len() / 2],
@@ -629,17 +631,18 @@ fn should_animate_ten_thousand_notes_in_frames_under_thirty_milliseconds() {
         sorted[sorted.len() - 1],
     );
     println!(
-        "{} frames, median {median:?}, p90 {p90:?}, worst {worst:?}, total {total:?}",
+        "{} frames, first {first:?}, animation: median {median:?}, p90 {p90:?}, worst {worst:?}, total {animation_total:?}",
         frames.len()
     );
+    assert!(first < Duration::from_secs(1), "first frame {first:?}");
     assert!(
         median < Duration::from_millis(30),
         "median frame {median:?}"
     );
-    let slower = total.mul_f32(1.5);
+    let slower = animation_total.mul_f32(1.5);
     assert!(
         slower < WAKE_TIME_CAP,
-        "{total:?} here is {slower:?} on a slower machine"
+        "{animation_total:?} here is {slower:?} on a slower machine"
     );
 }
 
@@ -782,6 +785,15 @@ fn should_label_only_the_hovered_note_when_too_many_are_in_view() {
     assert!(labels_in(&c.paint(None).1).is_empty());
     let a = c.view.node_rect("a.md").unwrap().center();
     assert_eq!(labels_in(&c.paint(Some(a)).1), ["a"]);
+}
+
+#[test]
+fn should_label_the_open_note_when_too_many_are_in_view() {
+    let mut c = crowd(100);
+    c.view.set_max_labels(1);
+    let open = NotePath::parse("e.md").unwrap();
+    c.workspace.select(&open).unwrap();
+    assert_eq!(labels_in(&c.paint(None).1), ["e"]);
 }
 
 #[test]

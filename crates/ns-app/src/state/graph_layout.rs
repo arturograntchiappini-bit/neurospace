@@ -877,7 +877,7 @@ mod tests {
     }
 
     /// 10 s of wake cap over 1.5 times the 14 ms a frame measured in release at 10 000 notes
-    /// (the median of 296 frames of `GraphView::show`, one layout step each): 10 000 / 21 = 476,
+    /// (the median animation frame of `GraphView::show`, one layout step each): 10 000 / 21 = 476,
     /// rounded down.
     const STEPS_WITHIN_WAKE_CAP: usize = 450;
 
