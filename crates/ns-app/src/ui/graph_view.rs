@@ -4,9 +4,9 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    Align2, Button, Color32, Context, CornerRadius, Event, FontId, Key, Label, Mesh, Painter, Pos2,
-    Rect, Response, RichText, Role, Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, Vec2,
-    WidgetInfo, pos2, vec2,
+    Align2, Button, Color32, ColorImage, Context, CornerRadius, Event, FontId, Key, Label, Mesh,
+    Painter, Pos2, Rect, Response, RichText, Role, Sense, Shape, Stroke, StrokeKind, TextStyle,
+    TextureFilter, TextureHandle, TextureId, TextureOptions, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
 use ns_core::{Graph, NotePath};
 
@@ -41,9 +41,15 @@ const FOCUS_RING_WIDTH: f32 = 2.0;
 /// Space between the crowded hint's text and the edge of its backing.
 const HINT_PADDING: Vec2 = vec2(10.0, 4.0);
 /// With more edges than this in view, only those of the hovered and the open note are drawn.
-const MAX_DRAWN_EDGES: usize = 15_000;
+const MAX_DRAWN_EDGES: usize = 7_000;
+/// With more notes than this in view, only the hovered one is labelled, even when zoomed in: a
+/// label is about 600 bytes of mesh, and a dense graph at 150 % has thousands in view.
+const MAX_LABELS: usize = 500;
 /// A note whose circle would be smaller than this (in points) is drawn as a plain square.
 const DOT_RADIUS: f32 = 1.5;
+/// Side of the square texture holding the one disc every note is a tinted quad of. With mipmaps
+/// the edge stays smooth from a few pixels across to a large zoom.
+const DISC_TEXELS: usize = 64;
 
 /// How long one frame may spend on layout steps. Tests replace the defaults so that they do not
 /// depend on how fast the host is.
@@ -79,6 +85,10 @@ pub struct GraphView {
     animating_since: Option<Instant>,
     /// How many edges may be in view before only some are drawn.
     max_drawn_edges: usize,
+    /// How many notes may be in view before only the hovered one is labelled.
+    max_labels: usize,
+    /// The antialiased white disc that every note's quad samples; made on the first frame.
+    disc: Option<TextureHandle>,
     /// Whether the view is refitted every frame: from a wake of the layout until the user moves
     /// the view or the layout is at rest.
     auto_fit: bool,
@@ -97,6 +107,8 @@ impl Default for GraphView {
             wake_cap: WAKE_TIME_CAP,
             animating_since: None,
             max_drawn_edges: MAX_DRAWN_EDGES,
+            max_labels: MAX_LABELS,
+            disc: None,
             auto_fit: false,
         }
     }
@@ -115,6 +127,7 @@ struct Scene<'a> {
     painter: &'a Painter,
     palette: &'a Palette,
     label_font: FontId,
+    disc: TextureId,
     open: Option<&'a str>,
     hovered: Option<usize>,
 }
@@ -134,15 +147,14 @@ impl GraphView {
         self.auto_fit |= fit || home;
         self.settle(ui.ctx());
         self.keep_fitted();
-        let hovered = response
-            .hover_pos()
-            .and_then(|at| self.layout.node_at(self.to_world(at)));
+        let disc = self.disc_texture(ui.ctx());
         let crowded = self.paint(&Scene {
             painter: &painter,
             palette: p,
             label_font: TextStyle::Small.resolve(ui.style()),
+            disc,
             open: workspace.open_note().map(|open| open.path.as_str()),
-            hovered,
+            hovered: self.hovered(&response),
         });
         if response.has_focus() {
             paint_focus_ring(&painter, p, response.rect);
@@ -152,6 +164,12 @@ impl GraphView {
             action: self.clicked_node(&response).filter(|_| !activated),
             list_view: list_view || activated,
         }
+    }
+
+    /// The node under the pointer, if it is over the pane.
+    fn hovered(&self, response: &Response) -> Option<usize> {
+        let at = response.hover_pos()?;
+        self.layout.node_at(self.to_world(at))
     }
 
     /// «List view», «Fit graph» and, for a large vault, the note about the simplified layout.
@@ -168,6 +186,14 @@ impl GraphView {
             (list_view, fit)
         })
         .inner
+    }
+
+    /// The disc texture, uploaded once and reused by every later frame.
+    fn disc_texture(&mut self, ctx: &Context) -> TextureId {
+        let options = TextureOptions::LINEAR.with_mipmap_mode(Some(TextureFilter::Linear));
+        self.disc
+            .get_or_insert_with(|| ctx.load_texture("graph-disc", disc_image(), options))
+            .id()
     }
 
     /// True when the layout has come to rest.
@@ -193,6 +219,12 @@ impl GraphView {
     /// Replaces the number of edges in view above which only some are drawn. Used by tests.
     pub fn set_max_drawn_edges(&mut self, limit: usize) {
         self.max_drawn_edges = limit;
+    }
+
+    /// Replaces the number of notes in view above which only the hovered one is labelled. Used by
+    /// tests.
+    pub fn set_max_labels(&mut self, limit: usize) {
+        self.max_labels = limit;
     }
 
     /// The area the graph was drawn in last frame. Used by tests.
@@ -356,14 +388,37 @@ impl GraphView {
     /// Draws the pane. Returns true when edges were left out because too many were in view.
     fn paint(&self, scene: &Scene) -> bool {
         let crowded = self.paint_edges(scene);
-        // The dots go under the discs, rings and labels that are drawn as shapes.
+        // The note meshes go under the ghosts, rings and labels that are drawn as shapes.
         let slot = scene.painter.add(Shape::Noop);
-        let mut dots = Mesh::default();
+        let mut notes = NoteMeshes {
+            discs: Mesh::with_texture(scene.disc),
+            dots: Mesh::default(),
+            labels: self.labels_fit(scene.painter.clip_rect()),
+        };
         for i in 0..self.layout.len() {
-            self.paint_node(scene, i, &mut dots);
+            self.paint_node(scene, i, &mut notes);
         }
-        scene.painter.set(slot, Shape::mesh(dots));
+        let NoteMeshes { discs, dots, .. } = notes;
+        scene.painter.set(
+            slot,
+            Shape::Vec(vec![Shape::mesh(discs), Shape::mesh(dots)]),
+        );
         crowded
+    }
+
+    /// True when every note in view gets a label: zoomed in far enough, and not too many in view.
+    fn labels_fit(&self, clip: Rect) -> bool {
+        self.viewport.zoom >= LABEL_ZOOM
+            && (0..self.layout.len())
+                .filter(|&i| self.is_in_view(clip, i))
+                .nth(self.max_labels)
+                .is_none()
+    }
+
+    /// True when node `i`'s circle may reach into `clip`.
+    fn is_in_view(&self, clip: Rect, i: usize) -> bool {
+        let (centre, radius) = self.disc(i);
+        clip.expand(radius).contains(centre)
     }
 
     /// 1 normally; `DIMMED` for what is neither the hovered node nor linked to it.
@@ -412,14 +467,15 @@ impl GraphView {
     fn edges_to_draw(&self, scene: &Scene, screen: &[Pos2]) -> (Vec<(usize, usize)>, bool) {
         let clip = scene.painter.clip_rect();
         let in_view = |&(i, j): &(usize, usize)| edge_visible(clip, screen[i], screen[j]);
-        // Counting stops at the limit: a crowded view never collects its (up to 100 000s of) edges.
-        let crowded = self
+        // One walk that stops one edge past the limit: a crowded view never collects its (up to
+        // 100 000s of) edges.
+        let seen: Vec<_> = self
             .edges()
             .filter(in_view)
-            .nth(self.max_drawn_edges)
-            .is_some();
-        if !crowded {
-            return (self.edges().filter(in_view).collect(), false);
+            .take(self.max_drawn_edges + 1)
+            .collect();
+        if seen.len() <= self.max_drawn_edges {
+            return (seen, false);
         }
         let open = scene.open.and_then(|id| self.layout.index_of(id));
         let focus = [scene.hovered, open].into_iter().flatten();
@@ -433,29 +489,29 @@ impl GraphView {
         (edges, true)
     }
 
-    /// Draws node `i`; a note too small to show a circle goes into `dots` instead of a shape.
-    fn paint_node(&self, scene: &Scene, i: usize, dots: &mut Mesh) {
-        let (centre, radius) = self.disc(i);
-        if !scene.painter.clip_rect().expand(radius).contains(centre) {
+    /// Draws node `i`: a note is a quad in `notes.discs`, or a square in `notes.dots` when too
+    /// small to show a circle; a ghost is a shape.
+    fn paint_node(&self, scene: &Scene, i: usize, notes: &mut NoteMeshes) {
+        if !self.is_in_view(scene.painter.clip_rect(), i) {
             return;
         }
-        if radius < DOT_RADIUS && self.layout.exists(i) {
-            let fill = scene.palette.accent.to_color32();
-            push_dot(
-                dots,
-                centre,
-                radius,
-                fill.gamma_multiply(self.emphasis(scene.hovered, i)),
-            );
+        let (centre, radius) = self.disc(i);
+        let fill = scene.palette.accent.to_color32();
+        let fill = fill.gamma_multiply(self.emphasis(scene.hovered, i));
+        if !self.layout.exists(i) {
+            self.paint_ghost(scene, i);
+        } else if radius < DOT_RADIUS {
+            let pixel = 1.0 / scene.painter.pixels_per_point();
+            push_dot(&mut notes.dots, centre, (2.0 * radius).max(pixel), fill);
         } else {
-            self.paint_disc(scene, i);
+            push_disc(&mut notes.discs, centre, radius, fill);
         }
         if scene.open == Some(self.layout.id(i)) {
             let ring = Stroke::new(OPEN_RING_WIDTH, scene.palette.accent.to_color32());
             let ring_radius = radius + OPEN_RING_GAP;
             scene.painter.circle_stroke(centre, ring_radius, ring);
         }
-        if self.viewport.zoom >= LABEL_ZOOM || scene.hovered == Some(i) {
+        if notes.labels || scene.hovered == Some(i) {
             self.paint_label(scene, i);
         }
     }
@@ -466,15 +522,10 @@ impl GraphView {
         (centre, self.layout.radius(i) * self.viewport.zoom)
     }
 
-    /// A note is a filled accent disc; a ghost is a half-transparent disc with an outline.
-    fn paint_disc(&self, scene: &Scene, i: usize) {
+    /// A ghost is a half-transparent disc with an outline.
+    fn paint_ghost(&self, scene: &Scene, i: usize) {
         let (centre, radius) = self.disc(i);
         let strength = self.emphasis(scene.hovered, i);
-        if self.layout.exists(i) {
-            let fill = scene.palette.accent.to_color32().gamma_multiply(strength);
-            scene.painter.circle_filled(centre, radius, fill);
-            return;
-        }
         let muted = scene.palette.text_secondary.to_color32();
         let outline = Stroke::new(OUTLINE_WIDTH, muted.gamma_multiply(strength));
         let fill = muted.gamma_multiply(GHOST_FILL * strength);
@@ -548,25 +599,56 @@ fn show_hints(ui: &mut Ui, p: &Palette, pane: Rect, [empty, crowded]: [bool; 2])
     if crowded {
         let font = TextStyle::Body.resolve(ui.style());
         let colour = p.text_secondary.to_color32();
+        let wrap = (pane.width() - 2.0 * HINT_PADDING.x).max(0.0);
         let text = ui
             .painter()
-            .layout_no_wrap(CROWDED_HINT.to_owned(), font, colour);
+            .layout(CROWDED_HINT.to_owned(), font, colour, wrap);
         let size = text.size() + 2.0 * HINT_PADDING;
-        let backing = Rect::from_center_size(pane.center_bottom() - vec2(0.0, 16.0), size);
+        let bottom = pane.center_bottom() - vec2(0.0, 16.0);
+        let backing = Align2::CENTER_BOTTOM.anchor_size(bottom, size);
         let fill = p.document.to_color32();
         ui.painter()
             .rect_filled(backing, CornerRadius::same(RADIUS), fill);
-        ui.put(backing, Label::new(hint(CROWDED_HINT)).selectable(false));
+        let text_area = backing.shrink2(HINT_PADDING);
+        ui.put(text_area, Label::new(hint(CROWDED_HINT)).selectable(false));
     }
 }
 
-/// Adds a square as wide as the circle it stands in for, which no one can tell apart from a
-/// circle that small.
-fn push_dot(mesh: &mut Mesh, centre: Pos2, radius: f32, colour: Color32) {
-    mesh.add_colored_rect(
-        Rect::from_center_size(centre, Vec2::splat(2.0 * radius)),
-        colour,
-    );
+/// The two meshes the notes are drawn into, so that 10 000 of them cost two draw calls.
+struct NoteMeshes {
+    /// A textured quad per note, tinted with its colour.
+    discs: Mesh,
+    /// A plain square per note too small for a circle.
+    dots: Mesh,
+    /// Whether every note in view is labelled (see `GraphView::labels_fit`).
+    labels: bool,
+}
+
+/// Adds a square of `side` points, which no one can tell apart from a circle that small. The
+/// caller keeps `side` at one physical pixel or more: a smaller square covers no pixel.
+fn push_dot(mesh: &mut Mesh, centre: Pos2, side: f32, colour: Color32) {
+    mesh.add_colored_rect(Rect::from_center_size(centre, Vec2::splat(side)), colour);
+}
+
+/// Adds the disc texture as a quad around `centre`, tinted with `colour`: four vertices a note.
+fn push_disc(mesh: &mut Mesh, centre: Pos2, radius: f32, colour: Color32) {
+    let quad = Rect::from_center_size(centre, Vec2::splat(2.0 * radius));
+    let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    mesh.add_rect_with_uv(quad, whole, colour);
+}
+
+/// White, with an alpha that is 1 inside the disc filling the square and fades over the last
+/// texel: antialiased once, tinted per note.
+fn disc_image() -> ColorImage {
+    let half = DISC_TEXELS as f32 / 2.0;
+    let alpha = |k: usize| {
+        let x = (k % DISC_TEXELS) as f32 + 0.5;
+        let y = (k / DISC_TEXELS) as f32 + 0.5;
+        let coverage = (half - (x - half).hypot(y - half)).clamp(0.0, 1.0);
+        Color32::from_white_alpha((coverage * 255.0).round() as u8)
+    };
+    let pixels = (0..DISC_TEXELS * DISC_TEXELS).map(alpha).collect();
+    ColorImage::new([DISC_TEXELS; 2], pixels)
 }
 
 fn paint_focus_ring(painter: &Painter, p: &Palette, pane: Rect) {
