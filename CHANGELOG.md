@@ -13,7 +13,7 @@ First release.
 
 ### Added
 
-- Linux release: `scripts/linux-release.sh`, run in `rust:1-bullseye`, builds `neurospace` and `ns` in release, refuses to pack a binary that needs glibc newer than 2.31, and writes `dist/neurospace-0.1.0-linux-x86_64.tar.gz` (about 29 MB) with both binaries, `neurospace.desktop`, `neurospace.png`, the README and the Inter licence. The README gives the `docker run` line and the four `install -D` commands for a per-user install.
+- Linux release: `scripts/linux-release.sh`, run in `rust:1-bullseye`, builds `neurospace` and `ns` in release, refuses to pack a binary that needs glibc newer than 2.31, and writes `dist/neurospace-0.1.0-linux-x86_64.tar.gz` (about 29 MB) with both binaries, `neurospace.desktop`, `neurospace.png`, the README and the Inter licence. The README gives the `docker run` line and the commands for a per-user install.
 - Linux desktop entry `packaging/linux/neurospace.desktop`; its `StartupWMClass` matches the window's app id, and a test pins that.
 - Windows and Linux sync tested both ways in `lan` mode: edits arrived in 0.21 to 0.36 s (Linux to Windows) and 0.46 to 0.51 s (Windows to Linux), and a delete landed in the other vault's trash.
 - The Neurospace logo (`assets/logo/neurospace.svg`) as the window and taskbar icon, the icon of `neurospace.exe` on Windows and the logo of the welcome screen.
@@ -70,3 +70,6 @@ First release.
 - The sync state files (device key, group secret, history) are readable by their owner only on Linux.
 - A crash while a state file is written can leave a temporary file with the group secret or a snapshot: `ns sync leave` removes such leftovers (best effort, never failing the leave) and the engine removes stale ones when it starts.
 - A sync ticket contains the group secret and is a password: whoever holds it can join the group and read and write every note. `ns sync run` never logs a ticket or the secret.
+
+[Unreleased]: https://github.com/arturograntchiappini-bit/neurospace/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/arturograntchiappini-bit/neurospace/releases/tag/v0.1.0
