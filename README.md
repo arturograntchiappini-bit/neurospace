@@ -91,7 +91,7 @@ All images are real captures of the Linux release build running under Xvfb in a 
    | System | Asset | Contents |
    | --- | --- | --- |
    | Windows | `neurospace-0.1.0-windows-x86_64.zip` | `neurospace.exe`, `ns.exe`, `README.md`, `LICENSE`, `Inter-LICENSE.txt` |
-   | Linux | `neurospace-0.1.0-linux-x86_64.tar.gz` | one folder with `neurospace`, `ns`, `neurospace.desktop`, `neurospace.png`, `README.md`, `Inter-LICENSE.txt` |
+   | Linux | `neurospace-0.1.0-linux-x86_64.tar.gz` | one folder with `neurospace`, `ns`, `neurospace.desktop`, `neurospace.png`, `README.md`, `LICENSE`, `Inter-LICENSE.txt` |
 
 2. **Windows:** unzip it, run `neurospace.exe`, and put `ns.exe` somewhere on your `PATH`. **Linux:** unpack it (`tar -xzf`) and run the install commands under [Install and build](#install-and-build).
 3. Run `neurospace` and pick a folder of Markdown notes (or run `neurospace <VAULT_DIR>`). To look around first, open a copy of [`docs/demo-vault`](docs/demo-vault) from a checkout of this repository.
@@ -117,7 +117,7 @@ or in Windows PowerShell:
 docker run --rm -v "${PWD}:/src" -w /src -v ns-release-target:/target -v ns-release-cargo:/usr/local/cargo/registry -e CARGO_TARGET_DIR=/target rust:1-bullseye sh scripts/linux-release.sh
 ```
 
-It writes `dist/neurospace-0.1.0-linux-x86_64.tar.gz` (about 29 MB) holding `neurospace`, `ns`, `neurospace.desktop`, `neurospace.png`, `README.md` and `Inter-LICENSE.txt`. The script refuses to pack a binary that needs a newer glibc than 2.31. To install for your user, with no root, unpack the tarball and run these from inside the unpacked folder:
+It writes `dist/neurospace-0.1.0-linux-x86_64.tar.gz` (about 29 MB) holding `neurospace`, `ns`, `neurospace.desktop`, `neurospace.png`, `README.md`, `LICENSE` and `Inter-LICENSE.txt`. The script refuses to pack a binary that needs a newer glibc than 2.31. To install for your user, with no root, unpack the tarball and run these from inside the unpacked folder:
 
 ```sh
 install -Dm755 neurospace ~/.local/bin/neurospace
@@ -450,4 +450,4 @@ The standards the code follows:
 
 ## Licence
 
-Neurospace is released under the [MIT licence](LICENSE). The Inter font embedded in the app is used under the SIL Open Font License 1.1; its text is in [`crates/ns-app/assets/Inter-LICENSE.txt`](crates/ns-app/assets/Inter-LICENSE.txt) and ships in both release archives.
+Neurospace is released under the [MIT licence](LICENSE). The Inter font embedded in the app is used under the SIL Open Font License 1.1; its text is in [`crates/ns-app/assets/Inter-LICENSE.txt`](crates/ns-app/assets/Inter-LICENSE.txt) and ships in both release archives; the MIT `LICENSE` ships in both release archives as well.

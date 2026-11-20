@@ -13,7 +13,7 @@ First release.
 
 ### Added
 
-- Linux release: `scripts/linux-release.sh`, run in `rust:1-bullseye`, builds `neurospace` and `ns` in release, refuses to pack a binary that needs glibc newer than 2.31, and writes `dist/neurospace-0.1.0-linux-x86_64.tar.gz` (about 29 MB) with both binaries, `neurospace.desktop`, `neurospace.png`, the README and the Inter licence. The README gives the `docker run` line and the commands for a per-user install.
+- Linux release: `scripts/linux-release.sh`, run in `rust:1-bullseye`, builds `neurospace` and `ns` in release, refuses to pack a binary that needs glibc newer than 2.31, and writes `dist/neurospace-0.1.0-linux-x86_64.tar.gz` (about 29 MB) with both binaries, `neurospace.desktop`, `neurospace.png`, the README, the MIT `LICENSE` and the Inter licence. The README gives the `docker run` line and the commands for a per-user install.
 - Linux desktop entry `packaging/linux/neurospace.desktop`; its `StartupWMClass` matches the window's app id, and a test pins that.
 - Windows and Linux sync tested both ways in `lan` mode: edits arrived in 0.21 to 0.36 s (Linux to Windows) and 0.46 to 0.51 s (Windows to Linux), and a delete landed in the other vault's trash.
 - The Neurospace logo (`assets/logo/neurospace.svg`) as the window and taskbar icon, the icon of `neurospace.exe` on Windows and the logo of the welcome screen.

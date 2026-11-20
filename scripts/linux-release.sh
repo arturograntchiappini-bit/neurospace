@@ -32,7 +32,7 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 mkdir "$stage/$name"
 cp "$target_dir/release/neurospace" "$target_dir/release/ns" "$stage/$name/"
-cp packaging/linux/neurospace.desktop README.md "$stage/$name/"
+cp packaging/linux/neurospace.desktop README.md LICENSE "$stage/$name/"
 cp assets/logo/neurospace-256.png "$stage/$name/neurospace.png"
 cp crates/ns-app/assets/Inter-LICENSE.txt "$stage/$name/"
 
