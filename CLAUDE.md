@@ -533,7 +533,7 @@ Ogni prompt di dispatch a un implementer contiene, oltre al template della skill
 
 ## Verità assoluta
 
-Ultimo aggiornamento: 2026-11-20 (chiusura di M3b)
+Ultimo aggiornamento: 2026-11-20 (M4 in chiusura; richiesta di pubblicazione su GitHub)
 
 **Legenda stati.** **[Confermato]** = detto o approvato dall'utente. **[Proposto — applicato su delega]** = deciso dall'orchestratore in base alla delega totale del 2026-11-15, non approvato voce per voce dall'utente: vale finché l'utente non lo cambia. **[Aperto]** = non deciso. Ciò che non è verificato è scritto come «non verificato».
 
@@ -545,6 +545,7 @@ Ultimo aggiornamento: 2026-11-20 (chiusura di M3b)
 - **[Confermato]** (richiesta dell'utente, 2026-11-17, dopo aver visto le schermate dello spike sul vetro, testo integrale): «i saw the preview of spike glass i kinda like it, but i don't like the purple/pink gradient, get rid of it, plus, the glass effect should be refined better». Quindi: niente sfondi colorati a gradiente, solo fondali neutri; il vetro va rifinito.
 - **[Confermato]** (richiesta dell'utente, 2026-11-18, testo integrale): «as logo and icon use assets/logo/second-brain.svg». L'SVG è la sola fonte del logo e dell'icona (spec 9.6, «Logo and icon»); dal cambio di nome si chiama `assets/logo/neurospace.svg`.
 - **[Confermato]** (richiesta dell'utente, 2026-11-18, testo integrale, arrivata durante l'aggiornamento del grafo dopo M3): «change the name of the app/project to "neurospace"». Le voci datate di V.7 e V.8, i piani M1–M3 e i ledger restano con il vecchio nome «Second Brain», perché registrano ciò che è successo.
+- **[Confermato]** (richiesta dell'utente, 2026-11-20, testo integrale, arrivata durante la revisione finale di M4): «and build the whole readme on github, very precise, professional, production ready, tags and everything», poi «and with many visible artifacts». Risposte alle domande dell'orchestratore, stesso giorno: **repository GitHub privato, con push** (main, tag `v0.1.0`, GitHub Release, topic); **licenza MIT**. Questo supera, solo per GitHub e licenza, i ruling «Merge locali» (nessun remote, nessun push) e «nessuna licenza del progetto» della pianificazione di M4.
 
 ### V.2 Fonti
 
@@ -792,4 +793,11 @@ Formato: decisione — perché — costo se sbagliata.
   - Release Linux: tarball con binari, `.desktop`, icona, README e licenza Inter; installazione con i comandi del README, senza script di installazione né pacchetti (`.deb`, AppImage, Flatpak). Costo: installazione a mano.
   - Prima release 0.1.0 (la versione già nel workspace), con tag `v0.1.0` solo locale. Nessuna licenza del progetto aggiunta: è una scelta dell'utente. Costo: il repository resta senza licenza finché l'utente non ne sceglie una.
   - Il logo resta per ultimo, dopo M4, come ha chiesto l'utente.
+- 2026-11-20 — **Rulings della pubblicazione su GitHub** (richiesta dell'utente in V.1; piano `docs/superpowers/plans/2026-11-20-github-release.md`):
+  - Ordine: prima si chiude M4 (ondata finale, validazione, merge, tag `v0.1.0` locale), poi un piano breve «GitHub release»: licenza MIT, README per GitHub con badge, catture dell'app e diagrammi Mermaid, CI, poi creazione del repository privato e push. Costo: la pubblicazione arriva dopo la chiusura di M4.
+  - «Molti artefatti visibili» = catture reali dell'app (benvenuto, editor, anteprima, grafo di un vault dimostrativo a grappoli, finestra del sync, tema chiaro e scuro), diagrammi Mermaid (architettura dei crate, flusso del sync), tabelle e badge. Le catture si fanno nel container Linux sotto Xvfb con `xdotool` dentro il container, così nessuna finestra compare sullo schermo dell'utente; il vetro è quindi quello simulato, non Mica. Costo: le catture non mostrano Mica.
+  - «Tags and everything» = badge (licenza, release, Rust, piattaforme, CI), topic del repository, tag `v0.1.0` e una GitHub Release con il tarball Linux e uno zip dei binari Windows. Costo: nessuno.
+  - CI GitHub Actions (fmt, clippy, test su Ubuntu e Windows) per un badge vero. Costo: minuti di Actions del piano privato dell'utente; si può disattivare.
+  - Creare repository, release e topic richiede l'API di GitHub: `gh` non è installato e serve il login dell'utente (`gh auth login`, interattivo). Git ha già una credenziale per github.com, quindi il push funziona. L'orchestratore non usa la credenziale salvata per chiamare l'API. Costo: un passo dell'utente alla fine.
+  - I commit portano l'identità git locale dell'utente (nome ed email): con il push finiscono nel repository privato dell'utente. Lo si dice all'utente prima del push.
 - 2026-11-15 — **Domanda 7 (chi fa le prove a mano, connettività in M4).** Le prove «a mano» le esegue l'orchestratore con comandi; la GUI non è verificata da una persona e lo si dichiara; la prova Windows↔Linux usa un ticket con indirizzi e porta fissa; `internet` resta la modalità predefinita e il suo stato reale si registra in M2. — Docker è disponibile; mDNS non attraversa la rete di Docker. — Costo: se `internet` non funziona sulle reti dell'utente, il sync tra reti diverse non va finché non si indaga.
